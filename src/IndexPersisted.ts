@@ -1,5 +1,6 @@
-import { spawn, currentContext, VArray } from 'alkali'
-import { Persistable, RefreshEvent, toBufferKey, fromBufferKey } from './Persisted'
+import { spawn, currentContext, VArray, ReplacedEvent } from 'alkali'
+import { Persistable } from './Persisted'
+import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
 
@@ -274,7 +275,7 @@ export const Index = ({ Source }) => {
       let waitingPromises = new Set([this.whenFullyReadable])
       while ((indexedEntry = updatedIndexEntriesArray.pop())) {
         try {
-          let event = new RefreshEvent()
+          let event = new ReplacedEvent()
           event.sources = indexedEntry[1]
           this.for(indexedEntry[0]).updated(event)
           if (event && event.updatesInProgress) {

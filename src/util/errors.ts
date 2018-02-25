@@ -1,4 +1,4 @@
-class ExtendableError extends Error {
+export class ExtendableError extends Error {
   constructor(message) {
     super(message)
     this.stack = (new Error()).stack
@@ -6,14 +6,11 @@ class ExtendableError extends Error {
   }
 }
 
-class AccessError extends ExtendableError {
+export class AccessError extends ExtendableError {
   get status() {
     return 403
   }
   get isExternal() {
     return true
   }
-}
-export {
-  AccessError
 }

@@ -53,7 +53,7 @@ export function open(name) {
               resolve(null)
             } else {
               if (err.message.indexOf('Corruption') == 0) {
-                alterDatabase('repair', db)
+                alterDatabase('repair')
               }
               console.error('error', err, db.location)
               if (err.message.indexOf('not open') > 0) {
@@ -77,7 +77,7 @@ export function open(name) {
         db.put(id, value, (err, value) => {
           if (err) {
             if (err.message.indexOf('Corruption') == 0) {
-              alterDatabase('repair', db)
+              alterDatabase('repair')
             }
             reject(err)
           } else {
@@ -94,7 +94,7 @@ export function open(name) {
               resolve(null)
             } else {
               if (err.message.indexOf('Corruption') == 0) {
-                alterDatabase('repair', db)
+                alterDatabase('repair')
               }
               reject(err)
             }
@@ -216,7 +216,7 @@ export function open(name) {
         db.batch(operations, (err, value) => {
           if (err) {
             if (err.message.indexOf('Corruption') == 0) {
-              alterDatabase('repair', db)
+              alterDatabase('repair')
             }
             reject(err)
           } else {

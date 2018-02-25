@@ -1,5 +1,8 @@
 import when from './when'
 const SKIP = {}
+interface SymbolConstructor {
+  asyncIterator: Symbol
+}
 if (!Symbol.asyncIterator) {
   Symbol.asyncIterator = Symbol.for('Symbol.asyncIterator')
 }

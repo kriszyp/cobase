@@ -1,3 +1,4 @@
-export { Persisted, Cached, secureAccess, toBufferKey, fromBufferKey } from './Persisted'
+export { Persisted, Cached, secureAccess } from './Persisted'
 export { Index } from './IndexPersisted'
-export { open, close } from './storage/level'
+export { open } from './storage/level'
+export { AccessError } from './util/errors'

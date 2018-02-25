@@ -16,6 +16,7 @@
   "dependencies": {
     "alkali": "0.19.13",
     "fs-extra": "^5.0.0",
+    "ordered-binary": "0.0.1",
     "leveldown": "github:kriszyp/leveldown#v1.8.1-sync"
   },
   "optionalDependencies": {
