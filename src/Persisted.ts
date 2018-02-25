@@ -1,12 +1,12 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion } from 'alkali'
-import * as level from '../util/level'
-import when from '../util/when'
-import WeakValueMap from '../util/WeakValueMap'
-import ExpirationStrategy from '../util/ExpirationStrategy'
+import * as level from './storage/level'
+import when from './util/when'
+import WeakValueMap from './util/WeakValueMap'
+import ExpirationStrategy from './ExpirationStrategy'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
-import Index from './Index'
-import { AccessError } from '../util/errors'
+import Index from './IndexPersisted'
+import { AccessError } from './util/errors'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const EMPTY_CACHE_ENTRY = {}

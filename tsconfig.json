@@ -1,0 +1,22 @@
+{
+    "compileOnSave": true,
+    "compilerOptions": {
+        "target": "ES2017",
+        "module": "commonjs",
+        "declaration": true,
+        "moduleResolution": "node",
+        "stripInternal": true,
+        "lib": ["ES2017", "ScriptHost"],
+        "outDir": "dist"
+    },
+    "files": [
+        "./node_modules/@types/node/index.d.ts"
+    ],
+    "include": [
+        "src/**/*"
+    ],
+    "exclude": [
+        "node_modules",
+        "dist"
+    ]
+}

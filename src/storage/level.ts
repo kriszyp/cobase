@@ -1,6 +1,6 @@
 import * as fs from 'fs-extra'
 import * as leveldown from 'leveldown'
-import ArrayLikeIterable from './ArrayLikeIterable'
+import ArrayLikeIterable from '../util/ArrayLikeIterable'
 
 const STARTING_ARRAY = [null]
 const AS_STRING = {

@@ -1,0 +1,31 @@
+{
+  "name": "alkali-base",
+  "author": "Kris Zyp",
+  "version": "0.0.1",
+  "description": "Reactive database from composable JavaScript Transform-Index-Reduce-Join functions, built on Alkali & LevelDB",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "http://github.com/kriszyp/alkali-base"
+  },
+  "scripts": {
+    "test": "./node_modules/.bin/mocha tests/unit -u tdd"
+  },
+  "main": "./dist/index.js",
+  "typings": "./index.d.ts",
+  "dependencies": {
+    "alkali": "0.19.13",
+    "fs-extra": "^5.0.0",
+    "leveldown": "github:kriszyp/leveldown#v1.8.1-sync"
+  },
+  "optionalDependencies": {
+    "weakvaluemap": "^0.2.3"
+  },
+  "devDependencies": {
+    "mocha": "^4",
+    "chai": "^4",
+    "typescript": "^2.7.2",
+    "webpack": "^3.10.0",
+    "@types/node": "latest"
+  }
+}
