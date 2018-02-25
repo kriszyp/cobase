@@ -1,4 +1,4 @@
-<img src="./assets/alkali-logo.svg?sanitize=true" alt="Alkali" style="width:100px;">
+<img src="./assets/alkali-logo.svg?sanitize=true" alt="Alkali" width="100" />
 <a href="https://dev.doctorevidence.com/"><img src="./assets/powers-dre.png" width="203" /></a>
 
 Alkali-Base is composable layered system of JavaScript defined data transformations and aggregations for building fast, efficient JavaScript-mapped relational data storage, using Alkali's reactive API for entities. Alkali-DB uses for basic data processing constructs to build scalable relational <data></data>a structured that can be accessed quickly:
