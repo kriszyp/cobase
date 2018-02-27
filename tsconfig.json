@@ -6,7 +6,7 @@
         "declaration": true,
         "moduleResolution": "node",
         "stripInternal": true,
-        "lib": ["ES2017", "ScriptHost"],
+        "lib": ["ES2017", "ScriptHost", "DOM"],
         "outDir": "dist"
     },
     "files": [

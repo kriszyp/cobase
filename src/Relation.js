@@ -1,4 +1,4 @@
-export const Join = ({ From, To, joinOn, joinName }) => {
+export const Relation = ({ From, To, joinOn, joinName }) => {
 	class Joined extends Index({ Source: From }) {
 		static indexBy(from) {
 			return joinOn(from)
