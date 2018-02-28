@@ -14,10 +14,14 @@ const EMPTY_CACHE_ENTRY = {}
 const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // SOH, code 1
 const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // SOH, code 2
+const INITIALIZATION_SOURCE = { isInitializing: true }
 
 global.cache = expirationStrategy // help with debugging
 
 class InstanceIds extends Transform.as(VArray) {
+	Class: any
+	cachedValue: any
+	cachedVersion: any
 	transform() {
 		return when(this.Class.resetProcess, () => this.Class.getInstanceIds())
 	}
@@ -204,7 +208,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this.hasOwnProperty('_ready') ? this._ready :
 			(this._ready = new Promise((resolve, reject) => {
 				this.onReady = () => {
-					console.log(this.name, 'ready')
 					resolve()
 				}
 				this.onDbFailure = reject
@@ -249,21 +252,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (state && (state.dbVersion || state.transformHash) == this.dbVersion) {
 			this.startVersion = this.version = state.startVersion
 		} else {
-			//console.log('transform/database version mismatch, reseting db table', this.name, state && state.dbVersion, this.dbVersion)
+			console.log('transform/database version mismatch, reseting db table', this.name, state && state.dbVersion, this.dbVersion)
 			this.startVersion = this.version = Date.now()
 			const clearDb = !!state // if there was previous state, clear out all entries
-			this.didReset = when(this.resetAll(), () => this.updateDBVersion())
-		}
-		let receivedPendingVersion = []
-		for (let Source of this.Sources || []) {
-			receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(this.lastVersion).then(ids => {
-				for (let { id } of ids) {
-					this.for(id).updated()
-				}
-			}))
+			this.didReset = when(this.resetAll(clearDb), () => this.updateDBVersion())
 		}
 		this.instancesById // trigger this initialization
-		when(this.didReset, this.onReady, this.onDbFailure)
+		return when(this.didReset, this.onReady, this.onDbFailure)
 	}
 
 	static findUntrackedInstances() {
@@ -469,12 +464,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
 		return this.ready.then(() => {
-			console.log('Scanning for updates from', sinceVersion, this.lastVersion, this.name)
 			let db = this.getDb()
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			if (this.lastVersion <= sinceVersion) {
 				return []
 			}
+			console.log('Scanning for updates from', sinceVersion, this.lastVersion, this.name)
 			return db.iterable({
 				gt: Buffer.from([2])
 			}).map(({ key, value }) => {
@@ -712,6 +707,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	valueProperty: 'value',
 	versionProperty: 'version'
 }) {
+	db: any
 	static getDb() {
 		return this.db || (this.db = Persisted.DB.open('portaldb/' + this.name))
 	}
@@ -751,7 +747,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	versionProperty: 'cachedVersion'
 }) {
 	allowDirectJSON: boolean
-	Sources: any[]
+	static Sources: any[]
+	static fetchAllIds: () => {}[]
 	is(value) {
 		// we skip loadLocalData and pretend it wasn't in the cache... not clear if
 		// that is how we want is() to behave or not
@@ -843,6 +840,23 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			return this.Sources[0].getInstanceIds(range)
 		}
 		return super.getInstanceIds(range)
+	}
+
+	static register(sourceCode) {
+		const registered = super.register(sourceCode)
+		when(registered, () => {
+			let receivedPendingVersion = []
+			for (let Source of this.Sources || []) {
+				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(this.lastVersion).then(ids => {
+					for (let { id } of ids) {
+						let event = new ReplacedEvent()
+						event.source = INITIALIZATION_SOURCE
+						this.for(id).updated(event)
+					}
+				}))
+			}
+		})
+		return registered
 	}
 
 	get whenProcessingComplete() {

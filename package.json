@@ -23,10 +23,9 @@
     "weakvaluemap": "^0.2.3"
   },
   "devDependencies": {
-    "mocha": "^4",
+    "mocha": "^5",
     "chai": "^4",
     "typescript": "^2.7.2",
-    "webpack": "^3.10.0",
     "@types/node": "latest"
   }
 }

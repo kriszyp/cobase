@@ -29,9 +29,10 @@ try {
 	}
 	exports.default = WeakValueMap
 } catch (error) {
-	console.warn('No weak value map available, this can cause memory leaks', error.toString())
+	console.warn('No weak value map available, this can be used for development, but weak value maps should be enabled for production use', error.toString())
 	exports.default = Map
 	Map.getStatus = function() {
 		return 'WeakValueMap failed to load'
 	}
 }
+exports.WeakValueMap = exports.default

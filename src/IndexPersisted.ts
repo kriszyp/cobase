@@ -11,11 +11,13 @@ const SEPARATOR_NEXT_BYTE = Buffer.from([31])
 const LAST_INDEXED_VERSION_KEY = Buffer.from([1, 2])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 150
+const INITIALIZATION_SOURCE = { isInitializing: true }
 
-interface IndexRequest {
+export interface IndexRequest {
 	previousState?: any
 	deleted?: boolean
 	sources?: Set<any>
+  version: number
 }
 export const Index = ({ Source }) => {
 	Source.updateWithPrevious = true
@@ -73,7 +75,7 @@ export const Index = ({ Source }) => {
 							// try again
 							data = yield entity.valueOf(INDEXING_MODE)
 						} catch(error) {
-							console.warn('Error retrieving value needing to be indexed', error.toString())
+							console.warn('Error retrieving value needing to be indexed', error.toString(), 'for', this.name)
 						}
 					}
 					// let the indexBy define how we get the set of values to index
@@ -122,13 +124,9 @@ export const Index = ({ Source }) => {
 			// restart from scratch
 			console.info('rebuilding index', this.name, 'Source version', Source.startVersion, 'index version')
 			// first cancel any existing indexing
-			this.cancelIndexing = true
-			yield this.buildIndexCompletion
-			this.cancelIndexing = false
 			yield this.getDb().clear()
 			this.getDb().putSync(LAST_INDEXED_VERSION_KEY, 0) // indicates indexing has started
 			this.updateDBVersion()
-			return this.buildIndexCompletion = spawn(this.resumeIndex())
 		}
 
 		static queue = new Map<any, IndexRequest>()
@@ -174,7 +172,12 @@ export const Index = ({ Source }) => {
 					}
 					yield Promise.all(indexingInProgress)
 					yield this.commitOperations()
-					yield this.commitOperations() // do it a second time so the progress update can be recorded
+					yield this.whenIndexedProgress
+          console.log('Finished indexing at version', this.queuedIndexedProgress)
+          if (this.queuedIndexedProgress) { // store the last queued indexed progres
+            this.getDb().put(LAST_INDEXED_VERSION_KEY, this.queuedIndexedProgress)
+            this.queuedIndexedProgress = null
+          }
 				} while (queue.size > 0)
 				if (initialQueueSize > 0) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
@@ -208,77 +211,49 @@ export const Index = ({ Source }) => {
 				if (!version)
 					console.log('resuming without version',this.name, id)
 				this.queue.set(id, {
-					version
+					version,
+          sources: new Set([INITIALIZATION_SOURCE])
 				})
 			}
 			yield this.requestProcessing(10)
-		}
-
-		static *buildIndex(rebuild) {
-			// build index, either from scratch, or resuming from last point
-			let db = this.getDb()
-			let lastIndexedId
-			if (rebuild)
-				lastIndexedId = null
-			else {
-				lastIndexedId = db.getSync(INDEX_BUILD_STATE)
-				if (typeof lastIndexedId == 'string') {
-					lastIndexedId = +lastIndexedId
-				}
-				if (!lastIndexedId && lastIndexedId != 0) {
-					return // done, up-to-date
-				}
-			}
-			this.gettingAllIds = true
-			let entityIdsToIndex = yield Source.instanceIds
-			this.gettingAllIds = false
-			console.info('Building index', this.name, 'indexing', entityIdsToIndex.length, Source.name, 'starting from', lastIndexedId)
-			for (let id of entityIdsToIndex) {
-				if (lastIndexedId) {
-					if (lastIndexedId == id) {
-						lastIndexedId = null
-					} else {
-						continue // resuming to where we left off
-					}
-				}
-				this.queue.set(id, {})
-			}
-			yield this.requestProcessing(10)
-			db.remove(INDEX_BUILD_STATE) // mark the indexing as all done
-			console.info('Finished building index', this.name)
-			this.buildIndexCompletion = null
 		}
 
 		static delay(ms) {
 			return new Promise(resolve => setTimeout(resolve, ms))
 		}
 		static commitOperations() {
+      let indexedProgress = lastIndexedVersion
+      let nextIndexRequest = this.queue[0]
+      if (nextIndexRequest) {
+        // if there is an index request in the queue with an earlier version, make our last version right before that.
+        indexedProgress = Math.min(nextIndexRequest.version - 1, lastIndexedVersion)
+      }
 			if (operations.length == 0) {
+        this.queuedIndexedProgress = indexedProgress
 				return
 			}
 			let operationsToCommit = operations
 			operations = []
-			let indexedProgress = lastIndexedVersion
-			let nextIndexRequest = this.queue[0]
-			if (nextIndexRequest) {
-				// if there is an index request in the queue with an earlier version, make our last version right before that.
-				indexedProgress = Math.min(nextIndexRequest.version - 1, lastIndexedVersion)
+			if (this.queuedIndexedProgress) {
+        // if a queued index progress is ready, add it to the operations to batch commit
+				operationsToCommit.push({
+					type: 'put',
+					key: LAST_INDEXED_VERSION_KEY,
+					value: this.queuedIndexedProgress
+				})
+				this.queuedIndexedProgress = null
 			}
-			console.log('commit operations', this.name, 'at', indexedProgress)
+
 			//if (operationsToCommit.length > 200 || operationsToCommit.byteCount > 100000) {
 			// large number, commit asynchronously
-			const sourceWriteCompletion = Source.writeCompletion
+			// The order here is important, we first write the indexed data, then send updates,
+			// then record our progress once the updates have been written
 			return this.getDb().batch(operationsToCommit).then(() => {
-        // once the operations are recorded, we can send out updates
-				this.sendUpdates()
-				return when(sourceWriteCompletion, () => {
-          console.log('queue saving of idnex progress', this.name, indexedProgress)
-					// we can now safely queue/record our progress/updated
-					operations.push({
-						type: 'put',
-						key: LAST_INDEXED_VERSION_KEY,
-						value: indexedProgress
-					})
+				// once the operations are recorded, we can send out updates
+				// we are *not* waiting for it to complete before continuing with indexing though
+				// but are waiting for it to complete before writing progress
+				this.whenIndexedProgress = this.sendUpdates().then(() => {
+					return this.queuedIndexedProgress = indexedProgress
 				})
 			})
 		}
@@ -286,23 +261,28 @@ export const Index = ({ Source }) => {
 			let updatedIndexEntriesArray = Array.from(updatedIndexEntries).reverse()
 			updatedIndexEntries = new Map()
 			let indexedEntry
-			let waitingPromises = new Set([this.whenFullyReadable])
+			let whenReadable = new Set([this.whenFullyReadable])
+			let whenWritten = new Set()
 			while ((indexedEntry = updatedIndexEntriesArray.pop())) {
 				try {
 					let event = new ReplacedEvent()
 					event.sources = indexedEntry[1]
 					this.for(indexedEntry[0]).updated(event)
-					if (event && event.updatesInProgress) {
+					if (event.updatesInProgress) {
 						// promise to wait on, wait and continue
 						for (let updateInProgress of event.updatesInProgress) {
-							waitingPromises.add(updateInProgress)
+							whenReadable.add(updateInProgress)
 						}
+					}
+					if (event.whenWritten) {
+						whenWritten.add(event.whenWritten)
 					}
 				} catch (error) {
 					console.error('Error sending index updates', error)
 				}
 			}
-			return this.whenFullyReadable = Promise.all(Array.from(waitingPromises))
+			this.whenFullyReadable = Promise.all(whenReadable)
+			return Promise.all(whenWritten)
 		}
 
 		transform() {
@@ -402,11 +382,9 @@ export const Index = ({ Source }) => {
 
 		static register(module) {
 			this.Sources = [Source]
-			super.register(module)
-			allIndices.push(this)
-			setTimeout(() => {
-				spawn(this.resumeIndex())
-			})
+      allIndices.push(this)
+			return when(super.register(module), () =>
+				spawn(this.resumeIndex()))
 		}
 		static updated(event, by) {
 			// we don't propagate immediately through the index, as the indexing must take place
