@@ -11,7 +11,7 @@ From these constructs we build join data structures that can aggregate and index
 ## Getting Started
 First, install:
 ```
-npm install alkali-base
+npm install cobase
 ```
 And then we can begin creating basic persisted data structures. A basic table or data store can be constructed by simply creating a class that extends `Persisted` and calling `register` on it:
 ```
@@ -22,7 +22,7 @@ Project.register()
 ```
 And then we can begin adding data to it.
 ```
-let newProject = Project.add({ name: 'Learn alkali-base' })
+let newProject = Project.add({ name: 'Learn cobase' })
 ```
 
 The most common API for interacting with your persisted class instances, is to to get an instance for a given id/key, and then we can change it, or retrieve its value:

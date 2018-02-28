@@ -1,12 +1,12 @@
 {
-  "name": "alkali-base",
+  "name": "cobase",
   "author": "Kris Zyp",
   "version": "0.0.1",
-  "description": "Reactive database from composable JavaScript Transform-Index-Reduce-Join functions, built on Alkali & LevelDB",
+  "description": "Compositional data store of reactive JavaScript Transform-Index-Reduce-Join functions, built on Alkali & LevelDB",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "http://github.com/kriszyp/alkali-base"
+    "url": "http://github.com/kriszyp/cobase"
   },
   "scripts": {
     "test": "./node_modules/.bin/mocha tests/unit -u tdd"
