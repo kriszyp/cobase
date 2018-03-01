@@ -255,7 +255,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.log('transform/database version mismatch, reseting db table', this.name, state && state.dbVersion, this.dbVersion)
 			this.startVersion = this.version = Date.now()
 			const clearDb = !!state // if there was previous state, clear out all entries
-			this.didReset = when(this.resetAll(clearDb), () => this.updateDBVersion())
+			this.didReset = when(this.resetAll(clearDb), () => when(this.writeCompletion, () => this.updateDBVersion()))
 		}
 		this.instancesById // trigger this initialization
 		return when(this.didReset, this.onReady, this.onDbFailure)
@@ -332,9 +332,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 		if (event && event.type == 'reset' && !this.resetProcess) {
-			this.resetProcess = when(this.resetAll(event.clearDb), () => {
-				this.resetProcess = null
-			})
+			throw new Error('Deprecated')
 		}
 		for (let listener of this.listeners || []) {
 			listener.updated(event, by)
@@ -347,8 +345,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.getDb().put(DB_VERSION_KEY, JSON.stringify({
 			startVersion: version,
 			dbVersion: this.dbVersion
-		}))
-		console.log('updated db version', this.name, version, this.dbVersion)
+		})).then(() => {
+			console.log('updated db version', this.name, version, this.dbVersion, this.getDb().getSync(DB_VERSION_KEY))
+		})
 		return version
 	}
 
@@ -469,7 +468,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (this.lastVersion <= sinceVersion) {
 				return []
 			}
-			console.log('Scanning for updates from', sinceVersion, this.lastVersion, this.name)
+//			console.log('Scanning for updates from', sinceVersion, this.lastVersion, this.name)
 			return db.iterable({
 				gt: Buffer.from([2])
 			}).map(({ key, value }) => {
@@ -848,11 +847,17 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let receivedPendingVersion = []
 			for (let Source of this.Sources || []) {
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(this.lastVersion).then(ids => {
-					for (let { id } of ids) {
+					console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
+					let min = Infinity
+					let max = 0
+					for (let { id, version } of ids) {
+						min = Math.min(version, min)
+						max = Math.max(version, max)
 						let event = new ReplacedEvent()
 						event.source = INITIALIZATION_SOURCE
 						this.for(id).updated(event)
 					}
+					console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
 			}
 		})

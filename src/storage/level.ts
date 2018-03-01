@@ -235,9 +235,6 @@ export function open(name) {
 				}))
 		},
 		clear() {
-			console.log('clearing database', db.location)
-			db.closeSync()
-			console.log('closed database, removing files')
 			db.closeSync()
 			fs.removeSync(db.location)
 			db.openSync()

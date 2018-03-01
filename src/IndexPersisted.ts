@@ -17,7 +17,7 @@ export interface IndexRequest {
 	previousState?: any
 	deleted?: boolean
 	sources?: Set<any>
-  version: number
+	version: number
 }
 export const Index = ({ Source }) => {
 	Source.updateWithPrevious = true
@@ -112,7 +112,7 @@ export const Index = ({ Source }) => {
 					addUpdatedIndexEntry(key, sources)
 				}
 				if (indexRequest.version)
-					lastIndexedVersion = indexRequest.version
+					lastIndexedVersion = Math.max(indexRequest.version, lastIndexedVersion)
 				else
 					console.warn('index request missing version', this.name, id)
 			} catch(error) {
@@ -121,12 +121,12 @@ export const Index = ({ Source }) => {
 		}
 
 		static *rebuildIndex() {
+			this.rebuilt = true
 			// restart from scratch
 			console.info('rebuilding index', this.name, 'Source version', Source.startVersion, 'index version')
 			// first cancel any existing indexing
 			yield this.getDb().clear()
 			this.getDb().putSync(LAST_INDEXED_VERSION_KEY, 0) // indicates indexing has started
-			this.updateDBVersion()
 		}
 
 		static queue = new Map<any, IndexRequest>()
@@ -173,11 +173,11 @@ export const Index = ({ Source }) => {
 					yield Promise.all(indexingInProgress)
 					yield this.commitOperations()
 					yield this.whenIndexedProgress
-          console.log('Finished indexing at version', this.queuedIndexedProgress)
-          if (this.queuedIndexedProgress) { // store the last queued indexed progres
-            this.getDb().put(LAST_INDEXED_VERSION_KEY, this.queuedIndexedProgress)
-            this.queuedIndexedProgress = null
-          }
+					console.log('Finished indexing progress:', this.name, this.queuedIndexedProgress)
+					if (this.queuedIndexedProgress) { // store the last queued indexed progres
+						this.getDb().put(LAST_INDEXED_VERSION_KEY, this.queuedIndexedProgress)
+						this.queuedIndexedProgress = null
+					}
 				} while (queue.size > 0)
 				if (initialQueueSize > 0) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
@@ -192,11 +192,19 @@ export const Index = ({ Source }) => {
 			// TODO: if it is over half the index, just rebuild
 			lastIndexedVersion = +this.getDb().getSync(LAST_INDEXED_VERSION_KEY) || 0
 			const idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
+			let min = Infinity
+			let max = 0
+			for (let { id, version } of idsAndVersionsToReindex) {
+				min = Math.min(version, min)
+				max = Math.max(version, max)
+			}
+			//console.log('getInstanceIdsAndVersionsSince for index', this.name, idsAndVersionsToReindex.length, min, max)
 			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
+
 			const db = this.getDb()
 			if (lastIndexedVersion == 0) {
-				yield db.clear()
-				yield this.getDb().put(LAST_INDEXED_VERSION_KEY, (lastIndexedVersion = Date.now()).toString())
+				yield this.getDb().clear()
+				this.updateDBVersion()
 			} else {
 				yield db.iterable({
 					gt: Buffer.from([2])
@@ -212,7 +220,7 @@ export const Index = ({ Source }) => {
 					console.log('resuming without version',this.name, id)
 				this.queue.set(id, {
 					version,
-          sources: new Set([INITIALIZATION_SOURCE])
+					sources: new Set([INITIALIZATION_SOURCE])
 				})
 			}
 			yield this.requestProcessing(10)
@@ -222,20 +230,20 @@ export const Index = ({ Source }) => {
 			return new Promise(resolve => setTimeout(resolve, ms))
 		}
 		static commitOperations() {
-      let indexedProgress = lastIndexedVersion
-      let nextIndexRequest = this.queue[0]
-      if (nextIndexRequest) {
-        // if there is an index request in the queue with an earlier version, make our last version right before that.
-        indexedProgress = Math.min(nextIndexRequest.version - 1, lastIndexedVersion)
-      }
+			let indexedProgress = lastIndexedVersion
+			let nextIndexRequest = this.queue[0]
+			if (nextIndexRequest) {
+				// if there is an index request in the queue with an earlier version, make our last version right before that.
+				indexedProgress = Math.min(nextIndexRequest.version - 1, lastIndexedVersion)
+			}
 			if (operations.length == 0) {
-        this.queuedIndexedProgress = indexedProgress
+				this.queuedIndexedProgress = indexedProgress
 				return
 			}
 			let operationsToCommit = operations
 			operations = []
 			if (this.queuedIndexedProgress) {
-        // if a queued index progress is ready, add it to the operations to batch commit
+				// if a queued index progress is ready, add it to the operations to batch commit
 				operationsToCommit.push({
 					type: 'put',
 					key: LAST_INDEXED_VERSION_KEY,
@@ -313,6 +321,7 @@ export const Index = ({ Source }) => {
 		}
 		static resetAll() {
 			// rebuild index
+			console.log('Index', this.name, 'resetAll')
 			return Promise.resolve(spawn(this.rebuildIndex()))
 		}
 
@@ -382,7 +391,7 @@ export const Index = ({ Source }) => {
 
 		static register(module) {
 			this.Sources = [Source]
-      allIndices.push(this)
+				allIndices.push(this)
 			return when(super.register(module), () =>
 				spawn(this.resumeIndex()))
 		}
