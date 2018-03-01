@@ -468,7 +468,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (this.lastVersion <= sinceVersion) {
 				return []
 			}
-//			console.log('Scanning for updates from', sinceVersion, this.lastVersion, this.name)
+			console.log('Scanning for updates from', sinceVersion, this.lastVersion, this.name)
 			return db.iterable({
 				gt: Buffer.from([2])
 			}).map(({ key, value }) => {
@@ -868,7 +868,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return this.Sources && Promise.all(this.Sources.map(Source => Source.whenProcessingComplete))
 	}
 }
-type permission = (source: any, session: object) => boolean
 
 type PermissionCheck = (source: any, session: any, action: string, args: Array<any>) => boolean | string
 
