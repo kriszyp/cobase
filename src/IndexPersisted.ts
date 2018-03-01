@@ -173,7 +173,7 @@ export const Index = ({ Source }) => {
 					yield Promise.all(indexingInProgress)
 					yield this.commitOperations()
 					yield this.whenIndexedProgress
-					console.log('Finished indexing progress:', this.name, this.queuedIndexedProgress)
+//					console.log('Finished indexing progress:', this.name, this.queuedIndexedProgress)
 					if (this.queuedIndexedProgress) { // store the last queued indexed progres
 						this.getDb().put(LAST_INDEXED_VERSION_KEY, this.queuedIndexedProgress)
 						this.queuedIndexedProgress = null

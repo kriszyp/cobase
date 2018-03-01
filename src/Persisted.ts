@@ -847,7 +847,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let receivedPendingVersion = []
 			for (let Source of this.Sources || []) {
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(this.lastVersion).then(ids => {
-					console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
+//					console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
 					for (let { id, version } of ids) {
@@ -857,7 +857,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						event.source = INITIALIZATION_SOURCE
 						this.for(id).updated(event)
 					}
-					console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
+//					console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
 			}
 		})
