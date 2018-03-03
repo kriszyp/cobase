@@ -1,6 +1,6 @@
 import { Readable } from 'stream'
 import { Context } from 'alkali'
-import when from './util/when'
+import when from '../util/when'
 const BUFFER_SIZE = 10000
 const COMMA = Buffer.from(',')
 const OPEN_CURLY = Buffer.from('{')
@@ -18,7 +18,7 @@ export class JSONStream extends Readable {
 	constructor(options) {
 		// Calls the stream.Readable(options) constructor
 		super(options)
-		this.context = new Context(options.user)
+		this.context = new Context(options.session)
 		this.context.addInput = () => {} // make sure we don't store references that leak memory
 		this.context.preferJSON = true
 		this.buffer = []
@@ -200,4 +200,15 @@ export class JSONStream extends Readable {
 function handleError(error) {
 	console.error(error)
 	return JSON.stringify(error.toString())
+}
+
+export const jsonMediaType = {
+	parse: JSON.parse,
+	serialize(data, connection) {
+		connection.response.headers['Transfer-Encoding'] = 'chunked'
+		return new JSONStream({
+			value: data,
+			session: connection.session
+		})
+	}
 }

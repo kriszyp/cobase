@@ -198,14 +198,14 @@ export const Index = ({ Source }) => {
 				min = Math.min(version, min)
 				max = Math.max(version, max)
 			}
-//			console.log('getInstanceIdsAndVersionsSince for index', this.name, idsAndVersionsToReindex.length, min, max)
+			//console.log('getInstanceIdsAndVersionsSince for index', this.name, idsAndVersionsToReindex.length, min, max)
 			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 
 			const db = this.getDb()
 			if (lastIndexedVersion == 0) {
 				yield this.getDb().clear()
 				this.updateDBVersion()
-			} else {
+			} else if (idsAndVersionsToReindex.length > 0) {
 				yield db.iterable({
 					gt: Buffer.from([2])
 				}).map(({ key, value }) => {

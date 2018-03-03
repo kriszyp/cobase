@@ -465,7 +465,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this.ready.then(() => {
 			let db = this.getDb()
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
-			if (this.lastVersion <= sinceVersion) {
+			if (this.lastVersion && this.lastVersion <= sinceVersion) {
 				return []
 			}
 			console.log('Scanning for updates from', sinceVersion, this.lastVersion, this.name)
@@ -847,7 +847,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let receivedPendingVersion = []
 			for (let Source of this.Sources || []) {
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(this.lastVersion).then(ids => {
-//					console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
+					//console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
 					for (let { id, version } of ids) {
@@ -857,7 +857,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						event.source = INITIALIZATION_SOURCE
 						this.for(id).updated(event)
 					}
-//					console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
+					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
 			}
 		})
