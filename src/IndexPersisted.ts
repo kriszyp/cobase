@@ -18,37 +18,56 @@ export interface IndexRequest {
 	deleted?: boolean
 	sources?: Set<any>
 	version: number
+	triggers?: Set<any>
+}
+interface IndexEntryUpdate {
+	sources: Set<any>
+	triggers?: Set<any>
 }
 export const Index = ({ Source }) => {
 	Source.updateWithPrevious = true
 	let operations = []
 	let lastIndexedVersion = 0
-	let updatedIndexEntries = new Map<any, Set<any>>()
-	function addUpdatedIndexEntry(key, sources) {
+	let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
+	function addUpdatedIndexEntry(key, sources, triggers) {
 		let entry = updatedIndexEntries.get(key)
 		if (!entry) {
-			updatedIndexEntries.set(key, entry = new Set())
+			updatedIndexEntries.set(key, entry = {
+				sources: new Set(),
+				triggers: new Set(),
+			})
 		}
 		if (sources)
 			for (let source of sources)
-				entry.add(source)
+				entry.sources.add(source)
+		if (triggers)
+			for (let trigger of triggers)
+				entry.triggers.add(trigger)
 	}
 
 	return class extends Persistable.as(VArray) {
 		version: number
-		whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index
-		whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
-		whenFullyReadable: Promise<any> // promise for when the results of the current indexing task are fully readable (all downstream indices have updated based on the updates in this index)
+		static whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index
+		static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
+		static get whenFullyReadable(): Promise<any> {
+			return this._whenFullyReadable
+		} // promise for when the results of the current indexing task are fully readable (all downstream indices have updated based on the updates in this index)
+		static set whenFullyReadable(whenReadable) {
+			this._whenFullyReadable = whenReadable
+		}
 		static indexingProcess: Promise<any>
 
 		static *indexEntry(id, indexRequest: IndexRequest) {
-			let { previousState, deleted, sources } = indexRequest
+			let { previousState, deleted, sources, triggers } = indexRequest
 			try {
 				let toRemove = new Map()
 				// TODO: handle delta, for optimized index updaes
 				// this is for recording changed entities and removing the values that previously had been indexed
 				let previousEntries
 				let entity = Source.for(id)
+				if (previousState && previousState.then) {
+					previousState = yield previousState
+				}
 				if (previousState !== undefined) { // if no data, then presumably no references to clear
 					// use the same mapping function to determine values to remove
 					previousEntries = yield this.indexBy(previousState)
@@ -100,7 +119,7 @@ export const Index = ({ Source }) => {
 								value
 							})
 							operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
-							addUpdatedIndexEntry(key, sources)
+							addUpdatedIndexEntry(key, sources, triggers)
 						}
 					}
 				}
@@ -109,7 +128,7 @@ export const Index = ({ Source }) => {
 						type: 'del',
 						key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
 					})
-					addUpdatedIndexEntry(key, sources)
+					addUpdatedIndexEntry(key, sources, triggers)
 				}
 				if (indexRequest.version)
 					lastIndexedVersion = Math.max(indexRequest.version, lastIndexedVersion)
@@ -274,7 +293,9 @@ export const Index = ({ Source }) => {
 			while ((indexedEntry = updatedIndexEntriesArray.pop())) {
 				try {
 					let event = new ReplacedEvent()
-					event.sources = indexedEntry[1]
+					let indexEntryUpdate: IndexEntryUpdate = indexedEntry[1]
+					event.sources = indexEntryUpdate.sources
+					event.triggers = indexEntryUpdate.triggers
 					this.for(indexedEntry[0]).updated(event)
 					if (event.updatesInProgress) {
 						// promise to wait on, wait and continue
@@ -399,49 +420,50 @@ export const Index = ({ Source }) => {
 			// we don't propagate immediately through the index, as the indexing must take place
 			// to determine the affecting index entries, and the indexing will send out the updates
 			this.updateVersion()
-			let previousValue = event.previousValues && event.previousValues.get(by)
+			let previousState = event.previousValues && event.previousValues.get(by)
 			let id = by && by.constructor == this.Sources[0] && by.id // if we are getting an update from a source instance
 			if (id && !this.gettingAllIds) {
-				let indexResult = when(previousValue, previousState => {
-					let indexRequest = this.queue.get(id)
-					if (this.name == 'StudySetsByLookupTable' && !indexRequest && !previousState && id.toString()[0] != '4')
-						console.info('Queue indexing of', this.name, id, 'without a previous state')
-					if (indexRequest) {
-						// put it at that end so version numbers are sequential
-						this.queue.delete(id)
-						this.queue.set(id, indexRequest)
-						indexRequest.version = event.version
-					} else {
-						this.queue.set(id, indexRequest = {
-							previousState,
-							version: event.version,
-						})
-						this.requestProcessing(DEFAULT_INDEXING_DELAY)
+				let indexRequest = this.queue.get(id)
+				if (this.name == 'StudySetsByLookupTable' && !indexRequest && !previousState && id.toString()[0] != '4')
+					console.info('Queue indexing of', this.name, id, 'without a previous state')
+				if (indexRequest) {
+					// put it at that end so version numbers are sequential
+					this.queue.delete(id)
+					this.queue.set(id, indexRequest)
+					indexRequest.version = event.version
+					if (event.triggers)
+						for (let trigger of event.triggers)
+							indexRequest.triggers.add(trigger)
+				} else {
+					this.queue.set(id, indexRequest = {
+						previousState,
+						version: event.version,
+						triggers: event.triggers,
+					})
+					this.requestProcessing(DEFAULT_INDEXING_DELAY)
+				}
+				if (!indexRequest.version) {
+					throw new Error('missing version')
+				}
+				indexRequest.deleted = event.type == 'deleted'
+				if (event.sources) {
+					if (!indexRequest.sources) {
+						indexRequest.sources = new Set()
 					}
-					if (!indexRequest.version) {
-						throw new Error('missing version')
+					for (let source of event.sources) {
+						indexRequest.sources.add(source)
 					}
-					indexRequest.deleted = event.type == 'deleted'
-					if (event.sources) {
-						if (!indexRequest.sources) {
-							indexRequest.sources = new Set()
-						}
-						for (let source of event.sources) {
-							indexRequest.sources.add(source)
-						}
-					} else if (event.source) {
-						if (!indexRequest.sources) {
-							indexRequest.sources = new Set()
-						}
-						indexRequest.sources.add(event.source)
+				} else if (event.source) {
+					if (!indexRequest.sources) {
+						indexRequest.sources = new Set()
 					}
-					return this.whenFullyReadable
-				})
+					indexRequest.sources.add(event.source)
+				}
 				let updatesInProgress = event.updatesInProgress
 				if (!updatesInProgress) {
 					updatesInProgress = event.updatesInProgress = []
 				}
-				updatesInProgress.push(indexResult)
+				updatesInProgress.push(this.whenFullyReadable)
 			}
 			if (event && event.type == 'reset') {
 				return super.updated(event, by)

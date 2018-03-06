@@ -46,6 +46,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	_versions: any
 	version: number
 	static useWeakMap = true
+	static dbFolder = 'cachedb'
 
 	constructor(id) {
 		super()
@@ -66,7 +67,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static getDb() {
-		return this.db || (this.db = Persisted.DB.open('cachedb/' + this.name))
+		return this.db || (this.db = Persisted.DB.open(this.dbFolder + '/' + this.name))
 	}
 
 	get jsonMultiplier() {
@@ -196,6 +197,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return (event && event.updatesInProgress) ? Promise.all(event.updatesInProgress) : Promise.resolve()
 	}
 
+	static get whenFullyReadable() {
+		if (this.listeners)
+			return Promise.all(this.listeners.map(listener => listener.whenFullyReadable))
+		return Promise.resolve()
+	}
+
 	delete() {
 		return this.constructor.remove(this.id)
 	}
@@ -222,7 +229,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// make sure these are inherited
 		this.pendingWrites = []
 		this.currentWriteBatch = null
-		this.writeCompletion = null
+		this.whenWritten = null
 		clearTimeout(this._registerTimeout)
 		let moduleFilename = sourceCode.id || sourceCode
 		if (global[this.name]) {
@@ -235,7 +242,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		} else if (typeof moduleFilename == 'string') {
 			// create a hash from the module source
 			this.transformVersion = fs.statSync(moduleFilename).mtime.getTime()
-			let hmac = crypto.createHmac('sha256', 'portal')
+			let hmac = crypto.createHmac('sha256', 'cobase')
 			hmac.update(fs.readFileSync(moduleFilename, { encoding: 'utf8' }))
 			this.dbVersion = hmac.digest('hex')
 		}
@@ -255,7 +262,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.log('transform/database version mismatch, reseting db table', this.name, state && state.dbVersion, this.dbVersion)
 			this.startVersion = this.version = Date.now()
 			const clearDb = !!state // if there was previous state, clear out all entries
-			this.didReset = when(this.resetAll(clearDb), () => when(this.writeCompletion, () => this.updateDBVersion()))
+			this.didReset = when(this.resetAll(clearDb), () => when(this.whenWritten, () => this.updateDBVersion()))
 		}
 		this.instancesById // trigger this initialization
 		return when(this.didReset, this.onReady, this.onDbFailure)
@@ -303,7 +310,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			listener.updated(event, this)
 		}
 
-		event.whenWritten = Class.writeCompletion // promise for when the update is recorded, this will overwrite any downstream assignment of this property
+		event.whenWritten = Class.whenWritten // promise for when the update is recorded, this will overwrite any downstream assignment of this property
 		return event
 	}
 
@@ -601,14 +608,14 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
 		let currentWriteBatch = this.currentWriteBatch
-		let writeCompletion = this.writeCompletion
+		let whenWritten = this.whenWritten
 		if (!currentWriteBatch) {
 			currentWriteBatch = this.currentWriteBatch = new Map()
 			this.pendingWrites.push(currentWriteBatch)
 			currentWriteBatch.writes = 0
 			currentWriteBatch.writeSize = 0
-			const lastWriteCompletion = writeCompletion
-			writeCompletion = this.writeCompletion = new Promise((resolve, reject) => {
+			const lastWriteCompletion = whenWritten
+			whenWritten = this.whenWritten = new Promise((resolve, reject) => {
 				currentWriteBatch.commitOperations = () => {
 					currentWriteBatch.commitOperations = () => {} // noop until finished
 					clearTimeout(delayedCommit)
@@ -630,8 +637,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 						this.currentWriteBatch = null
 						const finished = () => {
 							this.pendingWrites.splice(this.pendingWrites.indexOf(currentWriteBatch), 1)
-							if (this.writeCompletion == writeCompletion) {
-								this.writeCompletion = null
+							if (this.whenWritten == whenWritten) {
+								this.whenWritten = null
 							}
 							resolve()
 						}
@@ -652,7 +659,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (currentWriteBatch.writes++ > 100 || value && (currentWriteBatch.writeSize += (value.length || 10)) > 100000) {
 			currentWriteBatch.commitOperations()
 		}
-		return writeCompletion
+		return whenWritten
 	}
 
 	static dbGet(key, asBuffer) {
@@ -701,22 +708,26 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 }
 
-
 export class Persisted extends KeyValued(MakePersisted(Variable), {
 	valueProperty: 'value',
 	versionProperty: 'version'
 }) {
 	db: any
-	static getDb() {
-		return this.db || (this.db = Persisted.DB.open('portaldb/' + this.name))
-	}
-
+	static dbFolder = 'db'
 	static resetAll(clearDb): any {
 	}
 
 	patch(properties) {
 		return this.then((value) =>
 			when(this.put(value = Object.assign(value || {}, properties)), () => value))
+	}
+	assignPreviousValue(event) {
+		// for Persisted objects, we can use the event.oldValue
+		let previousValues = event.previousValues
+		if (!previousValues) {
+			previousValues = event.previousValues = new Map()
+		}
+		previousValues.set(this, event.oldValue)
 	}
 	static DB = level
 	static syncVersion = 10
@@ -748,10 +759,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	allowDirectJSON: boolean
 	static Sources: any[]
 	static fetchAllIds: () => {}[]
-	is(value) {
+	is(value, event) {
 		// we skip loadLocalData and pretend it wasn't in the cache... not clear if
 		// that is how we want is() to behave or not
-		let event = new ReplacedEvent()
+		event = event || new ReplacedEvent()
 		event.noReset = true // should just be an optimization to avoid unnecessary db puts
 		this.updated(event)
 		this.cachedVersion = this.version
@@ -780,7 +791,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
 				this.dbPut(id, version.toString(), version)
 			}
-			yield (this.writeCompletion)
+			yield (this.whenWritten)
 			console.info('Done reseting', this.name)
 		}.bind(this)))
 	}

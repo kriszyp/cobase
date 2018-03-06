@@ -12,19 +12,13 @@ function genericErrorHandler(err) {
 	}
 }
 
-try {
-	fs.statSync('cachedb')
-} catch (error) {
-	fs.mkdirSync('cachedb')
-}
-try {
-	fs.statSync('portaldb')
-} catch (error) {
-	fs.mkdirSync('portaldb')
-}
-
 export function open(name) {
 	let location = './' + name
+	try {
+		fs.statSync(location)
+	} catch (error) {
+		fs.mkdirsSync(location)
+	}
 	try {
 		fs.removeSync(location + '/LOCK') // clean up any old locks
 	} catch(e) {}
