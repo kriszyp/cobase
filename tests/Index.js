@@ -6,7 +6,7 @@ suite('Index', () => {
 	class Test2 extends Persisted {
 
 	}
-	class TestIndex extends Index({ Source: Test2 }) {
+	class TestIndex extends Index.from(Test2) {
 		static indexBy(test) {
 			console.log('indexing test', test)
 			return [{

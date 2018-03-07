@@ -418,7 +418,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	loadLatestLocalData() {
-		this.readyState === 'loading-local-data'
+		this.readyState = 'loading-local-data'
 		return when(this.loadLocalData(false, this.allowDirectJSON), (data) => {
 			const { version, asJSON } = data
 			if (asJSON) {
@@ -525,7 +525,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	set [valueProperty](value) {
 		this._cachedValue = value
-		let newToCache = !this.readyState || this.readyState == 'no-local-data'
+		let newToCache = this.readyState == 'no-local-data'
 		if (newToCache) {
 			this.readyState = 'loading-local-data'
 		}
@@ -798,7 +798,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	resetCache(event) {
 		this._cachedValue = undefined
-		this.updateVersion()
 		let version = this.version
 		if (this.shouldPersist !== false) {
 //			if (!this.loaded || this.asJSON || oldJSON) { // maybe this might be a little faster if it is already invalidated

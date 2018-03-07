@@ -130,8 +130,10 @@ export const Index = ({ Source }) => {
 					})
 					addUpdatedIndexEntry(key, sources, triggers)
 				}
-				if (indexRequest.version)
+				if (indexRequest.version) {
+			//		console.log('indexRequest.version', indexRequest.version)
 					lastIndexedVersion = Math.max(indexRequest.version, lastIndexedVersion)
+				}
 				else
 					console.warn('index request missing version', this.name, id)
 			} catch(error) {
@@ -538,6 +540,7 @@ export const Index = ({ Source }) => {
 		}
 	}
 }
+Index.from = (Source) => Index({ Source })
 Index.getCurrentStatus = () => {
 	function estimateSize(size, previousState) {
 		return (previousState ? JSON.stringify(previousState).length : 1) + size
