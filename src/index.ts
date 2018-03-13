@@ -1,5 +1,6 @@
 export { Persisted, Cached, Persistable, secureAccess } from './Persisted'
 export { Index } from './IndexPersisted'
+export { Reduced } from './Reduced'
 export { open } from './storage/level'
 export { AccessError } from './util/errors'
 export { JSONStream } from './http-server/JSONStream'

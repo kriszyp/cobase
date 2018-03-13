@@ -24,18 +24,18 @@ export function media(app) {
 			}
 			if (parser.handlesRequest) {
 				return when(parser.handle(connection), () =>
-					when(connection.call(app), () => serializer(connection)))
+					when(connection.call(app), (returnValue) => serializer(returnValue, connection)))
 			}
 			return bufferStream(connection.request.content).then(data => {
 				connection.request.data = parser.parse(data.toString(options.charset))
-				return when(connection.call(app), () => serializer(connection))
+				return when(connection.call(app), (returnValue) => serializer(returnValue, connection))
 			})
 		}
-		return when(connection.call(app), () => serializer(connection))
+		return when(connection.call(app), (returnValue) => serializer(returnValue, connection))
 	}
 }
-function serializer(connection) {
-	if (connection.response.data === undefined)
+function serializer(returnValue, connection) {
+	if (connection.response.data === undefined && returnValue === undefined)
 		return // nothing to serialize
 	let requestHeaders = connection.request.headers
 	let acceptHeader = requestHeaders.Accept || '*/*'
@@ -65,7 +65,7 @@ function serializer(connection) {
 		}
 	}
 	responseHeaders['Content-Type'] = bestType
-	connection.response.content = bestSerializer.serialize(connection.response.data, connection)
+	connection.response.content = bestSerializer.serialize(returnValue === undefined ? connection.response.data : returnValue, connection)
 }
 
 mediaTypes.set('application/json', jsonMediaType)

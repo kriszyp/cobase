@@ -229,10 +229,11 @@ export function open(name) {
 				}))
 		},
 		clear() {
-			db.closeSync()
-			fs.removeSync(db.location)
-			db.openSync()
-			console.log('cleared database', db.location)
+			return this.close().then(() => {
+				fs.removeSync(db.location)
+				db.openSync()
+				console.log('cleared database', db.location)
+			})
 		}
 	}
 

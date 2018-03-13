@@ -1,6 +1,6 @@
 import { spawn, currentContext, VArray, ReplacedEvent } from 'alkali'
 import { Persistable } from './Persisted'
-import { toBufferKey, fromBufferKey } from 'ordered-binary'
+import { toBufferKey, fromBufferKey, Metadata } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
 
@@ -10,7 +10,7 @@ const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
 const SEPARATOR_NEXT_BYTE = Buffer.from([31])
 const LAST_INDEXED_VERSION_KEY = Buffer.from([1, 2])
 const INDEXING_MODE = { indexing: true }
-const DEFAULT_INDEXING_DELAY = 150
+const DEFAULT_INDEXING_DELAY = 120
 const INITIALIZATION_SOURCE = { isInitializing: true }
 
 export interface IndexRequest {
@@ -153,6 +153,9 @@ export const Index = ({ Source }) => {
 		static queue = new Map<any, IndexRequest>()
 		static *processQueue() {
 			this.state = 'processing'
+			let cpuUsage = process.cpuUsage()
+			let cpuTotalUsage = cpuUsage.user + cpuUsage.system
+			let cpuAdjustment = 2
 			try {
 				let queue = this.queue
 				let initialQueueSize = queue.size
@@ -168,7 +171,7 @@ export const Index = ({ Source }) => {
 						queue.delete(id)
 						indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
 
-						if (sinceLastStateUpdate++ > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * 2) {
+						if (sinceLastStateUpdate++ > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * cpuAdjustment) {
 							// we have process enough, commit our changes so far
 							this.onBeforeCommit && this.onBeforeCommit(id)
 							yield Promise.all(indexingInProgress)
@@ -199,6 +202,10 @@ export const Index = ({ Source }) => {
 						this.getDb().put(LAST_INDEXED_VERSION_KEY, this.queuedIndexedProgress)
 						this.queuedIndexedProgress = null
 					}
+					cpuUsage = process.cpuUsage()
+					let lastCpuUsage = cpuTotalUsage
+					cpuTotalUsage = cpuUsage.user + cpuUsage.system
+					cpuAdjustment = (cpuAdjustment + 100000 / (cpuTotalUsage - lastCpuUsage + 10000)) / 2
 				} while (queue.size > 0)
 				if (initialQueueSize > 0) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
@@ -223,7 +230,7 @@ export const Index = ({ Source }) => {
 			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 
 			const db = this.getDb()
-			if (lastIndexedVersion == 0) {
+			if (lastIndexedVersion == 0 || idsAndVersionsToReindex.isFullReset) {
 				yield this.getDb().clear()
 				this.updateDBVersion()
 			} else if (idsAndVersionsToReindex.length > 0) {
@@ -235,6 +242,8 @@ export const Index = ({ Source }) => {
 						db.removeSync(key)
 					}
 				}).asArray
+			} else {
+				return
 			}
 			for (let { id, version } of idsAndVersionsToReindex) {
 				if (!version)
@@ -244,7 +253,7 @@ export const Index = ({ Source }) => {
 					sources: new Set([INITIALIZATION_SOURCE])
 				})
 			}
-			yield this.requestProcessing(10)
+			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}
 
 		static delay(ms) {
@@ -317,19 +326,24 @@ export const Index = ({ Source }) => {
 		}
 
 		transform() {
-			const db = this.constructor.getDb()
 			let keyPrefix = toBufferKey(this.id)
-			let iterable = db.iterable({
+			let iterable = this.getIndexedValues({
 				gt: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
 				lt: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE])
-			}).map(({ key, value }) => {
+			})
+			return this.constructor.returnsAsyncIterables ? iterable : iterable.asArray
+		}
+
+		// Get a range of indexed entries for this id (used by Reduced)
+		getIndexedValues(range, returnFullKeyValue?: boolean) {
+			const db = this.constructor.getDb()
+			return db.iterable(range).map(({ key, value }) => {
 				let [, sourceId] = fromBufferKey(key, true)
-				return this.returnFullKeyValue ? {
-					id: sourceId,
+				return returnFullKeyValue ? {
+					key: sourceId,
 					value: JSON.parse(value)
 				} : value.length > 0 ? JSON.parse(value) : sourceId
 			})
-			return this.constructor.returnsAsyncIterables ? iterable : iterable.asArray
 		}
 		/**
 		* Indexing function, that defines the keys and values used in the indexed table.
@@ -426,8 +440,6 @@ export const Index = ({ Source }) => {
 			let id = by && by.constructor == this.Sources[0] && by.id // if we are getting an update from a source instance
 			if (id && !this.gettingAllIds) {
 				let indexRequest = this.queue.get(id)
-				if (this.name == 'StudySetsByLookupTable' && !indexRequest && !previousState && id.toString()[0] != '4')
-					console.info('Queue indexing of', this.name, id, 'without a previous state')
 				if (indexRequest) {
 					// put it at that end so version numbers are sequential
 					this.queue.delete(id)
@@ -440,7 +452,7 @@ export const Index = ({ Source }) => {
 					this.queue.set(id, indexRequest = {
 						previousState,
 						version: event.version,
-						triggers: event.triggers,
+						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
 					})
 					this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				}
@@ -513,6 +525,7 @@ export const Index = ({ Source }) => {
 			return this.whenProcessingComplete
 		}
 
+
 		static getInstanceIds(range) {
 			let db = this.getDb()
 			let options = {
@@ -530,7 +543,7 @@ export const Index = ({ Source }) => {
 					options.lte = toBufferKey(range.lte)
 			}
 			let lastKey
-			return db.waitForAllWrites().then(() =>
+			return when(this.whenProcessingComplete, () =>
 				db.iterable(options).map(({ key }) => fromBufferKey(key, true)[0]).filter(key => {
 					if (key !== lastKey) { // skip multiple entries under one key
 						lastKey = key

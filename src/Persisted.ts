@@ -47,6 +47,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	version: number
 	static useWeakMap = true
 	static dbFolder = 'cachedb'
+	static whenWritten: Promise<{}>
 
 	constructor(id) {
 		super()
@@ -260,7 +261,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.startVersion = this.version = state.startVersion
 		} else {
 			console.log('transform/database version mismatch, reseting db table', this.name, state && state.dbVersion, this.dbVersion)
-			this.startVersion = this.version = Date.now()
+			this.startVersion = this.version = getNextVersion()
 			const clearDb = !!state // if there was previous state, clear out all entries
 			this.didReset = when(this.resetAll(clearDb), () => when(this.whenWritten, () => this.updateDBVersion()))
 		}
@@ -296,14 +297,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (Class.updateWithPrevious) {
 			this.assignPreviousValue(event)
 		}
-		if (event.noReset)
+		if (by === this) // skip reset
 			Variable.prototype.updated.apply(this, arguments)
 		else
 			super.updated(event, by)
 		if (event.type == 'deleted') {
 			this.readyState = 'no-local-data'
 			this.constructor.instanceSetUpdated(event)
-		} else if (!event.noReset)
+		} else if (by !== this)
 			this.resetCache()
 		// notify class listeners too
 		for (let listener of this.constructor.listeners || []) {
@@ -396,25 +397,26 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	loadLocalData(now, asBuffer) {
 		let Class = this.constructor
 		let db = Class.getDb()
-		const withValue = data => {
-			if (data) {
-				let separatorIndex = data.indexOf(',')
-				if (separatorIndex > -1) {
-					return {
-						version: +data.slice(0, separatorIndex),
-						asJSON: data.slice(separatorIndex + 1)
-					}
-				} else if (isFinite(data)) {
-					// stored as an invalidated version
-					return {
-						version: +data
-					}
+		return when(Class.dbGet(this.id, asBuffer), this.parseEntryValue)
+	}
+
+	parseEntryValue(data) {
+		if (data) {
+			let separatorIndex = data.indexOf(',')
+			if (separatorIndex > -1) {
+				return {
+					version: +data.slice(0, separatorIndex),
+					asJSON: data.slice(separatorIndex + 1)
 				}
-			} else {
-				return {}
+			} else if (isFinite(data)) {
+				// stored as an invalidated version
+				return {
+					version: +data
+				}
 			}
+		} else {
+			return {}
 		}
-		return when(Class.dbGet(this.id, asBuffer), withValue)
 	}
 
 	loadLatestLocalData() {
@@ -441,7 +443,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static getInstanceIds(range) {
 		let db = this.getDb()
 		let options = {
-			gt: Buffer.from([2]),
+			gt: Buffer.from([4]),
 			values: false
 		}
 		if (range) {
@@ -454,7 +456,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (range.lte != null)
 				options.lte = toBufferKey(range.lte)
 		}
-		return when(this.currentWriteBatch && this.currentWriteBatch.completion, () =>
+		return when(this.whenWritten, () =>
 			db.iterable(options).map(({ key }) => fromBufferKey(key)).asArray)
 	}
 
@@ -472,10 +474,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this.ready.then(() => {
 			let db = this.getDb()
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
-			if (this.lastVersion && this.lastVersion <= sinceVersion) {
+			let isFullReset = this.startVersion > sinceVersion
+			if (this.lastVersion && this.lastVersion <= sinceVersion && !isFullReset) {
 				return []
 			}
-			console.log('Scanning for updates from', sinceVersion, this.lastVersion, this.name)
+			console.log('Scanning for updates from', sinceVersion, this.lastVersion, isFullReset, this.name)
 			return db.iterable({
 				gt: Buffer.from([2])
 			}).map(({ key, value }) => {
@@ -487,9 +490,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				} : null
 			}).filter(idAndVersion => {
 				return idAndVersion
-			}).asArray.then(idsAndVersions =>
+			}).asArray.then(idsAndVersions => {
 				idsAndVersions.sort((a, b) => a.version > b.version ? 1 : -1)
-			)
+				idsAndVersions.isFullReset = isFullReset
+				return idsAndVersions
+			})
 		})
 	}
 
@@ -500,6 +505,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		event || (event = new DeletedEvent())
 		let entity = this.for(id)
+		entity.readyState = 'no-local-data'
+		this.instanceSetUpdated(event)
 		if (this.updateWithPrevious) {
 			entity.assignPreviousValue(event)
 		}
@@ -574,7 +581,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (this.shouldPersist !== false) {
 				let db = Class.getDb()
 				let version = this[versionProperty]
-				let data = json ? version + ',' + json : version.toString()
+				let data = this.serializeEntryValue(version, json)
 				when(Class.dbPut(this.id, data, version), () => {
 					if (newToCache) {
 						// fire an updated, if it is a new object
@@ -600,6 +607,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			// if we are waiting, set the asJSON as the promise
 			this.asJSON = result
 		}
+	}
+
+	serializeEntryValue(version, json) {
+		return json ? version + ',' + json : version.toString()
 	}
 
 	static dbPut(key, value, version) {
@@ -652,7 +663,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			})
 		}
 		currentWriteBatch.set(key, {
-			type: value === undefined ? 'remove' : 'put',
+			type: value === undefined ? 'del' : 'put',
 			key: toBufferKey(key),
 			value
 		})
@@ -763,8 +774,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		// we skip loadLocalData and pretend it wasn't in the cache... not clear if
 		// that is how we want is() to behave or not
 		event = event || new ReplacedEvent()
-		event.noReset = true // should just be an optimization to avoid unnecessary db puts
-		this.updated(event)
+		this.updated(event, this)
 		this.cachedVersion = this.version
 		this.cachedValue = value
 		this.readyState = 'up-to-date'
@@ -774,7 +784,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static resetAll(clearDb) {
 		console.log('reset all for ', this.name)
 		return Promise.resolve(spawn(function*() {
-			let version = this.startVersion = Date.now()
+			let version = this.startVersion = getNextVersion()
 			let allIds = yield this.fetchAllIds ? this.fetchAllIds() : []
 			if (clearDb) {
 				console.info('Closing the database to clear', this.name)
@@ -857,6 +867,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let receivedPendingVersion = []
 			for (let Source of this.Sources || []) {
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(this.lastVersion).then(ids => {
+					if (ids.isFullReset) {
+						return when(this.resetAll(true), () => when(this.whenWritten, () => this.updateDBVersion()))
+					}
 					//console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
