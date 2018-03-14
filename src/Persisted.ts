@@ -367,11 +367,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// standard variable handling
 		return Variable.prototype.stopNotifies.call(this, target)
 	}
-	static whenUpdatedTo(version) {
+	static whenUpdatedFrom(Source, version) {
 		// transitively wait on all sources that need to update to this version
+		if (Source === this) {
+			return // by default we are always synchronously complete, if we are the end source
+		}
 		let promises = []
 		for (let Source of this.Sources || []) {
-			let whenUpdated = Source.whenUpdatedTo(version)
+			let whenUpdated = Source.whenUpdatedFrom(Source, version)
 			if (whenUpdated && whenUpdated.then) {
 				promises.push(whenUpdated)
 			}
@@ -506,6 +509,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		event || (event = new DeletedEvent())
 		let entity = this.for(id)
 		entity.readyState = 'no-local-data'
+		event.source = entity
+		event.oldValue = when(entity.loadLocalData(), ({ asJSON }) => {
+			// store the old version, for tracking for indices
+			return asJSON && JSON.parse(asJSON)
+		})
 		this.instanceSetUpdated(event)
 		if (this.updateWithPrevious) {
 			entity.assignPreviousValue(event)
@@ -799,7 +807,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					continue
 				}
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
-				this.dbPut(id, version.toString(), version)
+				this.dbPut(id, this.prototype.serializeEntryValue(version), version)
 			}
 			yield (this.whenWritten)
 			console.info('Done reseting', this.name)
@@ -812,7 +820,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		if (this.shouldPersist !== false) {
 //			if (!this.loaded || this.asJSON || oldJSON) { // maybe this might be a little faster if it is already invalidated
 			// storing as a version alone to indicate invalidation
-			this.constructor.dbPut(this.id, version.toString(), version)
+			this.constructor.dbPut(this.id, this.serializeEntryValue(version), version)
 //			}
 		}
 		this.asJSON = undefined

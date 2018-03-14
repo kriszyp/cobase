@@ -229,10 +229,15 @@ export function open(name) {
 				}))
 		},
 		clear() {
-			return this.close().then(() => {
-				fs.removeSync(db.location)
-				db.openSync()
-				console.log('cleared database', db.location)
+			console.log('clearing db', db.location)
+			return this.iterable({
+				values: false,
+			}).map(({ key }) => ({
+				key,
+				type: 'del'
+			})).asArray.then(operations => {
+				console.log('deleting', operations.length, 'entries')
+				return this.batch(operations)
 			})
 		}
 	}

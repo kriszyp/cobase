@@ -364,10 +364,12 @@ export const Index = ({ Source }) => {
 
 		// static returnsAsyncIterables = true // maybe at some point default this to on
 
-		static whenUpdatedTo(version) {
-			if (this.whenProcessingComplete && version > this.whenProcessingComplete.version) {
-				return this.requestProcessing(0)
-			}
+		static whenUpdatedFrom(Source, version) {
+			return when(super.whenUpdatedFrom(Source, version), () => {
+				if (this.whenProcessingComplete && (!version || version > this.whenProcessingComplete.version)) {
+					return this.requestProcessing(0)
+				}
+			})
 		}
 
 		static getInstanceIdsAndVersionsSince(version) {
@@ -409,7 +411,7 @@ export const Index = ({ Source }) => {
 				let context = currentContext
 				// set to current version of index
 				if (currentContext.requestedVersion) {
-					return when(this.constructor.whenUpdatedTo(currentContext.requestVersion), () => {
+					return when(this.constructor.whenUpdatedFrom(currentContext.requestVersion), () => {
 						context.setVersion(this.constructor.version)
 						return when(super.valueOf(true), (value) => {
 							expirationStrategy.useEntry(this, this.approximateSize * 10) // multiply by 10 because generally we want to expire index values pretty quickly

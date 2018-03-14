@@ -54,7 +54,8 @@ suite.only('Index', () => {
 		assert.equal(value, 30)
 		assert.isTrue(reduceCalls < 10)
 		Test2.remove(4)
-		await Test2.whenFullyReadable
+		await SumOfNumbersByType.whenUpdatedFrom(Test2)
+		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 26)
 		assert.isTrue(reduceCalls < 10)
 	})
