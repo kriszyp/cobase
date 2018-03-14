@@ -31,7 +31,7 @@ export class Reduced extends Cached {
 		return this.transaction(async (db, put) => {
 			if (this.rootLevel > -1) {
 				const indexKey = toBufferKey(this.id)
-				const { split, accumulator } = await this.reduceRange(this.rootLevel, Buffer.from([0]), Buffer.from([255]), put)
+				const { split, accumulator } = await this.reduceRange(this.rootLevel, Buffer.from([1]), Buffer.from([255]), put)
 				if (split) // splitting the root node, just bump up the level number
 					this.rootLevel++
 				// now it should be written to the node
@@ -83,7 +83,7 @@ export class Reduced extends Cached {
 			if (childrenProcessed > CHILDREN) {
 				childrenProcessed = 0
 				let nextDividingKey = endKey || key
-				put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, lastDividingKey, SEPARATOR_BYTE, lastDividingKey = toBufferKey(nextDividingKey)]),
+				put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, lastDividingKey, SEPARATOR_BYTE, lastDividingKey = toBufferKey(nextDividingKey)]),
 					JSON.stringify(accumulator))
 				if (!split)
 					totalAccumulator = accumulator // start with existing accumulation
@@ -96,8 +96,8 @@ export class Reduced extends Cached {
 			if (value == INVALIDATED_VALUE) {
 				const result = await this.reduceRange(level - 1, key, endKey, put)
 				value = result.accumulator
-				put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeStartKey, SEPARATOR_BYTE, rangeEndKey]),
-					split ? undefined : JSON.stringify(value))
+				put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, toBufferKey(key), SEPARATOR_BYTE, toBufferKey(endKey)]),
+					JSON.stringify(value))
 			}
 			if (firstOfSection) {
 				accumulator = value
@@ -110,7 +110,7 @@ export class Reduced extends Cached {
 		if (split) {
 			// do one final merge of the sectional accumulator into the total
 			accumulator = await this.reduceBy(totalAccumulator, accumulator)
-			put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeStartKey, SEPARATOR_BYTE, rangeEndKey]),
+			put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, lastDividingKey, SEPARATOR_BYTE, rangeEndKey]),
 				JSON.stringify(accumulator))
 		}
 		return { split, accumulator, version }
@@ -139,7 +139,7 @@ export class Reduced extends Cached {
 			for (let i = 1; i < level; i++) {
 				let sourceKeyBuffer = toBufferKey(sourceKey)
 				let [ nodeToInvalidate ] = await db.iterable({
-					lt: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), toBufferKey(this.id), SEPARATOR_BYTE, sourceKeyBuffer, Buffer.from([255])]),
+					lt: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([i]), toBufferKey(this.id), SEPARATOR_BYTE, sourceKeyBuffer, Buffer.from([255])]),
 					values: false,
 					reverse: true,
 					limit: 1,

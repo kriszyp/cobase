@@ -29,6 +29,7 @@ suite.only('Index', () => {
 	}
 	SumOfNumbersByType.startingValue = 0
 	suiteSetup(() => {
+		removeSync('tests/db')
 		return Promise.all([
 			Test2.register({ version: 1 }),
 			TestByType.register({ version: 1 }),

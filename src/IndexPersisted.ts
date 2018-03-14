@@ -1,6 +1,6 @@
 import { spawn, currentContext, VArray, ReplacedEvent } from 'alkali'
 import { Persistable } from './Persisted'
-import { toBufferKey, fromBufferKey, Metadata } from 'ordered-binary'
+import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
 
