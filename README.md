@@ -7,6 +7,11 @@ Cobase is a composable layered system of JavaScript-defined, cached, persisted d
 <a href="https://dev.doctorevidence.com/"><img src="./assets/powers-dre.png" width="203" align="right" /></a>
 From these constructs we can build data structures that can aggregate and index data from multiples tables and be queried in fast, scalable O(log n) time/space.
 
+There are several key goals and philosophies that have shaped cobase:
+* REST-oriented programming architecture that composes data stores by caching layering stores with a uniform interface, ideal for using as a caching/transformation middle tier to put in front of a simple backend storage.
+* Scalable, performant data querying is acheived by ensuring data has been properly indexed to quickly satisfy queries, and data indexing and transformation, with full JS functionality, is the central focus of the API design.
+* Defaulting to in-process data store access (via LevelDB) for extremely efficient/fast access to indexed/transformed data.
+
 ## Getting Started
 First, install:
 ```
@@ -14,6 +19,7 @@ npm install cobase
 ```
 And then we can begin creating basic persisted data structures. A basic table or data store can be constructed by simply creating a class that extends `Persisted` and calling `register` on it:
 ```
+import { Persisted } from 'cobase'
 class Project extends Persisted {
 
 }
@@ -28,6 +34,8 @@ The most common API for interacting with your persisted class instances, is to t
 
 ```
 Project.for(1).valueOf()
+// or shorthand:
+Project.get(1)
 ```
 
 We can then build various layers of transform that use this as our data source. We could also define our base data source from an external data source (SQL database, S3 storage, etc.), and much of Cobase is optimized around this type of architecture, but here we are using our own internal storage for the sake of examples.
@@ -49,8 +57,10 @@ ProjectSummary.register({ version: 1 }) // we can assign a version to indicate c
 ```
 The resulting data store will lazily compute and cache these transformed summary objects, providing nearly instantaneous access on repeated accesses.
 
+When defining a transform/cached entry, you should specify a version number in the `register` method that should be incremented whenever the transform is changed so that the table can be recomputed when it changes.
+
 ### Join
-The compositional function is a join. The `Cached` base class can be create with more than one data source. We can provide multiple data sources, which are then combined by id, and passed into the `transform` function.
+The compositional functionality is a join, which is acheived by simply providing multiple data sources to the  `Cached` base class. We can provide multiple data sources, which are then combined by id, and passed into the `transform` function.
 ```
 import { Cached } from 'cobase'
 class ProjectSummary extends Cached.from(Project, ExtraProjectInfo) {
@@ -63,22 +73,19 @@ class ProjectSummary extends Cached.from(Project, ExtraProjectInfo) {
 	}
 }
 ```
-Generally, a join is only interesting when it is combined with an index/map function that can index by a foreign key to relate two different data sources.
+This allows you to compose a new table of data that is joined from two other tables. This can be used for a variety of situations, although generally, a join is most useful when it is combined with an index/map function that can index by a foreign key to relate two different data sources.
 
 ### Index
-The third function is an indexing function, that allows one key-valued data source to be mapped to a different set of key-values. And index is created by extending `Indexed` class, and defining a `static` `indexBy` method (make sure you define it as a `static`!) Imagine we have another store that held a table of tasks, that each had a `projectId` that referenced a project that it belonged to. We can index the tasks store by project id:
+The third function is an indexing function, that allows one key-valued data source to be mapped to a different set of key-values, by different keys. And index is created by extending `Indexed` class, and defining a `static` `indexBy` method (make sure you define it as a `static`!) Imagine we have another store that held a table of tasks, that each had a `projectId` that referenced a project that it belonged to. We can index the tasks store by project id:
 ```
 import { Indexed } from 'cobase'
 class TasksByProject extends Indexed({ Source: Task }) {
-	static indexBy(task) { // make sure you define
-		return {
-			key: task.ProjectId,
-			value: task
-		}
+	static indexBy(task) { // make sure you define this with static
+		return task.projectId // this will index tasks by project ids
 	}
 }
 ```
-We now have created an index by the project id. We can join this to the project store to create relationally connected transformed store of cached data:
+We now have created an index of tasks by the project id. We can join this to the project store to create relationally connected transformed store of cached data:
 ```
 class ProjectWithTasks extends Cached.from(Project, TasksByProject) {
 	transform(project, tasks) {
@@ -91,12 +98,34 @@ class ProjectWithTasks extends Cached.from(Project, TasksByProject) {
 ```
 This is a fully reactive cache; any changes to a project, or tasks will automatically update through the layers of the index and caches such `ProjectWithTasks` will be up-to-date.
 
+When `indexBy` simple returns a key, the index will default to generate a store where values comes from the source values. That means that in this case, the indexed key will be the project id, and the value will be the array of tasks with that project id. However, `indexBy` supports a number of different ways to specify keys *and* values. First, `indexBy` can return multiple keys (rather than just a single key in the example above). This can be done by simply returning an array of keys.
+
+We can also specify the values in the indexed table as well. Again, if no value is specified, it will default to the input data source (and will be stored as a reference for efficiency). However, we can specify both the key and value by simply returning an object with `key` and `value` properties. And furthermore, if we want multiple keys and values generated, we can return an array of objects with `key`/`value` properties.
+
+For example:
+```
+static indexBy(task) {
+	return task.projectIds.map(projectId => ({ // if this was a many to many relationship, with multiple project ids
+		key: projectId, // index using the project id as the key
+		value: { // if we wanted our index to just store the name and ids of the tasks
+			id: task.id,
+			name: task.name
+		}
+	}))
+}
+```
+And if we accessed a `ProjectWithTasks` by a project id, this would return a promise to an array of of the task id and name of tasks referencing this project:
+```
+ProjectWithTasks.get(projectId)
+```
+
 ### Reduce
-This function provides efficient aggregation of indices, merging multiple values per index key with binary reduction. The `Reduced` class uses an `Indexed` class as a source, and aggregates the values of an index entry
-in `O(log n)` time. The `Reduced` class should define a source index, and a `reduceBy(a, b)` method that takes two input values and reduces them to one that it returns. The `Reduced` class extends the `Cached` class and can optionally include a `transform` method to transform the total reduced value.
+This function provides efficient aggregation of indices, merging multiple values per index key with binary reduction. Without a reduce function, an index just returns an array of the entries for a given index key, but a reduce function provides a custom function to aggregate values under an index key. The `Reduced` class uses an `Indexed` class as a source, and aggregates the values of an index entry in `O(log n)` time. The `Reduced` class should define a source index, and a `reduceBy(a, b)` method that takes two input values and reduces them to one that it returns. The `Reduced` class extends the `Cached` class and can optionally include a `transform` method to transform the total reduced value.
 
 For example, if we wanted to compute the total estimated time of the tasks in project, this could become very expensive to recompute if there are large number of tasks in a project (`O(n)` after any update). However, a `Reduced` class can maintain this sum with incremental updates in `O(log n)` time.
 ```
+import { Reduced } from 'cobase'
+
 class ProjectTotalHours extends Reduced.from(TasksByProject) {
 	reduceBy(taskA, taskB) {
 		return { // the returned value should be of the same type as the inputs
@@ -115,6 +144,8 @@ Note that the `reduceBy` function is slightly different than a JavaScript `reduc
 Not yet implemented.
 The Relation class defines a relation between two entities, effectively using the Join function to conveniently take two related tables and produce two tables that have their referenced data included.
 ```
+import { Relation } from 'cobase'
+
 const { From: TaskWithProject, To: ProjectWithTasks } = Relation({
 	From: Task,
 	To: Project,
@@ -124,3 +155,5 @@ const { From: TaskWithProject, To: ProjectWithTasks } = Relation({
 })
 ```
 
+## Integration with an HTTP/Web Server
+Cobase provides utilities for efficient delivery of data in a web server. This mainly includes a middleware component (built on Mach) that can perform content negotiation and efficiently stream JSON with support for advanced optimizations including direct binary transfer from the DB to streams, and backpressure. The can be used by including the cobase's `media` export as middleware, and then downstream apps/middleware can access `connection.request.data` for the parsed request data, and the response data can be set on `connection.response.data`, and the middleware will serialize to the appropriate content type as specified by the client (defaulting to JSON).
