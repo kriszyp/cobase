@@ -94,7 +94,7 @@ export const Index = ({ Source }) => {
 							// try again
 							data = yield entity.valueOf(INDEXING_MODE)
 						} catch(error) {
-							console.warn('Error retrieving value needing to be indexed', error.toString(), 'for', this.name)
+							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name)
 						}
 					}
 					// let the indexBy define how we get the set of values to index
@@ -108,17 +108,21 @@ export const Index = ({ Source }) => {
 						let key = typeof entry === 'object' ? entry.key : entry // TODO: Maybe at some point we support dates as keys
 						// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
 						let removedValue = toRemove.get(key)
+						// a value of '' is treated as a reference to the source object, so should always be treated as a change
 						let value = entry.value === undefined ? '' : JSON.stringify(entry.value)
 						if (removedValue !== undefined)
 							toRemove.delete(key)
-						if (removedValue === undefined || value != removedValue) {
-							let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
-							operations.push({
-								type: 'put',
-								key: fullKey,
-								value
-							})
-							operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
+						let isJSONChanged = removedValue === undefined || value != removedValue
+						if (isJSONChanged || value === '') {
+							if (isJSONChanged) {
+								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
+								operations.push({
+									type: 'put',
+									key: fullKey,
+									value
+								})
+								operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
+							}
 							addUpdatedIndexEntry(key, sources, triggers)
 						}
 					}
@@ -137,7 +141,7 @@ export const Index = ({ Source }) => {
 				else
 					console.warn('index request missing version', this.name, id)
 			} catch(error) {
-				console.warn('Error indexing', Source.name, id, error)
+				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
 		}
 
@@ -179,6 +183,10 @@ export const Index = ({ Source }) => {
 							sinceLastStateUpdate = 0
 							indexingInProgress = []
 							yield this.commitOperations()
+							cpuUsage = process.cpuUsage()
+							let lastCpuUsage = cpuTotalUsage
+							cpuTotalUsage = cpuUsage.user + cpuUsage.system
+							cpuAdjustment = (cpuAdjustment + 100000 / (cpuTotalUsage - lastCpuUsage + 10000)) / 2
 							/* Can be used to measure performance
 							let [seconds, billionths] = process.hrtime(lastStart)
 							lastStart = process.hrtime()
@@ -202,10 +210,6 @@ export const Index = ({ Source }) => {
 						this.getDb().put(LAST_INDEXED_VERSION_KEY, this.queuedIndexedProgress)
 						this.queuedIndexedProgress = null
 					}
-					cpuUsage = process.cpuUsage()
-					let lastCpuUsage = cpuTotalUsage
-					cpuTotalUsage = cpuUsage.user + cpuUsage.system
-					cpuAdjustment = (cpuAdjustment + 100000 / (cpuTotalUsage - lastCpuUsage + 10000)) / 2
 				} while (queue.size > 0)
 				if (initialQueueSize > 0) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
@@ -341,8 +345,8 @@ export const Index = ({ Source }) => {
 				let [, sourceId] = fromBufferKey(key, true)
 				return returnFullKeyValue ? {
 					key: sourceId,
-					value: JSON.parse(value)
-				} : value.length > 0 ? JSON.parse(value) : sourceId
+					value: value.length > 0 ? JSON.parse(value) : sourceId,
+				} : value.length > 0 ? JSON.parse(value) : Source.for(sourceId)
 			})
 		}
 		/**
@@ -378,19 +382,23 @@ export const Index = ({ Source }) => {
 		}
 
 		get approximateSize() {
-			return approximateSize(this.cachedValue)
-			function approximateSize(object) {
+			return approximateSize(this.cachedValue, 1)
+			function approximateSize(object, depth) {
 				if (!object) {
 					return 1
 				} else if (typeof object === 'string') {
 					return object.length + 1
 				} else if (typeof object === 'object') {
+					if (depth > 20) {
+						debugger
+						return 1000
+					}
 					if ('length' in object) {
-						return object.length * approximateSize(object[0]) + 1
+						return object.length * approximateSize(object[0], depth + 1) + 1
 					} else {
 						let size = 1
 						for (var i in object) {
-							size += approximateSize(object[i])
+							size += approximateSize(object[i], depth + 1)
 						}
 						return size
 					}

@@ -27,6 +27,14 @@ export default class ArrayLikeIterable {
 							return iteratorResult
 						}
 						result = func(iteratorResult.value)
+						if (result && result.then) {
+							return result.then(result =>
+								result == SKIP ?
+									this.next() :
+									{
+										value: result
+									})
+						}
 					} while(result == SKIP)
 					return {
 						value: result

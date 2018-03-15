@@ -124,6 +124,16 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return instance
 	}
 
+	// Defined as a convenience access to Class.for(id).valueOf()
+	static get(id) {
+		return this.for(id).valueOf()
+	}
+
+	// Defined as a convenience access to Class.for(id).put(value)
+	static set(id, value) {
+		return this.for(id).put(value)
+	}
+
 	static getByIds(ids) {
 		// for optimized access to a set of ids
 		if (!(ids instanceof Array))
@@ -644,21 +654,24 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 						let operations = []
 						let lastVersion = 0
 						for (let [ key, putOperation ] of currentWriteBatch) {
-							lastVersion = Math.max(putOperation.version)
+							if (putOperation.version)
+								lastVersion = Math.max(lastVersion, putOperation.version)
 							operations.push(putOperation)
 						}
 						// store the current version number
-						operations.push({
-							type: 'put',
-							key: LAST_VERSION_IN_DB_KEY,
-							value: this.lastVersion
-						})
+						if (lastVersion > 0)
+							operations.push({
+								type: 'put',
+								key: LAST_VERSION_IN_DB_KEY,
+								value: lastVersion
+							})
 						this.currentWriteBatch = null
 						const finished = () => {
 							this.pendingWrites.splice(this.pendingWrites.indexOf(currentWriteBatch), 1)
 							if (this.whenWritten == whenWritten) {
 								this.whenWritten = null
 							}
+
 							resolve()
 						}
 						return this.getDb().batch(operations).then(finished, (error) => {
@@ -673,7 +686,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		currentWriteBatch.set(key, {
 			type: value === undefined ? 'del' : 'put',
 			key: toBufferKey(key),
-			value
+			value,
+			version
 		})
 		if (currentWriteBatch.writes++ > 100 || value && (currentWriteBatch.writeSize += (value.length || 10)) > 100000) {
 			currentWriteBatch.commitOperations()
@@ -874,9 +888,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		when(registered, () => {
 			let receivedPendingVersion = []
 			for (let Source of this.Sources || []) {
-				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(this.lastVersion).then(ids => {
+				let lastVersion = this.lastVersion
+				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(ids => {
 					if (ids.isFullReset) {
-						return when(this.resetAll(true), () => when(this.whenWritten, () => this.updateDBVersion()))
+						return when(this.resetAll(lastVersion > 0), // clear the old db if there are any entries
+							() => when(this.whenWritten, () => this.updateDBVersion()))
 					}
 					//console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
 					let min = Infinity

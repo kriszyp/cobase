@@ -9,10 +9,7 @@ suite.only('Index', () => {
 	class TestByType extends Index.from(Test2) {
 		static indexBy(test) {
 			console.log('indexing test', test)
-			return [{
-				key: test.isEven ? 'even' : 'odd',
-				value: test
-			}]
+			return test.isEven ? 'even' : 'odd'
 		}
 	}
 	let reduceCalls = 0
