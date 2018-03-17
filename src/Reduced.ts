@@ -31,9 +31,13 @@ export class Reduced extends Cached {
 		return this.transaction(async (db, put) => {
 			if (this.rootLevel > -1) {
 				const indexKey = toBufferKey(this.id)
-				const { split, accumulator } = await this.reduceRange(this.rootLevel, Buffer.from([1]), Buffer.from([255]), put)
+				const { split, noChildren, accumulator } = await this.reduceRange(this.rootLevel, Buffer.from([1]), Buffer.from([255]), put)
 				if (split) // splitting the root node, just bump up the level number
 					this.rootLevel++
+				else if (noChildren) {
+					// if all children go away, return a root level of 1
+					this.rootLevel = 1
+				}
 				// now it should be written to the node
 				// this should be done by Cached: Class.dbPut(this.id, version + ',' + this.rootLevel + ',' + JSON.stringify(accumulator))
 				return accumulator
@@ -75,8 +79,7 @@ export class Reduced extends Cached {
 		let lastDividingKey = rangeStartKey
 		let accumulator
 		let totalAccumulator
-		let childrenProcessed = 0
-		// asynchronously iterate
+		let childrenProcessed = 0		// asynchronously iterate
 		while(!(next = await iterator.next()).done) {
 			let { key, endKey, value } = next.value
 			if (value && value.then) // if the index has references to variables, need to resolve them
@@ -100,9 +103,12 @@ export class Reduced extends Cached {
 				const result = await this.reduceRange(level - 1, toBufferKey(key), toBufferKey(endKey), put)
 				value = result.accumulator
 				put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, toBufferKey(key), SEPARATOR_BYTE, toBufferKey(endKey)]),
-					result.split ?
+					result.split || result.noChildren ?
 						undefined :// if it is a split, we have to remove the existing node
 						JSON.stringify(value)) // otherwise write our value
+				if (result.noChildren) {
+					continue
+				}
 			}
 			if (firstOfSection) {
 				accumulator = value
@@ -118,7 +124,7 @@ export class Reduced extends Cached {
 			// do one final merge of the sectional accumulator into the total to determine what to return
 			accumulator = await this.reduceBy(totalAccumulator, accumulator)
 		}
-		return { split, accumulator, version }
+		return { split, accumulator, version, noChildren: !split && firstOfSection }
 	}
 
 	updated(event) {

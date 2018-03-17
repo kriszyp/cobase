@@ -69,6 +69,12 @@ suite('Index', () => {
 		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 40)
 		assert.isTrue(reduceCalls < 13)
+
+		Test2.remove(2)
+		await SumOfNumbersByType.whenUpdatedFrom(Test2)
+		value = await SumOfNumbersByType.for('even')
+		assert.equal(value, 38)
+		assert.isTrue(reduceCalls < 16)
 	})
 
 	/*
