@@ -145,14 +145,8 @@ export function open(name) {
 								}
 							}
 						}
-						let key, value
-						if (options.reverse) {
-							key = array[length - ++i]
-							value = array[length - ++i]
-						} else {
-							value = array[i++]
-							key = array[i++]
-						}
+						let key = array[length - ++i]
+						let value = array[length - ++i]
 						return {
 							value: {
 								key, value

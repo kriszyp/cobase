@@ -70,7 +70,7 @@ export const Index = ({ Source }) => {
 				}
 				if (previousState !== undefined) { // if no data, then presumably no references to clear
 					// use the same mapping function to determine values to remove
-					previousEntries = yield this.indexBy(previousState)
+					previousEntries = yield this.indexBy(previousState, id)
 					if (typeof previousEntries == 'object') {
 						if (!(previousEntries instanceof Array)) {
 							previousEntries = [previousEntries]
@@ -98,7 +98,7 @@ export const Index = ({ Source }) => {
 						}
 					}
 					// let the indexBy define how we get the set of values to index
-					let entries = data === undefined ? data : yield this.indexBy(data)
+					let entries = data === undefined ? data : yield this.indexBy(data, id)
 					if (typeof entries != 'object' || !(entries instanceof Array)) {
 						// allow single primitive key
 						entries = entries === undefined ? [] : [entries]
@@ -271,7 +271,12 @@ export const Index = ({ Source }) => {
 				indexedProgress = Math.min(nextIndexRequest.version - 1, lastIndexedVersion)
 			}
 			if (operations.length == 0) {
-				this.queuedIndexedProgress = indexedProgress
+				if (updatedIndexEntries.size > 0)
+					this.whenIndexedProgress = this.sendUpdates().then(() => {
+						return this.queuedIndexedProgress = indexedProgress
+					})
+				else
+					this.queuedIndexedProgress = indexedProgress
 				return
 			}
 			let operationsToCommit = operations
@@ -333,7 +338,7 @@ export const Index = ({ Source }) => {
 			let keyPrefix = toBufferKey(this.id)
 			let iterable = this.getIndexedValues({
 				gt: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
-				lt: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE])
+				lt: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
 			})
 			return this.constructor.returnsAsyncIterables ? iterable : iterable.asArray
 		}
@@ -345,7 +350,7 @@ export const Index = ({ Source }) => {
 				let [, sourceId] = fromBufferKey(key, true)
 				return returnFullKeyValue ? {
 					key: sourceId,
-					value: value.length > 0 ? JSON.parse(value) : sourceId,
+					value: value.length > 0 ? JSON.parse(value) : Source.for(sourceId),
 				} : value.length > 0 ? JSON.parse(value) : Source.for(sourceId)
 			})
 		}
@@ -357,7 +362,7 @@ export const Index = ({ Source }) => {
 		* @param data The object to be indexed
 		* @return The return value can be an array of objects, where each object has a `key` and a `value`. It can only be an array of simple strings or numbers, if it is merely keys that need to be indexed, or even be a just a string (or number), if only a single key should be indexed
 		**/
-		static indexBy(data: {}): Array<{ key: string | number, value: any} | string | number> | IterableIterator<any> | string | number	{
+		static indexBy(data: {}, sourceKey: string | number | boolean): Array<{ key: string | number, value: any} | string | number> | IterableIterator<any> | string | number	{
 			return null
 		}
 		static resetAll() {

@@ -1,6 +1,6 @@
 const { Persisted, Persistable, Index, Reduced } = require('..')
 const { removeSync } = require('fs-extra')
-suite.only('Index', () => {
+suite('Index', () => {
 	Persisted.dbFolder = 'tests/db'
 	Persistable.dbFolder = 'tests/db'
 	class Test2 extends Persisted {
@@ -26,7 +26,7 @@ suite.only('Index', () => {
 	}
 	SumOfNumbersByType.startingValue = 0
 	suiteSetup(() => {
-		removeSync('tests/db')
+	//	removeSync('tests/db')
 		return Promise.all([
 			Test2.register({ version: 1 }),
 			TestByType.register({ version: 1 }),
@@ -51,11 +51,24 @@ suite.only('Index', () => {
 		let value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 30)
 		assert.isTrue(reduceCalls < 10)
+
 		Test2.remove(4)
 		await SumOfNumbersByType.whenUpdatedFrom(Test2)
 		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 26)
 		assert.isTrue(reduceCalls < 10)
+
+		Test2.for(8).put({ description: 'changing 8 to 10', isEven: true, number: 10})
+		await SumOfNumbersByType.whenUpdatedFrom(Test2)
+		value = await SumOfNumbersByType.for('even')
+		assert.equal(value, 28)
+		assert.isTrue(reduceCalls < 10)
+
+		Test2.for(12).put({ name: 'twelve', isEven: true, number: 12})
+		await SumOfNumbersByType.whenUpdatedFrom(Test2)
+		value = await SumOfNumbersByType.for('even')
+		assert.equal(value, 40)
+		assert.isTrue(reduceCalls < 13)
 	})
 
 	/*

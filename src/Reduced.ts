@@ -1,7 +1,7 @@
 import { Cached } from './Persisted'
 import { toBufferKey, fromBufferKey, Metadata } from 'ordered-binary'
 import when from './util/when'
-const INVALIDATED_VALUE = Buffer.from([1, 3])
+const INVALIDATED_VALUE = Buffer.from([])
 const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
 const REDUCED_INDEX_PREFIX_BYTE = Buffer.from([3])
 const CHILDREN = 2
@@ -49,7 +49,7 @@ export class Reduced extends Cached {
 		if (level === 1) {
 			// leaf-node, go to source index
 			iterator = this.indexSource.getIndexedValues({
-				gt: Buffer.concat([indexBufferKey, SEPARATOR_BYTE, rangeStartKey]),
+				gte: Buffer.concat([indexBufferKey, SEPARATOR_BYTE, rangeStartKey]),
 				lt: Buffer.concat([indexBufferKey, SEPARATOR_BYTE, rangeEndKey]),
 			}, true)[Symbol.asyncIterator]()
 		} else {
@@ -57,13 +57,14 @@ export class Reduced extends Cached {
 			iterator = db.iterable({
 				gt: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeStartKey]),
 				lt: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeEndKey]),
+				reverse: false,
 			}).map(({ key, value }) => {
 				let [, startKey, endKey] = fromBufferKey(key.slice(2), true)
 				return {
 					level: key[1],
 					key: startKey,
 					endKey,
-					value: JSON.stringify(value),
+					value: value.length > 0 ? JSON.parse(value) : INVALIDATED_VALUE,
 				}
 			})[Symbol.asyncIterator]()
 		}
@@ -78,6 +79,8 @@ export class Reduced extends Cached {
 		// asynchronously iterate
 		while(!(next = await iterator.next()).done) {
 			let { key, endKey, value } = next.value
+			if (value && value.then) // if the index has references to variables, need to resolve them
+				value = await value
 
 			childrenProcessed++
 			if (childrenProcessed > CHILDREN) {
@@ -94,10 +97,12 @@ export class Reduced extends Cached {
 			}
 
 			if (value == INVALIDATED_VALUE) {
-				const result = await this.reduceRange(level - 1, key, endKey, put)
+				const result = await this.reduceRange(level - 1, toBufferKey(key), toBufferKey(endKey), put)
 				value = result.accumulator
 				put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, toBufferKey(key), SEPARATOR_BYTE, toBufferKey(endKey)]),
-					JSON.stringify(value))
+					result.split ?
+						undefined :// if it is a split, we have to remove the existing node
+						JSON.stringify(value)) // otherwise write our value
 			}
 			if (firstOfSection) {
 				accumulator = value
@@ -108,10 +113,10 @@ export class Reduced extends Cached {
 		}
 		// store the last accumulated value if we are splitting
 		if (split) {
-			// do one final merge of the sectional accumulator into the total
-			accumulator = await this.reduceBy(totalAccumulator, accumulator)
 			put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, lastDividingKey, SEPARATOR_BYTE, rangeEndKey]),
 				JSON.stringify(accumulator))
+			// do one final merge of the sectional accumulator into the total to determine what to return
+			accumulator = await this.reduceBy(totalAccumulator, accumulator)
 		}
 		return { split, accumulator, version }
 	}
@@ -128,13 +133,17 @@ export class Reduced extends Cached {
 	invalidateEntry(sourceKey, version) {
 		return this.transaction(async (db, put) => {
 			// get the computed entry so we know how many levels we have
-			let data = await db.get(this.id)
-			let level = 1
-			if (data) {
-				let levelSeparatorIndex = data.indexOf(',')
-				//let version = data.slice(0, levelSeparatorIndex)
-				let dataSeparatorIndex = data.indexOf(',', levelSeparatorIndex + 1)
-				level = +data.slice(levelSeparatorIndex + 1, dataSeparatorIndex > -1 ? dataSeparatorIndex : data.length)
+			let level = this.rootLevel
+			if (!level) {
+				let data = await this.constructor.dbGet(this.id, true)
+				if (data) {
+					let levelSeparatorIndex = data.indexOf(',')
+					//let version = data.slice(0, levelSeparatorIndex)
+					let dataSeparatorIndex = data.indexOf(',', levelSeparatorIndex + 1)
+					level = +data.slice(levelSeparatorIndex + 1, dataSeparatorIndex > -1 ? dataSeparatorIndex : data.length)
+				} else {
+					return // no entry, no levels
+				}
 			}
 			for (let i = 1; i < level; i++) {
 				let sourceKeyBuffer = toBufferKey(sourceKey)
@@ -192,8 +201,8 @@ export class Reduced extends Cached {
 				})
 			}
 			let result = action(db, put)
-			return result.then((result) =>
-				db.batch(operations).then(
+			return result.then((result) => {
+				return db.batch(operations).then(
 					() => {//this.currentTransaction = null
 						return result
 					},
@@ -201,7 +210,8 @@ export class Reduced extends Cached {
 						console.error(error)
 						//this.currentTransaction = null
 						return result
-					}))
+					})
+			})
 			//return result
 		})
 	}

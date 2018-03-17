@@ -180,7 +180,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}))
 	}
 
-	static indexFor(propertyName, indexBy) {
+	static indexFrom(propertyName, indexBy) {
 		let index = this['index-' + propertyName]
 		if (index) {
 			return index
