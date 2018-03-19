@@ -180,19 +180,34 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}))
 	}
 
-	static indexFrom(propertyName, indexBy) {
+	static index(propertyName: string, indexBy?: (value, sourceKey) => any) {
 		let index = this['index-' + propertyName]
 		if (index) {
 			return index
 		}
 		index = this['index-' + propertyName] = class extends Index({ Source : this }) {
-			static indexBy(entity) {
-				return indexBy ? indexBy(entity) : entity[propertyName]
+			static indexBy(entity, sourceKey) {
+				return indexBy ? indexBy(entity, sourceKey) : entity[propertyName]
 			}
 		}
 		Object.defineProperty(index, 'name', { value: this.name + '-index-' + propertyName })
-		index.register({ version : 0 })
+		index.register({ version : 1 })
 		return index
+	}
+
+	static reduce(name: string, reduceFunction: (accumulator, nextValue) => any) {
+		let reduced = this['reduced-' + name]
+		if (reduced) {
+			return reduced
+		}
+		reduced = this['reduced-' + name] = class extends Reduced.from(this) {
+			static reduceBy(a, b) {
+				return reduceFunction.call(this, a, b)
+			}
+		}
+		Object.defineProperty(reduced, 'name', { value: this.name + '-reduced-' + name })
+		reduced.register({ version : 1 })
+		return reduced
 	}
 
 	transform(source) {
@@ -981,3 +996,4 @@ export function secureAccess<T>(Class: T): T & Secured {
 	return Class
 }
 secureAccess.checkPermissions = () => true
+import { Reduced } from './Reduced'

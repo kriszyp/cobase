@@ -9,6 +9,7 @@ From these constructs we can build data structures that can aggregate and index 
 
 There are several key goals and philosophies that have shaped cobase:
 * REST-oriented programming architecture that composes data stores by caching layering stores with a uniform interface, ideal for using as a caching/transformation middle tier to put in front of a simple backend storage.
+* NoSQL/Document-based DB with relational capability.
 * Scalable, performant data querying is acheived by ensuring data has been properly indexed to quickly satisfy queries, and data indexing and transformation, with full JS functionality, is the central focus of the API design.
 * Defaulting to in-process data store access (via LevelDB) for extremely efficient/fast access to indexed/transformed data.
 
@@ -120,7 +121,7 @@ ProjectWithTasks.get(projectId)
 ```
 
 ### Reduce
-This function provides efficient aggregation of indices, merging multiple values per index key with binary reduction. Without a reduce function, an index just returns an array of the entries for a given index key, but a reduce function provides a custom function to aggregate values under an index key. The `Reduced` class uses an `Indexed` class as a source, and aggregates the values of an index entry in `O(log n)` time. The `Reduced` class should define a source index, and a `reduceBy(a, b)` method that takes two input values and reduces them to one that it returns. The `Reduced` class extends the `Cached` class and can optionally include a `transform` method to transform the total reduced value.
+This function provides efficient aggregation of indices, merging multiple values per index key with binary reduction. Without a reduce function, an index just returns an array of the entries for a given index key, but a reduce function provides a custom function to aggregate values under an index key. The `Reduced` class uses an `Indexed` class as a source, and aggregates the values of an index entry in `O(log n)` time using a tree/graph reduction algorithm. The `Reduced` class should define a source index, and a `reduceBy(a, b)` method that takes two input values and reduces them to one that it returns. The `Reduced` class extends the `Cached` class and can optionally include a `transform` method to transform the total reduced value.
 
 For example, if we wanted to compute the total estimated time of the tasks in project, this could become very expensive to recompute if there are large number of tasks in a project (`O(n)` after any update). However, a `Reduced` class can maintain this sum with incremental updates in `O(log n)` time.
 ```
@@ -138,13 +139,38 @@ class ProjectTotalHours extends Reduced.from(TasksByProject) {
 }
 ProjectTotalHours.for(projectId).valueOf() -> get the total hours of the tasks for a project
 ```
-Note that the `reduceBy` function is slightly different than a JavaScript `reduce` function in that both the inputs may be the output from previous `reduceBy` calls.
+Note that the `reduceBy` function is slightly different than a JavaScript `reduce` function in that both the inputs may be the output from previous `reduceBy` calls. A `reduceBy` operation must be side-effect free, commutative (order of execution can be rearranged), associative (grouping of execution can rearranged), and referentially transparent (same inputs should always produce same output).
 
 ### Relation
 Not yet implemented.
 The Relation class defines a relation between two entities, effectively using the Join function to conveniently take two related tables and produce two tables that have their referenced data included.
 ```
-import { Relation } from 'cobase'
+import Task ...
+export class Project extends Cached.with({
+	tasks: [Task.relatedBy('projectId')]
+}) {
+
+}
+
+
+export class Task extends Cached {
+	Source = Test
+}
+import Project
+export class TestWithProject extends Task.with({
+	project: Project
+})
+
+Project.withRelation(Task, {
+	by: 'projectId',
+	property: 'tasks',
+	many: true,
+})
+
+Task.withRelation(Project, {
+	property: 'project',
+	many: false
+})
 
 const { From: TaskWithProject, To: ProjectWithTasks } = Relation({
 	From: Task,

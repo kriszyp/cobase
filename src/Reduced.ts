@@ -11,7 +11,7 @@ export class Reduced extends Cached {
 	/**
 	* This defines the reduce function that accumulates index entry values into a single value
 	*/
-	reduceBy(accumulator, nextValue) {
+	reduceBy(a, b) {
 		return null
 	}
 
@@ -35,7 +35,10 @@ export class Reduced extends Cached {
 				if (split) // splitting the root node, just bump up the level number
 					this.rootLevel++
 				else if (noChildren) {
-					// if all children go away, return a root level of 1
+					// if all children go away, return to a root level of 1
+					// we don't ever incrementally reduce depth, and if we are decreasing children,
+					// we can represent a single childen with an arbitrarily deep single-child-at-every-level
+					// tree
 					this.rootLevel = 1
 				}
 				// now it should be written to the node

@@ -31,7 +31,9 @@ suite('Persisted', () => {
 		return TestCached.for(10).then(value => {
 			assert.equal(value.upperName, 'TEN')
 		})
-	})/*
+	})
+
+	/*
 	suiteTeardown(() => {
 		console.log('teardown persisted')
 		return Promise.all([
