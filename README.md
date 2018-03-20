@@ -4,6 +4,7 @@ Cobase is a composable layered system of JavaScript-defined, cached, persisted d
 * Transform
 * Index
 * Reduce
+
 <a href="https://dev.doctorevidence.com/"><img src="./assets/powers-dre.png" width="203" align="right" /></a>
 From these constructs we can build data structures that can aggregate and index data from multiples tables and be queried in fast, scalable O(log n) time/space.
 
