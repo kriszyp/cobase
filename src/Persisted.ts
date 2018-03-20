@@ -210,6 +210,87 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return reduced
 	}
 
+/*	static with(properties) {
+		let DerivedClass = super.with(properties)
+		DerivedClass.Sources = [this]
+		let hasRelatedProperties
+		for (let key of properties) {
+			let property = properties[key]
+			if (property.initialized) {
+				property.initialized(this)
+				hasRelatedProperties = true
+			}
+
+		}
+		if (hasRelatedProperties) {
+			DerivedClass.prototype.transform = function(data, ...propertySources) {
+				for (let propertySource of propertySources) {
+					data[DerivedClass.Sources[i].key] = propertySource
+				}
+				return data
+			}
+		}
+		return DerivedClass
+	}*/
+
+	static relatesBy(foreignKey: string) {
+		let TargetClass = this
+		function relatesBy() {}
+		relatesBy.defineAs = function(propertyName, Parent) {
+			let RelatedIndex = TargetClass.index(foreignKey)
+			let sourceIndex = Parent.Sources.push(RelatedIndex) - 1
+			let existingTransform = Parent.prototype.transform
+			Parent.prototype.transform = function(primaryData) {
+				if (existingTransform) {
+					primaryData = existingTransform.apply(this, arguments)
+				}
+				let source = arguments[sourceIndex]
+				return Object.assign({ [propertyName]: source }, primaryData)
+			}
+			Parent.assign({
+				[propertyName]: VArray.of(TargetClass)
+			})
+		}
+		return relatesBy
+	}
+
+	static relatedBy(foreignKey: string) {
+		let TargetClass = this
+		function relatedBy() {}
+		relatedBy.defineAs = function(propertyName, Parent) {
+			let ParentSource = Parent.Sources[0]
+			let RelatedIndex = ParentSource.index(foreignKey)
+			let existingTransform = Parent.prototype.transform
+			Parent.prototype.transform = function(primaryData) {
+				if (existingTransform) {
+					primaryData = existingTransform.apply(this, arguments)
+				}
+				return when(primaryData, primaryData =>
+					TargetClass.for(foreignKey.call ? foreignKey(primaryData) : primaryData[foreignKey]).then(relatedValue =>
+						Object.assign({ [propertyName]: relatedValue }, primaryData)))
+			}
+			TargetClass.notifies({
+				updated(event, by) {
+					RelatedIndex.for(by.id).getIndexedKeys().map(fromId => {
+						Parent.for(fromId).updated(event)
+					}).resolveData()
+				}
+			})
+			Parent.assign({
+				[propertyName]: TargetClass
+			})
+		}
+		return relatedBy
+	}
+
+	static cacheWith(properties) {
+		const CachedWith = Cached.from(this).assign(properties)
+		Object.defineProperty(CachedWith, 'name', {
+			value: this.name + '-with-' + Object.keys(properties).filter(key => properties[key] && properties[key].defineAs).join('-')
+		})
+		return CachedWith
+	}
+
 	transform(source) {
 		return source
 	}

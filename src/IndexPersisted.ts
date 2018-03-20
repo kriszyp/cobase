@@ -343,6 +343,15 @@ export const Index = ({ Source }) => {
 			return this.constructor.returnsAsyncIterables ? iterable : iterable.asArray
 		}
 
+		getIndexedKeys() {
+			let keyPrefix = toBufferKey(this.id)
+			return this.getIndexedValues({
+				gt: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
+				lt: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
+				values: false,
+			}, true).map(({ key, value }) => key)
+		}
+
 		// Get a range of indexed entries for this id (used by Reduced)
 		getIndexedValues(range, returnFullKeyValue?: boolean) {
 			const db = this.constructor.getDb()
@@ -350,7 +359,7 @@ export const Index = ({ Source }) => {
 				let [, sourceId] = fromBufferKey(key, true)
 				return returnFullKeyValue ? {
 					key: sourceId,
-					value: value.length > 0 ? JSON.parse(value) : Source.for(sourceId),
+					value: value !== null ? value.length > 0 ? JSON.parse(value) : Source.for(sourceId) : value,
 				} : value.length > 0 ? JSON.parse(value) : Source.for(sourceId)
 			})
 		}
