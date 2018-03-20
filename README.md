@@ -141,45 +141,47 @@ ProjectTotalHours.for(projectId).valueOf() -> get the total hours of the tasks f
 ```
 Note that the `reduceBy` function is slightly different than a JavaScript `reduce` function in that both the inputs may be the output from previous `reduceBy` calls. A `reduceBy` operation must be side-effect free, commutative (order of execution can be rearranged), associative (grouping of execution can rearranged), and referentially transparent (same inputs should always produce same output).
 
-### Relation
-Not yet implemented.
-The Relation class defines a relation between two entities, effectively using the Join function to conveniently take two related tables and produce two tables that have their referenced data included.
+A reduce operation can also be written shorthand from a source entity:
 ```
-import Task ...
-export class Project extends Cached.with({
-	tasks: [Task.relatedBy('projectId')]
+const ProjectTotalHours = TasksByProject.reduce((a, b) => ({ number: a.number + b.number }))
+```
+
+## Relational Properties
+The relational property definitions provide a convenient mechanism for defining related entities, that is built on cobase's index and join functionality. A derived entity, that is transformed/cached from a source entity can be created with `cacheWith` with property definitions that reference other entities. These referencing property relations are defined by the `relatedBy` and `relatesBy` methods. The appropriate index will be created based on the provided foreign key, to join the indices and produce a cached entity based on the joined data. For example, if we had a `Task` and `Project` entity classes, where the `Task` class had a foreign key referencing projects in the `projectId` property, we could create a `ProjectWithTasks` class that included a project and all its associated tasks:
+```
+class ProjectWithTasks extends Project.cacheWith({
+	tasks: Task.relatesBy('projectId')
 }) {
 
 }
+```
 
-
-export class Task extends Cached {
-	Source = Test
-}
-import Project
-export class TestWithProject extends Task.with({
-	project: Project
-})
-
-Project.withRelation(Task, {
-	by: 'projectId',
-	property: 'tasks',
-	many: true,
-})
-
-Task.withRelation(Project, {
-	property: 'project',
-	many: false
-})
-
-const { From: TaskWithProject, To: ProjectWithTasks } = Relation({
-	From: Task,
-	To: Project,
-	joinOn(task) {
-		return task.projectId
-	}
+Likewise we could define a `TaskWithProject` that defined an entity with the task and the project data it is associated with:
+```
+export class TaskWithProject extends Task.cacheWith({
+	project: Project.relatedBy('projectId')
 })
 ```
+Note the distinct use of the relation definitions:
+`Entity.relatesBy(foreignKey)` - This defines a relationship where the foreign key is defined on the `Entity` that will be included as a property.
+`Entity.relatedBy(foreignKey)` - This defines a relationship where the foreign key is defined on source class with a property that will be referencing the `Entity`.
+
+In both cases, the foreign key can be either a single (string or number) value, or an array of values if there is a many-to-many relationship.
 
 ## Integration with an HTTP/Web Server
 Cobase provides utilities for efficient delivery of data in a web server. This mainly includes a middleware component (built on Mach) that can perform content negotiation and efficiently stream JSON with support for advanced optimizations including direct binary transfer from the DB to streams, and backpressure. The can be used by including the cobase's `media` export as middleware, and then downstream apps/middleware can access `connection.request.data` for the parsed request data, and the response data can be set on `connection.response.data`, and the middleware will serialize to the appropriate content type as specified by the client (defaulting to JSON).
+
+Additional content/media handlers can be defined by using the exported `mediaTypes` `Map`, and setting a media handler with the content type as the key, and an object with `serialize` and/or `parse` methods as the value:
+```
+import { mediaTypes, media } from 'cobase'
+mediaTypes.set('text/html', {
+	serialize(data, connection) {
+		return // some HTML we generate from data
+	},
+	parse(html) {
+		// probably wouldn't try to parse HTML from a request, but if we wanted to
+	}
+})
+
+machApp.use(media)
+```

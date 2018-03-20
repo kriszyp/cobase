@@ -265,9 +265,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				if (existingTransform) {
 					primaryData = existingTransform.apply(this, arguments)
 				}
-				return when(primaryData, primaryData =>
-					TargetClass.for(foreignKey.call ? foreignKey(primaryData) : primaryData[foreignKey]).then(relatedValue =>
-						Object.assign({ [propertyName]: relatedValue }, primaryData)))
+				return when(primaryData, primaryData => {
+					let reference = foreignKey.call ? foreignKey(primaryData) : primaryData[foreignKey]
+					return (reference instanceof Array ?
+						Promise.all(reference.map(ref => TargetClass.for(ref))) :
+						TargetClass.for(reference)).then(relatedValue =>
+						Object.assign({ [propertyName]: relatedValue }, primaryData))
+				})
 			}
 			TargetClass.notifies({
 				updated(event, by) {
