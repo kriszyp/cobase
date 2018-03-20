@@ -1,5 +1,6 @@
 <img src="./assets/alkali-logo.svg?sanitize=true" alt="Alkali" width="100" align="right" />
 Cobase is a composable layered system of JavaScript-defined, cached, persisted data transform functions and aggregations for building fast, efficient JavaScript-mapped relational data storage. Cobase is a reactive cache using Alkali's reactive API for entities. Cobase uses four basic data functional/processing constructs to build scalable relational data caches that can be used to query/access data efficiently to scale:
+
 * Join
 * Transform
 * Index
