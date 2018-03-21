@@ -1011,7 +1011,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return registered
 	}
 
-	get whenProcessingComplete() {
+	static get whenProcessingComplete() {
 		return this.Sources && Promise.all(this.Sources.map(Source => Source.whenProcessingComplete))
 	}
 }
