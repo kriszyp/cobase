@@ -203,7 +203,7 @@ function handleError(error) {
 }
 
 export const jsonMediaType = {
-	parse: JSON.parse,
+	parse: (content) => content.length > 0 ? JSON.parse(content) : undefined, // tolerate empty requests
 	serialize(data, connection) {
 		connection.response.headers['Transfer-Encoding'] = 'chunked'
 		return new JSONStream({

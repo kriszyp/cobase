@@ -437,9 +437,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static updated(event, by?) {
 		// this should be called by outside classes
-		this.updateVersion()
 		if (event && !event.version) {
-			event.version = this.version
+			event.version = getNextVersion()
 		}
 		let instance
 		for (let Source of this.Sources || []) {

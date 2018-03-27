@@ -11,7 +11,7 @@ const SEPARATOR_NEXT_BYTE = Buffer.from([31])
 const LAST_INDEXED_VERSION_KEY = Buffer.from([1, 2])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 120
-const INITIALIZATION_SOURCE = { isInitializing: true }
+const INITIALIZATION_SOURCE = 'is-initializing'
 
 export interface IndexRequest {
 	previousState?: any
@@ -58,7 +58,7 @@ export const Index = ({ Source }) => {
 		static indexingProcess: Promise<any>
 
 		static *indexEntry(id, indexRequest: IndexRequest) {
-			let { previousState, deleted, sources, triggers } = indexRequest
+			let { previousState, deleted, sources, triggers, version } = indexRequest
 			try {
 				let toRemove = new Map()
 				// TODO: handle delta, for optimized index updaes
@@ -84,6 +84,7 @@ export const Index = ({ Source }) => {
 						toRemove.set(previousEntries, '')
 					}
 				}
+				if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 				if (!deleted) {
 					let attempts = 0
 					let data
@@ -97,6 +98,7 @@ export const Index = ({ Source }) => {
 							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name)
 						}
 					}
+					if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 					// let the indexBy define how we get the set of values to index
 					let entries = data === undefined ? data : yield this.indexBy(data, id)
 					if (typeof entries != 'object' || !(entries instanceof Array)) {
@@ -143,6 +145,7 @@ export const Index = ({ Source }) => {
 			} catch(error) {
 				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
+			this.queue.delete(id)
 		}
 
 		static *rebuildIndex() {
@@ -170,9 +173,10 @@ export const Index = ({ Source }) => {
 				let indexingInProgress = []
 				let sinceLastStateUpdate = 0
 				do {
+					if (this.nice > 0)
+						yield this.delay(this.nice) // short delay for other processing to occur
 					for (let [id, indexRequest] of queue) {
-						// TODO: Handle concurrency and occasional commits
-						queue.delete(id)
+
 						indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
 
 						if (sinceLastStateUpdate++ > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * cpuAdjustment) {
@@ -215,7 +219,7 @@ export const Index = ({ Source }) => {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
 				}
 			} catch (error) {
-				console.error('Error occurred in processing index queue', error, 'remaining in queue', this.queue.size)
+				console.error('Error occurred in processing index queue for', this.name, error, 'remaining in queue', this.queue.size)
 			}
 			this.state = 'processed'
 		}
@@ -254,7 +258,7 @@ export const Index = ({ Source }) => {
 					console.log('resuming without version',this.name, id)
 				this.queue.set(id, {
 					version,
-					sources: new Set([INITIALIZATION_SOURCE])
+					triggers: new Set([INITIALIZATION_SOURCE])
 				})
 			}
 			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
