@@ -699,23 +699,19 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				let db = Class.getDb()
 				let version = this[versionProperty]
 				let data = this.serializeEntryValue(version, json)
-				when(Class.dbPut(this.id, data, version), () => {
-					if (newToCache) {
-						// fire an updated, if it is a new object
-						let event = new AddedEvent()
-						event.version = version
-						Class.instanceSetUpdated(event)
-						Class.updated(event, this)
-					} else if (oldJSON && !oldJSON.then) {
-						// if there was old JSON, send updated. Generally this won't be the case
-						// as the updated() will record the old JSON and clear it, but if this was invalidated
-						// due to version numbers alone, then this will record it.
-						//this.constructor.updated(new ReplacedEvent(), this)
-					}
-				}, error => {
-					this.asJSON = this._cachedValue = undefined
-					console.error('Writing ' + Class.name + ':' + this.id, error)
-				})
+				Class.dbPut(this.id, data, version) // no need to wait for it, should be synchronously available through the cache
+				if (newToCache) {
+					// fire an updated, if it is a new object
+					let event = new AddedEvent()
+					event.version = version
+					Class.instanceSetUpdated(event)
+					Class.updated(event, this)
+				} else if (oldJSON && !oldJSON.then) {
+					// if there was old JSON, send updated. Generally this won't be the case
+					// as the updated() will record the old JSON and clear it, but if this was invalidated
+					// due to version numbers alone, then this will record it.
+					//this.constructor.updated(new ReplacedEvent(), this)
+				}
 			}
 			expirationStrategy.useEntry(this, this.jsonMultiplier * (json || '').length)
 			return json
