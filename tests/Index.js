@@ -21,7 +21,7 @@ suite('Index', () => {
 			}
 		}
 		transform(total) {
-			return total.number
+			return total ? total.number : 0
 		}
 	}
 	SumOfNumbersByType.startingValue = 0
@@ -75,6 +75,22 @@ suite('Index', () => {
 		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 38)
 		assert.isTrue(reduceCalls < 16)
+
+		Test2.remove(6)
+		Test2.remove(8)
+		Test2.remove(10)
+		Test2.remove(12)
+		await SumOfNumbersByType.whenUpdatedFrom(Test2)
+		value = await SumOfNumbersByType.for('even')
+		assert.equal(value, 0)
+		assert.isTrue(reduceCalls < 16)
+
+		Test2.for(4).put({ name: 'four', isEven: true, number: 4})
+		await SumOfNumbersByType.whenUpdatedFrom(Test2)
+		value = await SumOfNumbersByType.for('even')
+		assert.equal(value, 4)
+		assert.isTrue(reduceCalls < 18)
+
 	})
 
 	/*
