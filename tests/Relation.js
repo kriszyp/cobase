@@ -1,7 +1,8 @@
-const { Persisted, Cached } = require('..')
+const { Persisted, Persistable, Cached } = require('..')
 const { removeSync } = require('fs-extra')
 suite('Persisted', () => {
 	Persisted.dbFolder = 'tests/db'
+	Persistable.dbFolder = 'tests/db'
 	Cached.dbFolder = 'tests/db'
 	class City extends Persisted {
 

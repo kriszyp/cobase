@@ -1,5 +1,6 @@
 const { Persisted, Cached } = require('..')
 const { removeSync } = require('fs-extra')
+removeSync('tests/db')
 suite('Persisted', () => {
 	Persisted.dbFolder = 'tests/db'
 	Cached.dbFolder = 'tests/db'
@@ -14,7 +15,6 @@ suite('Persisted', () => {
 		}
 	}
 	suiteSetup(() => {
-		removeSync('tests/db')
 		return Promise.all([
 			Test.register({ version: 1 }),
 			TestCached.register({ version: 1})

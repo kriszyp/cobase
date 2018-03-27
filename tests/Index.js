@@ -8,7 +8,6 @@ suite('Index', () => {
 	}
 	class TestByType extends Index.from(Test2) {
 		static indexBy(test) {
-			console.log('indexing test', test)
 			return test.isEven ? 'even' : 'odd'
 		}
 	}
