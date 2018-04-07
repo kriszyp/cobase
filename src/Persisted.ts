@@ -935,6 +935,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		this.asJSON = undefined
 	}
 
+	getTransform() {
+		return checkInputTransform
+	}
+
 	static get version() {
 		if (this.Sources) {
 			return Math.max(this._version || 1, ...(this.Sources.map(Source => Source.version)))
@@ -1074,6 +1078,15 @@ export function secureAccess<T>(Class: T): T & Secured {
 		return new Proxy(this, handler)
 	}
 	return Class
+}
+const checkInputTransform = {
+	apply(instance, args) {
+		// if the main input is undefined, treat as deleted object and pass on the undefined without running the transform
+		if (args[0] === undefined && args.length > 0) {
+			return
+		}
+		return instance.transform.apply(instance, args)
+	}
 }
 secureAccess.checkPermissions = () => true
 import { Reduced } from './Reduced'
