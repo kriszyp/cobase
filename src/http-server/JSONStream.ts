@@ -1,6 +1,7 @@
 import { Readable } from 'stream'
 import { Context } from 'alkali'
 import when from '../util/when'
+import { ContextWithOptions } from '../Persisted'
 const BUFFER_SIZE = 10000
 const COMMA = Buffer.from(',')
 const OPEN_CURLY = Buffer.from('{')
@@ -10,16 +11,17 @@ const CLOSE_BRACKET = Buffer.from(']')
 
 // a readable stream for serializing a set of variables to a JSON stream
 export class JSONStream extends Readable {
-	context: Context
+	context: ContextWithOptions
 	buffer: {}[]
 	bufferSize: number
 	iterator: any
 	id: number
+	private _amReading: boolean
+
 	constructor(options) {
 		// Calls the stream.Readable(options) constructor
 		super(options)
 		this.context = new Context(options.session)
-		this.context.addInput = () => {} // make sure we don't store references that leak memory
 		this.context.preferJSON = true
 		this.buffer = []
 		this.bufferSize = 0

@@ -3,6 +3,7 @@ import { Persistable } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
+import { OperationsArray, IterableOptions, Database } from './storage/Database'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const DEFAULT_INDEXING_CONCURRENCY = 15
@@ -26,7 +27,7 @@ interface IndexEntryUpdate {
 }
 export const Index = ({ Source }) => {
 	Source.updateWithPrevious = true
-	let operations = []
+	let operations: OperationsArray = []
 	let lastIndexedVersion = 0
 	let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
 	function addUpdatedIndexEntry(key, sources, triggers) {
@@ -154,8 +155,8 @@ export const Index = ({ Source }) => {
 			// restart from scratch
 			console.info('rebuilding index', this.name, 'Source version', Source.startVersion, 'index version')
 			// first cancel any existing indexing
-			yield this.getDb().clear()
-			this.getDb().putSync(LAST_INDEXED_VERSION_KEY, 0) // indicates indexing has started
+			yield this.db.clear()
+			this.db.putSync(LAST_INDEXED_VERSION_KEY, 0) // indicates indexing has started
 		}
 
 		static queue = new Map<any, IndexRequest>()
@@ -212,7 +213,7 @@ export const Index = ({ Source }) => {
 					yield this.whenIndexedProgress
 					//console.log('Finished indexing progress:', this.name, this.queuedIndexedProgress)
 					if (this.queuedIndexedProgress) { // store the last queued indexed progres
-						this.getDb().put(LAST_INDEXED_VERSION_KEY, this.queuedIndexedProgress)
+						this.db.put(LAST_INDEXED_VERSION_KEY, this.queuedIndexedProgress)
 						this.queuedIndexedProgress = null
 					}
 				} while (queue.size > 0)
@@ -227,7 +228,7 @@ export const Index = ({ Source }) => {
 
 		static *resumeIndex() {
 			// TODO: if it is over half the index, just rebuild
-			lastIndexedVersion = +this.getDb().getSync(LAST_INDEXED_VERSION_KEY) || 0
+			lastIndexedVersion = +this.db.getSync(LAST_INDEXED_VERSION_KEY) || 0
 			const idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
 			let min = Infinity
 			let max = 0
@@ -238,9 +239,9 @@ export const Index = ({ Source }) => {
 			//console.log('getInstanceIdsAndVersionsSince for index', this.name, idsAndVersionsToReindex.length, min, max)
 			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 
-			const db = this.getDb()
+			const db: Database = this.db
 			if (lastIndexedVersion == 0 || idsAndVersionsToReindex.isFullReset) {
-				yield this.getDb().clear()
+				yield this.db.clear()
 				this.updateDBVersion()
 			} else if (idsAndVersionsToReindex.length > 0) {
 				yield db.iterable({
@@ -300,7 +301,7 @@ export const Index = ({ Source }) => {
 			// large number, commit asynchronously
 			// The order here is important, we first write the indexed data, then send updates,
 			// then record our progress once the updates have been written
-			return this.getDb().batch(operationsToCommit).then(() => {
+			return this.db.batch(operationsToCommit).then(() => {
 				// once the operations are recorded, we can send out updates
 				// we are *not* waiting for it to complete before continuing with indexing though
 				// but are waiting for it to complete before writing progress
@@ -358,8 +359,8 @@ export const Index = ({ Source }) => {
 		}
 
 		// Get a range of indexed entries for this id (used by Reduced)
-		getIndexedValues(range, returnFullKeyValue?: boolean) {
-			const db = this.constructor.getDb()
+		getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
+			const db: Database = this.constructor.db
 			return db.iterable(range).map(({ key, value }) => {
 				let [, sourceId] = fromBufferKey(key, true)
 				return returnFullKeyValue ? {
@@ -555,9 +556,9 @@ export const Index = ({ Source }) => {
 		}
 
 
-		static getInstanceIds(range) {
-			let db = this.getDb()
-			let options = {
+		static getInstanceIds(range: IterableOptions) {
+			let db = this.db
+			let options: IterableOptions = {
 				gt: Buffer.from([2]),
 				values: false
 			}

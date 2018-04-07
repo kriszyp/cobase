@@ -26,7 +26,7 @@ export default class ArrayLikeIterable {
 						if (iteratorResult.done === true) {
 							return iteratorResult
 						}
-						result = func(iteratorResult.value)
+						let result = func(iteratorResult.value)
 						if (result && result.then) {
 							return result.then(result =>
 								result == SKIP ?
@@ -56,7 +56,7 @@ export default class ArrayLikeIterable {
 	filter(func) {
 		return this.map(element => func(element) ? element : SKIP)
 	}
-	_asArray: {}[]
+	_asArray: Promise<{}[]>
 	toJSON() {
 		if (this._asArray && this._asArray.forEach) {
 			return this._asArray

@@ -1,13 +1,14 @@
-import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent } from 'alkali'
+import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, Context } from 'alkali'
 import * as level from './storage/level'
 import when from './util/when'
 import WeakValueMap from './util/WeakValueMap'
 import ExpirationStrategy from './ExpirationStrategy'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
-import Index from './IndexPersisted'
+import Index from './KeyIndex'
 import { AccessError } from './util/errors'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
+import { Database, IterableOptions, OperationsArray } from './storage/Database'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const EMPTY_CACHE_ENTRY = {}
@@ -15,6 +16,11 @@ const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // SOH, code 1
 const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // SOH, code 2
 const INITIALIZATION_SOURCE = { isInitializing: true }
+
+export interface ContextWithOptions extends Context {
+	preferJSON?: boolean
+	ifModifiedSince?: number
+}
 
 global.cache = expirationStrategy // help with debugging
 
@@ -48,6 +54,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static useWeakMap = true
 	static dbFolder = 'cachedb'
 	static whenWritten: Promise<{}>
+	static db: Database
+	db: Database
 
 	constructor(id) {
 		super()
@@ -67,10 +75,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return false
 	}
 
-	static getDb() {
-		return this.db || (this.db = Persisted.DB.open(this.dbFolder + '/' + this.name))
-	}
-
 	get jsonMultiplier() {
 		return 1
 	}
@@ -83,16 +87,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return true
 	}
 
-
-	static get instancesById() {
-		// don't derive from instances VArray for now...just manually keep in sync
-		if (!this._instancesById) {
-			this._instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
-			this._instancesById.name = this.name
-		}
-		return this._instancesById
-	}
-
 	static get defaultInstance() {
 		return this._defaultInstance || (this._defaultInstance = new Variable())
 	}
@@ -101,7 +95,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (id > 0 && typeof id === 'string' || id == null) {
 			throw new Error('Id should be a number or non-numeric string: ' + id + 'for ' + this.name)
 		}
-		const instancesById = this.instancesById
+		let instancesById = this.instancesById
+		if (!instancesById) {
+			this.initialize()
+			instancesById = this.instancesById
+		}
 		let instance = instancesById.get(id)
 		if (!instance) {
 			instance = new this(id)
@@ -329,58 +327,68 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					resolve()
 				}
 				this.onDbFailure = reject
-				this._registerTimeout = setTimeout(() => {
-					console.error('Timeout waiting for register to be called on', this.name)
-				})
+				if (!this.instancesById) {
+					this.initialize()
+				}
 			}))
 	}
 
-	static register(sourceCode: { id?: string, version?: number }) {
+	static register(sourceCode?: { id?: string, version?: number }) {
+		// check the transform hash
+		if (sourceCode) {
+			let moduleFilename = sourceCode.id || sourceCode
+			if (sourceCode.version) {
+				// manually provide hash
+				this.transformVersion = sourceCode.version
+			} else if (typeof moduleFilename == 'string') {
+				// create a hash from the module source
+				this.transformVersion = fs.statSync(moduleFilename).mtime.getTime()
+				let hmac = crypto.createHmac('sha256', 'cobase')
+				hmac.update(fs.readFileSync(moduleFilename, { encoding: 'utf8' }))
+				this.transformHash = hmac.digest('hex')
+			}
+		}
+		if (!this.instancesById) {
+			return this.initialize()
+		}
+		return this.ready
+	}
+
+	static initialize() {
+		this.instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
+		this.instancesById.name = this.name
 		this.ready // make sure the getter is called first
+		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name)
 		// make sure these are inherited
 		this.pendingWrites = []
 		this.currentWriteBatch = null
 		this.whenWritten = null
 		clearTimeout(this._registerTimeout)
-		let moduleFilename = sourceCode.id || sourceCode
 		if (global[this.name]) {
 			throw new Error(this.name + ' already registered')
 		}
 		global[this.name] = this
-		if (sourceCode.version) {
-			// manually provide hash
-			this.dbVersion = sourceCode.version
-		} else if (typeof moduleFilename == 'string') {
-			// create a hash from the module source
-			this.transformVersion = fs.statSync(moduleFilename).mtime.getTime()
-			let hmac = crypto.createHmac('sha256', 'cobase')
-			hmac.update(fs.readFileSync(moduleFilename, { encoding: 'utf8' }))
-			this.dbVersion = hmac.digest('hex')
-		}
 		for (let Source of this.Sources || []) {
 			Source.notifies(this)
 		}
-		// get the db state and check the transform hash
-		let db = this.getDb()
 		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 		let stateJSON = db.getSync(DB_VERSION_KEY)
 		let didReset
 		//console.log('DB starting state', this.name, stateJSON)
 		let state = stateJSON && JSON.parse(stateJSON)
-		if (state && (state.dbVersion || state.transformHash) == this.dbVersion) {
+		if (state && (state.dbVersion || state.transformHash) == this.transformVersion) {
 			this.startVersion = this.version = state.startVersion
 		} else {
-			console.log('transform/database version mismatch, reseting db table', this.name, state && state.dbVersion, this.dbVersion)
+			console.log('transform/database version mismatch, reseting db table', this.name, state && state.dbVersion, this.transformVersion)
 			this.startVersion = this.version = getNextVersion()
 			const clearDb = !!state // if there was previous state, clear out all entries
 			this.didReset = when(this.resetAll(clearDb), () => when(this.whenWritten, () => this.updateDBVersion()))
 		}
-		this.instancesById // trigger this initialization
 		return when(this.didReset, this.onReady, this.onDbFailure)
 	}
 
 	static findUntrackedInstances() {
-		for (let instance of this._instancesById.values()) {
+		for (let instance of this.instancesById.values()) {
 			if (instance._cachedValue && instance._cachedValue !== EMPTY_CACHE_ENTRY) {
 				if (!expirationStrategy.cache.indexOf(instance)) {
 					console.log(instance.id, 'is untracked')
@@ -459,11 +467,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static updateDBVersion() {
 		let version = this.startVersion
-		this.getDb().put(DB_VERSION_KEY, JSON.stringify({
+		this.db.put(DB_VERSION_KEY, JSON.stringify({
 			startVersion: version,
-			dbVersion: this.dbVersion
+			dbVersion: this.transformVersion
 		})).then(() => {
-			console.log('updated db version', this.name, version, this.dbVersion, this.getDb().getSync(DB_VERSION_KEY))
+			console.log('updated db version', this.name, version, this.transformVersion, this.db.getSync(DB_VERSION_KEY))
 		})
 		return version
 	}
@@ -508,7 +516,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	loadLocalData(now, asBuffer) {
 		let Class = this.constructor
-		let db = Class.getDb()
+		let db = Class.db
 		return when(Class.dbGet(this.id, asBuffer), this.parseEntryValue)
 	}
 
@@ -552,9 +560,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		})
 	}
 
-	static getInstanceIds(range) {
-		let db = this.getDb()
-		let options = {
+	static getInstanceIds(range: IterableOptions) {
+		let db = this.db
+		let options: IterableOptions = {
 			gt: Buffer.from([4]),
 			values: false
 		}
@@ -573,7 +581,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	static entries(opts) {
-		let db = this.getDb()
+		let db = this.db
 		return db.iterable({
 			gt: Buffer.from([2])
 		}).map(({ key, value }) => ({key: fromBufferKey(key), value})).asArray
@@ -584,7 +592,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
 		return this.ready.then(() => {
-			let db = this.getDb()
+			let db = this.db
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			let isFullReset = this.startVersion > sinceVersion
 			if (this.lastVersion && this.lastVersion <= sinceVersion && !isFullReset) {
@@ -689,14 +697,14 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			}
 			let json = this.asJSON = value && JSON.stringify(this._cachedValue = value)
 			let result
-			if (this.constructor._instancesById.get(this.id) != this) {
+			if (this.constructor.instancesById.get(this.id) != this) {
 				if (this.shouldPersist !== false)
 					console.warn('Attempt to set value on non-canonical instance', this.id)
 				return
 			}
 			let Class = this.constructor
 			if (this.shouldPersist !== false) {
-				let db = Class.getDb()
+				let db = Class.db
 				let version = this[versionProperty]
 				let data = this.serializeEntryValue(version, json)
 				Class.dbPut(this.id, data, version) // no need to wait for it, should be synchronously available through the cache
@@ -746,7 +754,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					// We are waiting for the last operation to finish before we start the next one
 					// not sure if that is the right way to do it, maybe we should allow overlapping commits?
 					when(lastWriteCompletion, () => { // always wait for last one to complete
-						let operations = []
+						let operations: OperationsArray = []
 						let lastVersion = 0
 						for (let [ key, putOperation ] of currentWriteBatch) {
 							if (putOperation.version)
@@ -769,7 +777,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 							resolve()
 						}
-						return this.getDb().batch(operations).then(finished, (error) => {
+						return this.db.batch(operations).then(finished, (error) => {
 							console.error(error)
 							finished()
 						})
@@ -800,7 +808,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				return pendingWrite.get(key).value
 			}
 		}
-		return this.getDb()[this.isAsync ? 'get': 'getSync'](toBufferKey(key), asBuffer)
+		return this.db[this.isAsync ? 'get': 'getSync'](toBufferKey(key), asBuffer)
 	}
 
 	valueOf() {
@@ -905,7 +913,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let allIds = yield this.fetchAllIds ? this.fetchAllIds() : []
 			if (clearDb) {
 				console.info('Closing the database to clear', this.name)
-				let db = this.getDb()
+				let db = this.db
 				yield db.clear()
 				console.info('Cleared the database', this.name, 'rebuilding')
 			}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them

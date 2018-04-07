@@ -1,6 +1,7 @@
 import * as fs from 'fs-extra'
 import * as leveldown from 'leveldown'
 import ArrayLikeIterable from '../util/ArrayLikeIterable'
+import { Database } from './Database'
 
 const STARTING_ARRAY = [null]
 const AS_STRING = {
@@ -12,7 +13,7 @@ function genericErrorHandler(err) {
 	}
 }
 
-export function open(name) {
+export function open(name): Database {
 	let location = './' + name
 	try {
 		fs.statSync(location)
