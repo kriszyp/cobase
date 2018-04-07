@@ -175,6 +175,19 @@ In both cases, the foreign key can be either a single (string or number) value, 
 
 ## Cobase API
 
+Cobase entities extend the Alkali Variable API, and consequently inherit its full API, as (described here)[https://github.com/kriszyp/alkali#variable-api]. For example, the following are methods available on cobase entity instances:
+`valueOf()` - This retrieves the current value of this entity. If this is available synchronously, it will return the value directly. Otherwise, if this requires asynchronous resolution (if the store or transform is async, and it is not cached in memory), it will return a promise to the resolved value.
+`then(onFulfilled, onRejected)` - This also retrieves the current of the entity, using the standard promise API/callback. This method also means that all entities can be treated as promises/thenables, and used in places that accept promises, including the `await` operator.
+`updated(event?)` - This is can be called to indicate that the entity has been updated, and it's transform needs to be re-executed to retrieve its value.
+`subscribe((event) => void)` - Subscribe to a entity and listen for changes.
+
+In addition, the following methods are available as *`static`* methods on entity classes:
+`for(id)` - Return the entity for the given id.
+`get(id)` - Shorthand for `Entity.for(id).valueof()`.
+`set(id, value)` - Shorthand for `Entity.for(id).put(value)`.
+`instanceIds` - This property returns a VArray with ids of all the available instances of the entity.
+`whenUpdatedFrom(Source)` - Wait for any updates made to the source to be propagated to this entity.
+`index(propertyName)` - This returns an `Index` class defined such it indexes this class using the provided property name, or `indexBy` function (that can be referenced by the provided name).
 
 ## Connecting to different databases
 Cobase, using LevelDB, provides a capable data storage system, and makes it easy to build a compositional data system. However, for many applications, it may be desirable to cobase's compositional transforms on top of an existing database system with transactional capabilities, integrate backup, and/or access to existing/legacy data. In fact, this type of cross-server, compositional data layering where cobase acts a transforming caching middle tier in front of a database, is what cobase is optimized for.
