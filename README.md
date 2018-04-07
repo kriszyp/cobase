@@ -2,7 +2,7 @@
 Cobase is a composable layered system of JavaScript-defined, cached, persisted data transform functions and aggregations for building fast, efficient JavaScript-mapped relational data storage. Cobase is a reactive cache using Alkali's reactive API for entities. Cobase uses four basic data functional/processing constructs to build scalable relational data caches that can be used to query/access data efficiently to scale:
 
 * Join
-* Transform
+* Map
 * Index
 * Reduce
 
@@ -46,7 +46,7 @@ Generally stores will return asynchronously, returning a promise to the data req
 We can then build various layers of transform that use this as our data source. We could also define our base data source from an external data source (SQL database, S3 storage, etc.), and much of Cobase is optimized around this type of architecture, but here we are using our own internal storage for the sake of examples.
 
 ## Composing Layers
-### Transform
+### Map Transform
 The first two compositional functions are available by defining a transforming and caching store, by extending `Cached`. This directly maps and transforms a source data store to the transformed and cached data. For example, if we wanted to select some properties from data source and cache them, we could do:
 ```
 import { Cached } from 'cobase'
@@ -181,9 +181,27 @@ ProjectWithTasks.whenUpdatedFrom(Task).then(() => {
 	let project = ProjectWithTasks.get(12) // will have indexed the updated task
 })
 ```
-With the latest EcmaScript, you can more naturally write this with `await`.
+With the latest EcmaScript, you can more naturally write this with `await`:
+```
+Task.set(10, taskData)
+await ProjectWithTasks.whenUpdatedFrom(Task)
+let project = await ProjectWithTasks.get(12) // ready to get data, wait for the promised data
+```
 
-##
+## Memory Model
+Cobase ensures a direct one-to-one mapping between a entity id/key and entity object instance. This effectively means multiple calls to get an instance by id will never return a different object or copy of the data:
+```
+Task.get(3) === Task.get(3) // always true
+```
+This protects against data inconsistency between two different instances of the same data, and greatly simplifies the logic of dealing with mapped objects.
+
+Cobase actually integrates with garbage collection (using weak value maps), to allow unused/unreferenced to objects to be collected (so cobase doesn't leak memory after data is accessed), which means object instances can be collected, but still guarantees that at most only one instance of object per id/key is ever in memory at a time.
+
+Cobase uses a size-prioritized, multi-step exponential decaying least frequently/recently used policy to keep recently and frequented used data in memory, to effectively provide a GC-coordinated cache of data in memory, using the object instances. The amount of memory used for keeping recently used object instances in memory can be adjusted by setting the `ExpirationStrategy.cachedEntrySize`. The default value of 20000 keeps up to 20000 entries in memory:
+```
+ExpirationStrategy.cachedEntrySize = 40000 // use twice the default amount of caching
+```
+The weak value map mechanism and LRU caching strategy are described in [more detail here](https://dev.doctorevidence.com/an-introduction-to-weak-value-maps-40e108b44e1c).
 
 ## Integration with an HTTP/Web Server
 Cobase provides utilities for efficient delivery of data in a web server. This mainly includes a middleware component (built on Mach) that can perform content negotiation and efficiently stream JSON with support for advanced optimizations including direct binary transfer from the DB to streams, and backpressure. The can be used by including the cobase's `media` export as middleware, and then downstream apps/middleware can access `connection.request.data` for the parsed request data, and the response data can be set on `connection.response.data`, and the middleware will serialize to the appropriate content type as specified by the client (defaulting to JSON).
