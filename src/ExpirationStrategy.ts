@@ -4,7 +4,7 @@
 // to expire slower)
 
 // number of entries in the cache. reduce this to reduce cache size (less memory)
-const CACHE_ENTRIES = 20000
+let CACHE_ENTRIES = 20000
 // this is the mid-point size in the cache (roughly half of cache entries will
 // be smaller, half larger). Reduce this to force large entries out faster (less memory)
 const NOMINAL_SIZE = 100
@@ -74,6 +74,12 @@ class ExpirationStrategy {
 			})),
 			totalSize
 		}
+	}
+	set cachedEntrySize(size) {
+		CACHE_ENTRIES = size
+	}
+	get cachedEntrySize() {
+		return CACHE_ENTRIES
 	}
 	static defaultInstance = new ExpirationStrategy()
 }
