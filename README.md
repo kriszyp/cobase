@@ -20,13 +20,12 @@ First, install:
 ```
 npm install cobase
 ```
-And then we can begin creating basic persisted data structures. A basic table or data store can be constructed by simply creating a class that extends `Persisted` and calling `register` on it:
+And then we can begin creating basic persisted data structures. A basic table or data store can be constructed by simply creating a class that extends `Persisted`:
 ```
 import { Persisted } from 'cobase'
 class Project extends Persisted {
 
 }
-Project.register()
 ```
 And then we can begin adding data to it.
 ```
@@ -57,8 +56,8 @@ class ProjectSummary extends Cached.from(Project) {
 			name: project.name
 		}
 	}
+	static transformVersion = 1 // we can assign a version so that we can increment it to indicate changes in the transform
 }
-ProjectSummary.register({ version: 1 }) // we can assign a version to indicate changes in the transform
 ```
 The resulting data store will lazily compute and cache these transformed summary objects, providing fast access on repeated accesses.
 
@@ -118,6 +117,7 @@ static indexBy(task) {
 		}
 	}))
 }
+static transformVersion = 1 // transform version should be used with an Index as well, to indicate changes to the transform
 ```
 And if we accessed a `ProjectWithTasks` by a project id, this would return a promise to an array of of the task id and name of tasks referencing this project:
 ```
@@ -172,6 +172,62 @@ Note the distinct use of the relation definitions:
 `TargetEntity.relatedBy(foreignKey)` - This defines a relationship where the foreign key is defined on source class with a property that will be referencing the `TargetEntity`. This will add a property with a single target entity if there is a single foreign key, or an array of the target entities if the foreign key is an array of ids.
 
 In both cases, the foreign key can be either a single (string or number) value, or an array of values if there is a many-to-many relationship.
+
+## Cobase API
+
+
+## Connecting to different databases
+Cobase, using LevelDB, provides a capable data storage system, and makes it easy to build a compositional data system. However, for many applications, it may be desirable to cobase's compositional transforms on top of an existing database system with transactional capabilities, integrate backup, and/or access to existing/legacy data. In fact, this type of cross-server, compositional data layering where cobase acts a transforming caching middle tier in front of a database, is what cobase is optimized for.
+
+To connect cobase to existing database, we can create a cached class that retrieves data from database as a transform, notifies of changes to data, and delivers any requests for data modifications. Here is an outline of what a connector class looks like that implements a connection to another database:
+```
+// we aren't using any other "source" entities, since our transform method will handle retrieving data
+class Task extends Cached {
+	transform() {
+		// this is the main method that is called when an object is first accessed or changed, and can retrieve data from the db
+		// this.id has the id of this object
+		let id = this.id
+		// do a database query to get our data, with something like this (note that we can return a promise, async transforms are fine):
+		return sqlDatabase.query('SELECT * FROM TASK WHERE id = $1', [id]).then(rows => {
+			// return the first row
+			return rows[0]
+		})
+	}
+
+	static transformVersion = 1 // increment this if we ever change the transform
+
+	static initialize() {
+		// we can hook into initialize to do any setup
+		// In particular it is important to make sure we notify this class of any data changes.
+		// This can be implemented by setting up database trigger, or some other mechanism to
+		// notify of data updates.
+		// Another simple approach (although not the most efficient/optimal) could be to simply
+		// poll for updates:
+		let lastUpdate = Date.now()
+		sqlDatabase.query('SELECT * FROM TASK WHERE UPDATED > $1', [lastUpdate]).then(rows => {
+			lastUpdate = Date.now()
+			// for each row that was updated, call updated(),
+			// which will mark the entity in cobase as updated
+			// and will be re-retrieved on next access
+			for (let updatedRow of rows) {
+				this.for(updatedRow.id).updated()
+			}
+		})
+		return super.initialize()
+	}
+
+	static fetchAllIds() {
+		// If you need to be able to be able to get a list of all the object (ids), this can be implemented to fetch them
+		return sqlDatabase.query('SELECT id FROM TASK', [lastUpdate]).then(rows.map(row => row.id))
+	}
+	// alternately you can implement a static resetAll that retrieves all the objects and assigns each with is()
+
+	put() {
+		// we could implement methods for updates, if they will go through cobase (updates may go directly to the server)
+		return sqlDatabase.execute('INSERT INTO TASK...')
+	}
+}
+```
 
 ## Waiting for completion - `whenUpdatedFrom(SourceEntity)`
 In the cobase composition architecture, when an entity is updated, added, or removed, there may be some delay before any indices or reduce-computations are finished, which typically take place asynchronously. If we want to wait for a certain index or other derived entity to be consistent with the data change we have may in another entity class, we can use the `whenUpdatedFrom(SourceEntity)` static method on a target entity class, which will return a promise that resolves when the entity is consistent with any changes that have been made before the call on the source class. For example:
