@@ -173,6 +173,18 @@ Note the distinct use of the relation definitions:
 
 In both cases, the foreign key can be either a single (string or number) value, or an array of values if there is a many-to-many relationship.
 
+## Waiting for completion - `whenUpdatedFrom(SourceEntity)`
+In the cobase composition architecture, when an entity is updated, added, or removed, there may be some delay before any indices or reduce-computations are finished, which typically take place asynchronously. If we want to wait for a certain index or other derived entity to be consistent with the data change we have may in another entity class, we can use the `whenUpdatedFrom(SourceEntity)` static method on a target entity class, which will return a promise that resolves when the entity is consistent with any changes that have been made before the call on the source class. For example:
+```
+Task.set(10, { name: 'Update index', projectId: 12 })
+ProjectWithTasks.whenUpdatedFrom(Task).then(() => {
+	let project = ProjectWithTasks.get(12) // will have indexed the updated task
+})
+```
+With the latest EcmaScript, you can more naturally write this with `await`.
+
+##
+
 ## Integration with an HTTP/Web Server
 Cobase provides utilities for efficient delivery of data in a web server. This mainly includes a middleware component (built on Mach) that can perform content negotiation and efficiently stream JSON with support for advanced optimizations including direct binary transfer from the DB to streams, and backpressure. The can be used by including the cobase's `media` export as middleware, and then downstream apps/middleware can access `connection.request.data` for the parsed request data, and the response data can be set on `connection.response.data`, and the middleware will serialize to the appropriate content type as specified by the client (defaulting to JSON).
 
