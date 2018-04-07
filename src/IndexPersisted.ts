@@ -143,6 +143,7 @@ export const Index = ({ Source }) => {
 				else
 					console.warn('index request missing version', this.name, id)
 			} catch(error) {
+				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
 			this.queue.delete(id)
