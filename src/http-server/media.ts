@@ -1,6 +1,7 @@
 import when from '../util/when'
 import * as bufferStream from 'mach/lib/utils/bufferStream'
 import { jsonMediaType } from './JSONStream'
+import { textMediaType } from './text'
 
 export const mediaTypes = new Map()
 export function media(app) {
@@ -16,11 +17,15 @@ export function media(app) {
 				optionsString.replace(/([^=]+)=([^;]+)/g, (t, name, value) =>
 					options[name] = value)
 			}
-			const parser = mediaTypes.get(mimeType)
+			let parser = mediaTypes.get(mimeType)
 			if (!parser || !parser.parse) {
-				connection.status = 415
-				connection.response.content = 'Unsupported media type ' + mimeType
-				return
+				if (headers['Content-Length'] == '0') {
+					parser = EMPTY_MEDIA_PARSER
+				} else {
+					connection.status = 415
+					connection.response.content = 'Unsupported media type ' + mimeType
+					return
+				}
 			}
 			if (parser.handlesRequest) {
 				return when(parser.handle(connection), () =>
@@ -69,4 +74,9 @@ function serializer(returnValue, connection) {
 }
 
 mediaTypes.set('application/json', jsonMediaType)
+mediaTypes.set('text/plain', textMediaType)
+const EMPTY_MEDIA_PARSER = {
+	parse() {
+	}
+}
 

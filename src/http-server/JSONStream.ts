@@ -81,7 +81,7 @@ export class JSONStream extends Readable {
 					yield this.context.executeWithin(() =>
 						object.then(object => this.serialize(object, containsVariables), handleError))
 				} catch (error) {
-					object = handleError(error)
+					yield handleError(error)
 				}
 			} else if (object.asJSON) {
 				yield object.asJSON
