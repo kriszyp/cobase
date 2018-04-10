@@ -185,7 +185,8 @@ In addition, the following methods are available as *`static`* methods on entity
 `for(id)` - Return the entity for the given id.
 `get(id)` - Shorthand for `Entity.for(id).valueof()`.
 `set(id, value)` - Shorthand for `Entity.for(id).put(value)`.
-`instanceIds` - This property returns a VArray with ids of all the available instances of the entity.
+`instanceIds` - This property returns a variable array (VArray) with ids of all the available instances of the entity.
+`subscribe((event) => void)` - Subscribe to any changes to any instances of this class.
 `whenUpdatedFrom(Source)` - Wait for any updates made to the source to be propagated to this entity.
 `index(propertyName)` - This returns an `Index` class defined such it indexes this class using the provided property name, or `indexBy` function (that can be referenced by the provided name).
 
@@ -242,25 +243,23 @@ class Task extends Cached {
 }
 ```
 
-## Waiting for completion - `whenUpdatedFrom(SourceEntity)`
-In the cobase composition architecture, when an entity is updated, added, or removed, there may be some delay before any indices or reduce-computations are finished, which typically take place asynchronously. If we want to wait for a certain index or other derived entity to be consistent with the data change we have may in another entity class, we can use the `whenUpdatedFrom(SourceEntity)` static method on a target entity class, which will return a promise that resolves when the entity is consistent with any changes that have been made before the call on the source class. For example:
+## Context
+### Sessions (Operation Sequencing)
+In the cobase composition architecture, when an entity is updated, added, or removed, there may be some delay before any indices or reduce-computations are finished, which typically takes place asynchronously. When you access one of these downstream data sources, normally they will wait for these operations to finish, so they can return data that is consistent with any preceding operations. However, it can be preferable to create separate "sessions" so that when you retrieve data, you don't need to wait for operations to finish that are outside the scope of the current session. This facilitates a type of "eventual consistency" where everything inside the session maintains true consistency, but performance of accessing data is prioritized over waiting for other sessions' operations to be finish. This provides better performance. A session can be used to create a context, which can then be executed around value retrievals or updates:
 ```
-Task.set(10, { name: 'Update index', projectId: 12 })
-ProjectWithTasks.whenUpdatedFrom(Task).then(() => {
-	let project = ProjectWithTasks.get(12) // will have indexed the updated task
+import { Context } from 'alkali'
+let mySession = {}
+new Context(mySession).executeWithin(() => {
+	someTask.updated()
+	TasksByProject.valueOf() // will wait for any changes from the sameTask update to be indexed, but not any operations outside this session
 })
 ```
-With the latest EcmaScript, you can more naturally write this with `await`:
-```
-Task.set(10, taskData)
-await ProjectWithTasks.whenUpdatedFrom(Task)
-let project = await ProjectWithTasks.get(12) // ready to get data, wait for the promised data
-```
+Without specifying a session, all operations will be performed (and sequenced) within a single default session.
 
 ## Memory Model
 Cobase ensures a direct one-to-one mapping between a entity id/key and entity object instance. This effectively means multiple calls to get an instance by id will never return a different object or copy of the data:
 ```
-Task.get(3) === Task.get(3) // always true
+Task.for(3) === Task.for(3) // always true
 ```
 This protects against data inconsistency between two different instances of the same data, and greatly simplifies the logic of dealing with mapped objects.
 

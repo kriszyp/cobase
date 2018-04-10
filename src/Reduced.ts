@@ -51,7 +51,7 @@ export class Reduced extends Cached {
 	async reduceRange(level, rangeStartKey: Buffer, rangeEndKey: Buffer, put) {
 		let iterator
 		const Class = this.constructor
-		const db = Class.getDb()
+		const db = Class.db
 		const indexBufferKey = toBufferKey(this.id)
 		if (level === 1) {
 			// leaf-node, go to source index
@@ -199,7 +199,7 @@ export class Reduced extends Cached {
 	}
 	transaction(action) {
 		const Class = this.constructor
-		const db = Class.getDb()
+		const db = Class.db
 		return this.currentTransaction = when(this.currentTransaction, () => {
 			let operations = []
 			const put = (key, value) => {

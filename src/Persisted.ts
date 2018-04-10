@@ -401,6 +401,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (!event.source) {
 			event.source = this
 		}
+
 		let Class = this.constructor
 		if (event.type === 'added') {
 			// if we are being notified of ourself being created, ignore it
@@ -484,14 +485,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// standard variable handling
 		return Variable.prototype.stopNotifies.call(this, target)
 	}
-	static whenUpdatedFrom(Source, version) {
+	static whenUpdatedInContext() {
 		// transitively wait on all sources that need to update to this version
-		if (Source === this) {
-			return // by default we are always synchronously complete, if we are the end source
-		}
 		let promises = []
 		for (let Source of this.Sources || []) {
-			let whenUpdated = Source.whenUpdatedFrom(Source, version)
+			let whenUpdated = Source.whenUpdatedInContext && Source.whenUpdatedInContext()
 			if (whenUpdated && whenUpdated.then) {
 				promises.push(whenUpdated)
 			}
@@ -816,7 +814,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
 			context.ifModifiedSince = undefined
 		}
-		let result = when(this.readyState || this.loadLatestLocalData(), () => {
+		let result = when(when(this.constructor.whenUpdatedInContext(), () =>
+			this.readyState || this.loadLatestLocalData()), () => {
 			const getValue = () => {
 				if (this.cachedVersion > -1 && context && context.preferJSON && this.allowDirectJSON) {
 					context.ifModifiedSince = this.cachedVersion

@@ -13,6 +13,7 @@ const LAST_INDEXED_VERSION_KEY = Buffer.from([1, 2])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 120
 const INITIALIZATION_SOURCE = 'is-initializing'
+const DEFAULT_SESSION = {}
 
 export interface IndexRequest {
 	previousState?: any
@@ -386,15 +387,18 @@ export const Index = ({ Source }) => {
 			return Promise.resolve(spawn(this.rebuildIndex()))
 		}
 
-		// static returnsAsyncIterables = true // maybe at some point default this to on
-
-		static whenUpdatedFrom(Source, version) {
-			return when(super.whenUpdatedFrom(Source, version), () => {
-				if (this.whenProcessingComplete && (!version || version > this.whenProcessingComplete.version)) {
-					return this.requestProcessing(0)
-				}
+		static whenUpdatedInContext() {
+			let context = currentContext
+			let session = context && context.subject || DEFAULT_SESSION
+			let updatesInProgressMap = session.updatesInProgress
+			return when(Source.whenUpdatedInContext(), () => {
+				let whenReadable = updatesInProgressMap && updatesInProgressMap.get(this)
+				if (whenReadable)
+					return this.requestProcessing(0) // up the priority
 			})
 		}
+
+		// static returnsAsyncIterables = true // maybe at some point default this to on
 
 		static getInstanceIdsAndVersionsSince(version) {
 			// no version tracking with indices
@@ -465,6 +469,10 @@ export const Index = ({ Source }) => {
 		static updated(event, by) {
 			// we don't propagate immediately through the index, as the indexing must take place
 			// to determine the affecting index entries, and the indexing will send out the updates
+			let context = currentContext
+			let session = context && context.subject || DEFAULT_SESSION
+			let updatesInProgressMap = session.updatesInProgress || (session.updatesInProgress = new Map())
+
 			this.updateVersion()
 			let previousState = event.previousValues && event.previousValues.get(by)
 			let id = by && by.constructor == this.Sources[0] && by.id // if we are getting an update from a source instance
@@ -509,6 +517,13 @@ export const Index = ({ Source }) => {
 				}
 				updatesInProgress.push(this.whenFullyReadable)
 			}
+			let whenFullyReadable = this.whenFullyReadable
+			updatesInProgressMap.set(this, whenFullyReadable.then(() => {
+				// clean up
+				if (updatesInProgressMap.get(this) === whenFullyReadable) {
+					updatesInProgressMap.delete(this)
+				}
+			}))
 			if (event && event.type == 'reset') {
 				return super.updated(event, by)
 			}

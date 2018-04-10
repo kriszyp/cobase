@@ -12,6 +12,7 @@ export default class ArrayLikeIterable {
 			let iterator = source[Symbol.iterator](async)
 			return {
 				next(resolvedResult) {
+					let result
 					do {
 						let iteratorResult
 						if (resolvedResult) {
@@ -26,7 +27,7 @@ export default class ArrayLikeIterable {
 						if (iteratorResult.done === true) {
 							return iteratorResult
 						}
-						let result = func(iteratorResult.value)
+						result = func(iteratorResult.value)
 						if (result && result.then) {
 							return result.then(result =>
 								result == SKIP ?
