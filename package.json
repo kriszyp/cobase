@@ -1,7 +1,7 @@
 {
   "name": "cobase",
   "author": "Kris Zyp",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Compositional data stores of reactive JavaScript transform, index, reduce, and join functions, built on NodeJS, Alkali, and LevelDB",
   "license": "MIT",
   "repository": {
@@ -14,7 +14,7 @@
   "main": "./dist/index.js",
   "typings": "./index.d.ts",
   "dependencies": {
-    "alkali": "^0.19.19",
+    "alkali": "^0.19.22",
     "fs-extra": "^5.0.0",
     "ordered-binary": "^0.0.2",
     "leveldown": "github:kriszyp/leveldown#v1.8.1-sync"
