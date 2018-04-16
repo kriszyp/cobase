@@ -13,7 +13,9 @@ const LAST_INDEXED_VERSION_KEY = Buffer.from([1, 2])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 120
 const INITIALIZATION_SOURCE = 'is-initializing'
-const DEFAULT_SESSION = {}
+const DEFAULT_CONTEXT = {
+	updatesInProgress: new Map()
+}
 
 export interface IndexRequest {
 	previousState?: any
@@ -245,6 +247,7 @@ export const Index = ({ Source }) => {
 				yield this.db.clear()
 				this.updateDBVersion()
 			} else if (idsAndVersionsToReindex.length > 0) {
+				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
 				yield db.iterable({
 					gt: Buffer.from([2])
 				}).map(({ key, value }) => {
@@ -384,13 +387,12 @@ export const Index = ({ Source }) => {
 		static resetAll() {
 			// rebuild index
 			console.log('Index', this.name, 'resetAll')
-			return Promise.resolve(spawn(this.rebuildIndex()))
+			return Promise.resolve(spawn(this.rebuildIndex())).then(() => spawn(this.resumeIndex()))
 		}
 
 		static whenUpdatedInContext() {
-			let context = currentContext
-			let session = context && context.subject || DEFAULT_SESSION
-			let updatesInProgressMap = session.updatesInProgress
+			let context = currentContext || DEFAULT_CONTEXT
+			let updatesInProgressMap = context.updatesInProgress
 			return when(Source.whenUpdatedInContext(), () => {
 				let whenReadable = updatesInProgressMap && updatesInProgressMap.get(this)
 				if (whenReadable)
@@ -460,18 +462,17 @@ export const Index = ({ Source }) => {
 			})
 		}
 
-		static register(module) {
+		static initialize(module) {
 			this.Sources = [Source]
 				allIndices.push(this)
-			return when(super.register(module), () =>
+			return when(super.initialize(module), () =>
 				spawn(this.resumeIndex()))
 		}
 		static updated(event, by) {
 			// we don't propagate immediately through the index, as the indexing must take place
 			// to determine the affecting index entries, and the indexing will send out the updates
-			let context = currentContext
-			let session = context && context.subject || DEFAULT_SESSION
-			let updatesInProgressMap = session.updatesInProgress || (session.updatesInProgress = new Map())
+			let context = currentContext || DEFAULT_CONTEXT
+			let updatesInProgressMap = context.updatesInProgress
 
 			this.updateVersion()
 			let previousState = event.previousValues && event.previousValues.get(by)
@@ -518,12 +519,13 @@ export const Index = ({ Source }) => {
 				updatesInProgress.push(this.whenFullyReadable)
 			}
 			let whenFullyReadable = this.whenFullyReadable
-			updatesInProgressMap.set(this, whenFullyReadable.then(() => {
+			updatesInProgressMap.set(this, whenFullyReadable)
+			whenFullyReadable.then(() => {
 				// clean up
 				if (updatesInProgressMap.get(this) === whenFullyReadable) {
 					updatesInProgressMap.delete(this)
 				}
-			}))
+			})
 			if (event && event.type == 'reset') {
 				return super.updated(event, by)
 			}

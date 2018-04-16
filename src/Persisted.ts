@@ -17,11 +17,6 @@ const DB_VERSION_KEY = Buffer.from([1, 1]) // SOH, code 1
 const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // SOH, code 2
 const INITIALIZATION_SOURCE = { isInitializing: true }
 
-export interface ContextWithOptions extends Context {
-	preferJSON?: boolean
-	ifModifiedSince?: number
-}
-
 global.cache = expirationStrategy // help with debugging
 
 class InstanceIds extends Transform.as(VArray) {
@@ -989,8 +984,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return super.getInstanceIds(range)
 	}
 
-	static register(sourceCode) {
-		const registered = super.register(sourceCode)
+	static initialize(sourceCode) {
+		const registered = super.initialize(sourceCode)
 		when(registered, () => {
 			let receivedPendingVersion = []
 			for (let Source of this.Sources || []) {
@@ -1055,27 +1050,21 @@ export function secureAccess<T>(Class: T): T & Secured {
 						let context = currentContext
 						// create a new derivative context that includes the session, but won't
 						// update the version/timestamp
-						return context.newContext().executeWithin(() => {
-							let awaitingListener, variable
-							let result = when(secureAccess.checkPermissions(permissions, target, name, [...arguments]), (permitted) => {
+						return new Transform(null, () => context.newContext().executeWithin(() =>
+							when(secureAccess.checkPermissions(permissions, target, name, Array.from(arguments)), (permitted) => {
 								if (permitted !== true) {
 									throw new AccessError('User does not have required permissions: ' + permitted + ' for ' + Class.name)
 								}
 								return context.executeWithin(() => {
-									variable = value.apply(target, arguments)
-									if (awaitingListener) {
-										variable.notifies(awaitingListener)
+									let variable = value.apply(target, arguments)
+									if (variable && variable.notifies) {
+										// don't let the JS promise prematurely resolve the variable before it gets to alkali, so we can resolve it in the correct context
+										return { __variable: variable }
 									}
 									return variable
 								})
 							})
-							// promises get resolved all the way through, so need to proxy notifies calls
-							if (result && result.then && !result.notifies) {
-								result.notifies = listener => awaitingListener = listener
-								result.stopNotifies = listener => variable.stopNotifies(listener)
-							}
-							return result
-						})
+						))
 					}
 				} else {
 					return value
@@ -1086,6 +1075,7 @@ export function secureAccess<T>(Class: T): T & Secured {
 	}
 	return Class
 }
+
 const checkInputTransform = {
 	apply(instance, args) {
 		// if the main input is undefined, treat as deleted object and pass on the undefined without running the transform
