@@ -195,7 +195,7 @@ export const Index = ({ Source }) => {
 							cpuUsage = process.cpuUsage()
 							let lastCpuUsage = cpuTotalUsage
 							cpuTotalUsage = cpuUsage.user + cpuUsage.system
-							cpuAdjustment = (cpuAdjustment + 100000 / (cpuTotalUsage - lastCpuUsage + 10000)) / 2
+							cpuAdjustment = (cpuAdjustment + 40000 / (cpuTotalUsage - lastCpuUsage + 10000)) / 2
 							/* Can be used to measure performance
 							let [seconds, billionths] = process.hrtime(lastStart)
 							lastStart = process.hrtime()
@@ -391,8 +391,8 @@ export const Index = ({ Source }) => {
 		}
 
 		static whenUpdatedInContext() {
-			let context = currentContext || DEFAULT_CONTEXT
-			let updatesInProgressMap = context.updatesInProgress
+			let context = currentContext
+			let updatesInProgressMap = context && context.updatesInProgress || DEFAULT_CONTEXT.updatesInProgress
 			return when(Source.whenUpdatedInContext(), () => {
 				let whenReadable = updatesInProgressMap && updatesInProgressMap.get(this)
 				if (whenReadable)
@@ -471,8 +471,8 @@ export const Index = ({ Source }) => {
 		static updated(event, by) {
 			// we don't propagate immediately through the index, as the indexing must take place
 			// to determine the affecting index entries, and the indexing will send out the updates
-			let context = currentContext || DEFAULT_CONTEXT
-			let updatesInProgressMap = context.updatesInProgress
+			let context = currentContext
+			let updatesInProgressMap = context && context.updatesInProgress || DEFAULT_CONTEXT.updatesInProgress
 
 			this.updateVersion()
 			let previousState = event.previousValues && event.previousValues.get(by)
