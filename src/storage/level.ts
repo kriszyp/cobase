@@ -7,6 +7,7 @@ const STARTING_ARRAY = [null]
 const AS_STRING = {
 	asBuffer: false
 }
+export const allDbs = new Map()
 function genericErrorHandler(err) {
 	if (err) {
 		console.error(err)
@@ -24,13 +25,18 @@ export function open(name): Database {
 		fs.removeSync(location + '/LOCK') // clean up any old locks
 	} catch(e) {}
 	let db = leveldown(location)
-
 	db.openSync()
-	return {
+	const cobaseDb = {
 		db,
+		bytesRead: 0,
+		bytesWritten: 0,
+		reads: 0,
+		writes: 0,
 		getSync(id, asBuffer) {
 			try {
 				let result = db.getSync(id, asBuffer ? undefined : AS_STRING)
+				this.bytesRead += result && result.length || 0
+				this.reads++
 				return (asBuffer && result) ? Buffer.from(result) : result
 			} catch (error) {
 				if (error.message.startsWith('NotFound')) {
@@ -57,6 +63,8 @@ export function open(name): Database {
 							reject(err)
 						}
 					} else {
+						this.bytesRead += value && value.length || 0
+						this.reads++
 						resolve(value)
 					}
 				}
@@ -64,9 +72,13 @@ export function open(name): Database {
 			})
 		},
 		putSync(id, value) {
+			this.bytesWritten += value && value.length || 0
+			this.writes++
 			db.putSync(id, value)
 		},
 		put(id, value) {
+			this.bytesWritten += value && value.length || 0
+			this.writes++
 			return new Promise((resolve, reject) => {
 				let callbacks = []
 				db.put(id, value, (err, value) => {
@@ -82,6 +94,7 @@ export function open(name): Database {
 			})
 		},
 		remove(id) {
+			this.writes++
 			return new Promise((resolve, reject) => {
 				db.del(id, (err, value) => {
 					if (err) {
@@ -100,6 +113,7 @@ export function open(name): Database {
 			})
 		},
 		removeSync(id) {
+			this.writes++
 			return db.delSync(id)
 		},
 		iterator(options) {
@@ -127,6 +141,7 @@ export function open(name): Database {
 								if (async) {
 									return new Promise((resolve, reject) =>
 										iterator.binding.next((err, nextArray, nextFinished) => {
+											cobaseDb.reads++
 											if (err) {
 												reject(err)
 											} else {
@@ -148,6 +163,7 @@ export function open(name): Database {
 						}
 						let key = array[length - ++i]
 						let value = array[length - ++i]
+						cobaseDb.bytesRead += value && value.length || 0
 						return {
 							value: {
 								key, value
@@ -201,6 +217,8 @@ export function open(name): Database {
 			return db.batchSync(operations)
 		},
 		batch(operations) {
+			this.writes += operations.length
+			this.bytesWritten += operations.reduce((a, b) => a + (b.value && b.value.length || 0), 0)
 			return new Promise((resolve, reject) => {
 				db.batch(operations, (err, value) => {
 					if (err) {
@@ -236,6 +254,8 @@ export function open(name): Database {
 			})
 		}
 	}
+	allDbs.set(name, cobaseDb)
+	return cobaseDb
 
 	function alterDatabase(action) {
 		if (db.repairing) {
