@@ -629,9 +629,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			entity.assignPreviousValue(event)
 		}
 		expirationStrategy.deleteEntry(entity)
-		this.dbPut(id)
+		let whenWritten = this.dbPut(id)
 		this.instancesById.delete(id)
-		return this.updated(event, entity)
+		this.updated(event, entity)
+		return whenWritten
 	}
 
 	get [valueProperty]() {
