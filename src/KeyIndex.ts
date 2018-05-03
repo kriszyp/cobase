@@ -69,24 +69,29 @@ export const Index = ({ Source }) => {
 				// this is for recording changed entities and removing the values that previously had been indexed
 				let previousEntries
 				let entity = Source.for(id)
-				if (previousState && previousState.then) {
-					previousState = yield previousState
-				}
-				if (previousState !== undefined) { // if no data, then presumably no references to clear
-					// use the same mapping function to determine values to remove
-					previousEntries = yield this.indexBy(previousState, id)
-					if (typeof previousEntries == 'object') {
-						if (!(previousEntries instanceof Array)) {
-							previousEntries = [previousEntries]
-						}
-						for (let entry of previousEntries) {
-							let previousValue = entry.value
-							previousValue = previousValue === undefined ? '' : JSON.stringify(previousValue)
-							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
-						}
-					} else if (previousEntries != undefined) {
-						toRemove.set(previousEntries, '')
+				try {
+					if (previousState && previousState.then) {
+						previousState = yield previousState
 					}
+					if (previousState !== undefined) { // if no data, then presumably no references to clear
+						// use the same mapping function to determine values to remove
+						previousEntries = yield this.indexBy(previousState, id)
+						if (typeof previousEntries == 'object') {
+							if (!(previousEntries instanceof Array)) {
+								previousEntries = [previousEntries]
+							}
+							for (let entry of previousEntries) {
+								let previousValue = entry.value
+								previousValue = previousValue === undefined ? '' : JSON.stringify(previousValue)
+								toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
+							}
+						} else if (previousEntries != undefined) {
+							toRemove.set(previousEntries, '')
+						}
+					}
+				} catch(error) {
+					if (indexRequest.version !== version) return // don't log errors from invalidated states
+					console.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
 				}
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 				if (!deleted) {
@@ -99,12 +104,19 @@ export const Index = ({ Source }) => {
 							// try again
 							data = yield entity.valueOf(INDEXING_MODE)
 						} catch(error) {
+							if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name)
 						}
 					}
 					if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 					// let the indexBy define how we get the set of values to index
-					let entries = data === undefined ? data : yield this.indexBy(data, id)
+					let entries
+					try {
+						entries = data === undefined ? data : yield this.indexBy(data, id)
+					} catch(error) {
+						if (indexRequest.version !== version) return // if at any point it is invalidated, break out
+						console.warn('Error indexing value', error, 'for', this.name, id)
+					}
 					if (typeof entries != 'object' || !(entries instanceof Array)) {
 						// allow single primitive key
 						entries = entries === undefined ? [] : [entries]
