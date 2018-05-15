@@ -26,8 +26,8 @@ class InstanceIds extends Transform.as(VArray) {
 	transform() {
 		return when(this.Class.resetProcess, () => this.Class.getInstanceIds())
 	}
-	valueOf() {
-		return when(super.valueOf(true), ids => {
+	getValue() {
+		return when(super.getValue(true), ids => {
 			expirationStrategy.useEntry(this, ids.length)
 			return ids
 		})
@@ -392,6 +392,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
+	valueOf() {
+		return super.valueOf(true) // always allow promises to be returned
+	}
+
 	updated(event = new ReplacedEvent(), by?) {
 		if (!event.source) {
 			event.source = this
@@ -410,6 +414,15 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		if (Class.updateWithPrevious) {
 			this.assignPreviousValue(event)
+		}
+		// record the update in context so subsquent reads are consistent
+		if (this.listenersWithContext) {
+			for (let listener of this.listeners || []) {
+				const context = this.listenersWithContext.get(listener)
+				if (context) {
+					this.addAccessToContext(context)
+				}
+			}
 		}
 		if (by === this) // skip reset
 			Variable.prototype.updated.apply(this, arguments)
@@ -472,13 +485,44 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return version
 	}
 
-	static notifies(target) {
+	notifies(target) {
+		let context = currentContext
+		if (context) {
+			(this.listenersWithContext || (this.listenersWithContext = new Map())).set(target, context)
+		}
+		return super.notifies(target)
+	}
+	stopNotifies(target) {
 		// standard variable handling
+		if (this.listenersWithContext) {
+			this.listenersWithContext.delete(target)
+		}
+		return super.stopNotifies(target)
+	}
+
+	static notifies(target) {
+		let context = currentContext
+		if (context) {
+			(this.listenersWithContext || (this.listenersWithContext = new Map())).set(target, context)
+		}
+		// standard variable handling (don't use alkali's contextual notifies)
 		return Variable.prototype.notifies.call(this, target)
 	}
 	static stopNotifies(target) {
 		// standard variable handling
+		if (this.listenersWithContext) {
+			this.listenersWithContext.delete(target)
+		}
 		return Variable.prototype.stopNotifies.call(this, target)
+	}
+	addAccessToContext(context?) {
+		context = context || currentContext
+		if (context && context.updatesInProgress && this.updatesInProgress) {
+			for (const [Source, whenReadable] of this.updatesInProgress) {
+				let existingWhenReadable = context.updatesInProgress.get(Source)
+				context.updatesInProgress.set(Source, existingWhenReadable || whenReadable) // TODO: whichever is newer
+			}
+		}
 	}
 	static whenUpdatedInContext() {
 		// transitively wait on all sources that need to update to this version
@@ -502,6 +546,36 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			instanceIds.Class = this
 		}
 		return instanceIds
+	}
+	exclusiveLock(executeWithLock: () => any) {
+		let promisedResult
+		if (this.currentLock) {
+			let context = currentContext
+			const executeInContext = () => context.executeWithin(executeWithLock)
+			promisedResult = this.currentLock.then(executeInContext, executeInContext)
+		} else {
+			let result = executeWithLock()
+			if (result && result.then)
+				promisedResult = result
+			else
+				return result
+		}
+		let thisLock, sync
+		const afterExecution = () => {
+			if (thisLock === this.currentLock) {
+				this.currentLock = null
+			}
+			sync = true
+		}
+		thisLock = this.currentLock = promisedResult.then(afterExecution, (error) => {
+			// Probably need to review if uncaught promise rejections are properly handled
+			console.error(error)
+			afterExecution()
+		})
+		if (sync) {
+			this.currentLock = null
+		}
+		return promisedResult
 	}
 })
 
@@ -534,8 +608,13 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	loadLatestLocalData() {
 		this.readyState = 'loading-local-data'
-		return when(this.loadLocalData(false, this.allowDirectJSON), (data) => {
+		let isSync
+		let promise = when(this.loadLocalData(false, this.allowDirectJSON), (data) => {
 			const { version, asJSON } = data
+			if (isSync === undefined)
+				isSync = true
+			else
+				this.promise = null
 			if (asJSON) {
 				this.readyState = 'up-to-date'
 				this.version = Math.max(version, this.version || 0)
@@ -551,6 +630,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			}
 			return data
 		})
+		if (isSync)
+			return promise
+		isSync = false
+		return this.promise = promise
 	}
 
 	static getInstanceIds(range: IterableOptions) {
@@ -705,6 +788,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				if (newToCache) {
 					// fire an updated, if it is a new object
 					let event = new AddedEvent()
+					event.source = INITIALIZATION_SOURCE
 					event.version = version
 					Class.instanceSetUpdated(event)
 					Class.updated(event, this)
@@ -805,21 +889,24 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this.db[this.isAsync ? 'get': 'getSync'](toBufferKey(key), asBuffer)
 	}
 
-	valueOf() {
+	getValue() {
 		let context = currentContext
 		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
 			context.ifModifiedSince = undefined
 		}
+		this.addAccessToContext()
 		let result = when(when(this.constructor.whenUpdatedInContext(), () =>
-			this.readyState || this.loadLatestLocalData()), () => {
+			this.readyState ?
+				this.readyState == 'loading-local-data' ? this.promise : null :
+				this.loadLatestLocalData()), () => {
 			const getValue = () => {
 				if (this.cachedVersion > -1 && context && context.preferJSON && this.allowDirectJSON) {
 					context.ifModifiedSince = this.cachedVersion
-					return when(super.valueOf(true), value =>
+					return when(super.getValue(), value =>
 						value === NOT_MODIFIED ?
 							{ asJSON: this.asJSON } : value)
 				}
-				return super.valueOf(true)
+				return super.getValue()
 			}
 			if (context && currentContext !== context)
 				return context.executeWithin(getValue)
@@ -894,6 +981,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		// we skip loadLocalData and pretend it wasn't in the cache... not clear if
 		// that is how we want is() to behave or not
 		event = event || new ReplacedEvent()
+		event.source = INITIALIZATION_SOURCE
 		this.updated(event, this)
 		this.cachedVersion = this.version
 		this.cachedValue = value
@@ -1051,21 +1139,29 @@ export function secureAccess<T>(Class: T): T & Secured {
 						let context = currentContext
 						// create a new derivative context that includes the session, but won't
 						// update the version/timestamp
-						return new Transform(null, () => context.newContext().executeWithin(() =>
-							when(secureAccess.checkPermissions(permissions, target, name, Array.from(arguments)), (permitted) => {
+						return context.newContext().executeWithin(() => {
+							let awaitingListener, variable, isAsync = false
+							const permitted = when(secureAccess.checkPermissions(permissions, target, name, Array.from(arguments)), (permitted) => {
 								if (permitted !== true) {
 									throw new AccessError('User does not have required permissions: ' + permitted + ' for ' + Class.name)
 								}
-								return context.executeWithin(() => {
-									let variable = value.apply(target, arguments)
-									if (variable && variable.notifies) {
-										// don't let the JS promise prematurely resolve the variable before it gets to alkali, so we can resolve it in the correct context
-										return { __variable: variable }
-									}
-									return variable
-								})
 							})
-						))
+							const whenPermitted = () =>
+								context.executeWithin(() => value.apply(target, arguments))
+							if (permitted.then) {
+								let result
+								let whenFinished = permitted.then(() => {
+									result = whenPermitted()
+								})
+								return {
+									then: (onFulfilled, onRejected) =>
+										whenFinished.then(() => {
+											return onFulfilled(result)
+										}, onRejected)
+								}
+							}
+							return whenPermitted()
+						})
 					}
 				} else {
 					return value

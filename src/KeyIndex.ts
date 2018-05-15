@@ -94,6 +94,7 @@ export const Index = ({ Source }) => {
 					console.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
 				}
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out
+				let entries
 				if (!deleted) {
 					let attempts = 0
 					let data
@@ -110,7 +111,6 @@ export const Index = ({ Source }) => {
 					}
 					if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 					// let the indexBy define how we get the set of values to index
-					let entries
 					try {
 						entries = data === undefined ? data : yield this.indexBy(data, id)
 					} catch(error) {
@@ -151,6 +151,9 @@ export const Index = ({ Source }) => {
 						key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
 					})
 					addUpdatedIndexEntry(key, sources, triggers)
+				}
+				if (Index.onIndexEntry) {
+					Index.onIndexEntry(this.name, id, previousEntries, entries)
 				}
 				if (indexRequest.version) {
 			//		console.log('indexRequest.version', indexRequest.version)
@@ -451,7 +454,7 @@ export const Index = ({ Source }) => {
 			this.cachedVersion = -1
 		}
 
-		valueOf() {
+		getValue() {
 			// First: ensure that all the source instances are up-to-date
 			if (currentContext) {
 				let context = currentContext
@@ -459,7 +462,7 @@ export const Index = ({ Source }) => {
 				if (currentContext.requestedVersion) {
 					return when(this.constructor.whenUpdatedFrom(currentContext.requestVersion), () => {
 						context.setVersion(this.constructor.version)
-						return when(super.valueOf(true), (value) => {
+						return when(super.getValue(), (value) => {
 							expirationStrategy.useEntry(this, this.approximateSize * 10) // multiply by 10 because generally we want to expire index values pretty quickly
 							return value
 						})
@@ -468,7 +471,7 @@ export const Index = ({ Source }) => {
 					context.setVersion(this.constructor.version)
 				}
 			}
-			return when(super.valueOf(true), (value) => {
+			return when(super.getValue(), (value) => {
 				expirationStrategy.useEntry(this, this.approximateSize * 10) // multiply by 10 because generally we want to expire index values pretty quickly
 				return value
 			})
@@ -523,6 +526,8 @@ export const Index = ({ Source }) => {
 						indexRequest.sources = new Set()
 					}
 					indexRequest.sources.add(event.source)
+					const updatesInProgressMap = event.source.updatesInProgress || (event.source.updatesInProgress = new Map())
+					updatesInProgressMap.set(this, this.whenFullyReadable)
 				}
 				let updatesInProgress = event.updatesInProgress
 				if (!updatesInProgress) {
