@@ -16,7 +16,7 @@ const EMPTY_CACHE_ENTRY = {}
 const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // SOH, code 1
 const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // SOH, code 2
-const INITIALIZATION_SOURCE = { isInitializing: true }
+const INITIALIZATION_SOURCE = 'is-initializing'
 
 global.cache = expirationStrategy // help with debugging
 
@@ -400,6 +400,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	updated(event = new ReplacedEvent(), by?) {
 		if (!event.source) {
 			event.source = this
+		}
+		const context = currentContext
+		if (context && !event.triggers && context.connectionId) {
+			event.triggers = [ context.connectionId ]
 		}
 
 		let Class = this.constructor
@@ -787,7 +791,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				if (newToCache) {
 					// fire an updated, if it is a new object
 					let event = new AddedEvent()
-					event.source = INITIALIZATION_SOURCE
+					event.triggers = [ INITIALIZATION_SOURCE ]
 					event.version = version
 					Class.instanceSetUpdated(event)
 					Class.updated(event, this)
@@ -980,7 +984,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		// we skip loadLocalData and pretend it wasn't in the cache... not clear if
 		// that is how we want is() to behave or not
 		event = event || new ReplacedEvent()
-		event.source = INITIALIZATION_SOURCE
+		event.triggers = [ INITIALIZATION_SOURCE ]
 		this.updated(event, this)
 		this.cachedVersion = this.version
 		this.cachedValue = value
@@ -1090,7 +1094,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						min = Math.min(version, min)
 						max = Math.max(version, max)
 						let event = new ReplacedEvent()
-						event.source = INITIALIZATION_SOURCE
+						event.triggers = [ INITIALIZATION_SOURCE ]
 						this.for(id).updated(event)
 					}
 					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
