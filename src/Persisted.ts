@@ -9,6 +9,7 @@ import Index from './KeyIndex'
 import { AccessError } from './util/errors'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import { Database, IterableOptions, OperationsArray } from './storage/Database'
+import { mergeProgress } from './UpdateProgress'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const EMPTY_CACHE_ENTRY = {}
@@ -438,6 +439,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			listener.updated(event, this)
 		}
 
+		mergeProgress(this, event) // record processing progress from the event, on this object
+
 		event.whenWritten = Class.whenWritten // promise for when the update is recorded, this will overwrite any downstream assignment of this property
 		return event
 	}
@@ -517,12 +520,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	addAccessToContext(context?) {
 		context = context || currentContext
-		if (context && context.updatesInProgress && this.updatesInProgress) {
-			for (const [Source, whenReadable] of this.updatesInProgress) {
-				let existingWhenReadable = context.updatesInProgress.get(Source)
-				context.updatesInProgress.set(Source, existingWhenReadable || whenReadable) // TODO: whichever is newer
-			}
-		}
+		if (context)
+			mergeProgress(context, this)
 	}
 	static whenUpdatedInContext() {
 		// transitively wait on all sources that need to update to this version

@@ -4,6 +4,7 @@ import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
 import { OperationsArray, IterableOptions, Database } from './storage/Database'
+import { mergeProgress, registerProcessing, whenClassIsReady } from './UpdateProgress'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const DEFAULT_INDEXING_CONCURRENCY = 15
@@ -333,7 +334,6 @@ export const Index = ({ Source }) => {
 			let updatedIndexEntriesArray = Array.from(updatedIndexEntries).reverse()
 			updatedIndexEntries = new Map()
 			let indexedEntry
-			let whenReadable = new Set([this.whenFullyReadable])
 			let whenWritten = new Set()
 			while ((indexedEntry = updatedIndexEntriesArray.pop())) {
 				try {
@@ -342,12 +342,7 @@ export const Index = ({ Source }) => {
 					event.sources = indexEntryUpdate.sources
 					event.triggers = indexEntryUpdate.triggers
 					this.for(indexedEntry[0]).updated(event)
-					if (event.updatesInProgress) {
-						// promise to wait on, wait and continue
-						for (let updateInProgress of event.updatesInProgress) {
-							whenReadable.add(updateInProgress)
-						}
-					}
+					mergeProgress(this, event) // all downstream update progress is merged into our own list of ongoing progress
 					if (event.whenWritten) {
 						whenWritten.add(event.whenWritten)
 					}
@@ -355,7 +350,6 @@ export const Index = ({ Source }) => {
 					console.error('Error sending index updates', error)
 				}
 			}
-			this.whenFullyReadable = Promise.all(whenReadable)
 			return Promise.all(whenWritten)
 		}
 
@@ -407,9 +401,9 @@ export const Index = ({ Source }) => {
 
 		static whenUpdatedInContext() {
 			let context = currentContext
-			let updatesInProgressMap = context && context.updatesInProgress || DEFAULT_CONTEXT.updatesInProgress
+			let updateContext = (context && context.updatesInProgress) ? context : DEFAULT_CONTEXT
 			return when(Source.whenUpdatedInContext(), () => {
-				let whenReadable = updatesInProgressMap && updatesInProgressMap.get(this)
+				let whenReadable = whenClassIsReady(this, updateContext)
 				if (whenReadable)
 					return this.requestProcessing(0) // up the priority
 			})
@@ -487,7 +481,7 @@ export const Index = ({ Source }) => {
 			// we don't propagate immediately through the index, as the indexing must take place
 			// to determine the affecting index entries, and the indexing will send out the updates
 			let context = currentContext
-			let updatesInProgressMap = context && context.updatesInProgress || DEFAULT_CONTEXT.updatesInProgress
+			let updateContext = (context && context.updatesInProgress) ? context : DEFAULT_CONTEXT
 
 			this.updateVersion()
 			let previousState = event.previousValues && event.previousValues.get(by)
@@ -495,7 +489,7 @@ export const Index = ({ Source }) => {
 			if (id && !this.gettingAllIds) {
 				let indexRequest = this.queue.get(id)
 				if (indexRequest) {
-					// put it at that end so version numbers are sequential
+					// put it at that end so version numbers are
 					this.queue.delete(id)
 					this.queue.set(id, indexRequest)
 					indexRequest.version = event.version
@@ -526,23 +520,12 @@ export const Index = ({ Source }) => {
 						indexRequest.sources = new Set()
 					}
 					indexRequest.sources.add(event.source)
-					const updatesInProgressMap = event.source.updatesInProgress || (event.source.updatesInProgress = new Map())
-					updatesInProgressMap.set(this, this.whenFullyReadable)
 				}
-				let updatesInProgress = event.updatesInProgress
-				if (!updatesInProgress) {
-					updatesInProgress = event.updatesInProgress = []
-				}
-				updatesInProgress.push(this.whenFullyReadable)
+
+				registerProcessing(updateContext, this, this.whenFullyReadable)
+				registerProcessing(event, this, this.whenFullyReadable)
+
 			}
-			let whenFullyReadable = this.whenFullyReadable
-			updatesInProgressMap.set(this, whenFullyReadable)
-			whenFullyReadable.then(() => {
-				// clean up
-				if (updatesInProgressMap.get(this) === whenFullyReadable) {
-					updatesInProgressMap.delete(this)
-				}
-			})
 			if (event && event.type == 'reset') {
 				return super.updated(event, by)
 			}
@@ -584,7 +567,7 @@ export const Index = ({ Source }) => {
 					}))
 				this.whenProcessingComplete.version = this.version
 				this.whenFullyReadable = this.whenCommitted =
-					this.whenProcessingComplete.then(() => whenUpdatesReadable)
+					this.whenProcessingComplete.then(() => this)
 			}
 			return this.whenProcessingComplete
 		}
