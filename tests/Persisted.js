@@ -5,8 +5,8 @@ suite('Persisted', () => {
 	Persisted.dbFolder = 'tests/db'
 	Cached.dbFolder = 'tests/db'
 	class Test extends Persisted {
-
 	}
+	Test.version = 1
 	class TestCached extends Cached.from(Test) {
 		transform(test) {
 			return {
@@ -14,17 +14,17 @@ suite('Persisted', () => {
 			}
 		}
 	}
+	TestCached.version = 1
 	suiteSetup(() => {
-		return Promise.all([
-			Test.register({ version: 1 }),
-			TestCached.register({ version: 1})
-		])
 	})
 
 	test('standalone table', () => {
 		Test.for(10).put({ name: 'ten' })
 		return Test.for(10).then(value => {
 			assert.equal(value.name, 'ten')
+			return Test.instanceIds.then(ids => {
+				assert.deepEqual(ids, [10])
+			})
 		})
 	})
 	test('cached transform', () => {
