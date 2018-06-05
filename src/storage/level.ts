@@ -35,7 +35,7 @@ export function open(name): Database {
 		getSync(id, asBuffer) {
 			try {
 				let result = db.getSync(id, asBuffer ? undefined : AS_STRING)
-				this.bytesRead += result && result.length || 0
+				this.bytesRead += result && result.length || 1
 				this.reads++
 				return (asBuffer && result) ? Buffer.from(result) : result
 			} catch (error) {
@@ -47,7 +47,10 @@ export function open(name): Database {
 			}
 		},
 		get(id) {
+			if (this.reads % Math.round(Math.min(this.reads * 100 / (this.bytesRead + 1) + 1, 5)) !== 0)
+				return this.getSync(id, true) // make some of the calls sync (they are faster for smaller values) if they have historically been very small values
 			return new Promise((resolve, reject) => {
+				this.reads++
 				let callback = (err, value) => {
 					if (err) {
 						if (err.message.startsWith('NotFound')) {
@@ -63,8 +66,7 @@ export function open(name): Database {
 							reject(err)
 						}
 					} else {
-						this.bytesRead += value && value.length || 0
-						this.reads++
+						this.bytesRead += value && value.length || 1
 						resolve(value)
 					}
 				}

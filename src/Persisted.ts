@@ -71,14 +71,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return false
 	}
 
-	get jsonMultiplier() {
-		return 1
-	}
-
-	get approximateSize() {
-		return this.asJSON ? this.asJSON.length * this.jsonMultiplier : 100
-	}
-
 	get staysUpdated() {
 		return true
 	}
@@ -584,6 +576,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Base {
 
+	get jsonMultiplier() {
+		return 1
+	}
+
+	get approximateSize() {
+		return this.asJSON ? this.asJSON.length * this.jsonMultiplier : 100
+	}
+
 	loadLocalData(now, asBuffer) {
 		let Class = this.constructor
 		let db = Class.db
@@ -690,7 +690,13 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			}).filter(idAndVersion => {
 				return idAndVersion
 			}).asArray.then(idsAndVersions => {
-				idsAndVersions.sort((a, b) => a.version > b.version ? 1 : -1)
+				if (idsAndVersions.length > 10000) {
+					console.info('Sorting', idsAndVersions.length, 'versions of', this.name, 'for resuming updates, this may take some time')
+				}
+				idsAndVersions.sort((a, b) => a.version > b.version ? 1 : a.version < b.version ? -1 : 0)
+				if (idsAndVersions.length > 10000) {
+					console.info('Finished sorting', this.name)
+				}
 				idsAndVersions.isFullReset = isFullReset
 				return idsAndVersions
 			})
@@ -889,7 +895,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				return pendingWrite.get(key).value
 			}
 		}
-		return this.db[this.isAsync ? 'get': 'getSync'](toBufferKey(key), asBuffer)
+		return this.db[this.isSync ? 'getSync': 'get'](toBufferKey(key), asBuffer)
 	}
 
 	getValue() {

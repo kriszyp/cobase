@@ -358,6 +358,7 @@ export const Index = ({ Source }) => {
 			let iterable = this.getIndexedValues({
 				gt: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
 				lt: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
+				recordApproximateSize: true,
 			})
 			return this.constructor.returnsAsyncIterables ? iterable : iterable.asArray
 		}
@@ -374,8 +375,12 @@ export const Index = ({ Source }) => {
 		// Get a range of indexed entries for this id (used by Reduced)
 		getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
 			const db: Database = this.constructor.db
+			let approximateSize = 0
 			return db.iterable(range).map(({ key, value }) => {
 				let [, sourceId] = fromBufferKey(key, true)
+				if (range.recordApproximateSize) {
+					this.approximateSize = approximateSize += key.length + (value && value.length || 10)
+				}
 				return returnFullKeyValue ? {
 					key: sourceId,
 					value: value !== null ? value.length > 0 ? JSON.parse(value) : Source.for(sourceId) : value,
@@ -416,33 +421,6 @@ export const Index = ({ Source }) => {
 			return Promise.resolve([])
 		}
 
-		get approximateSize() {
-			return approximateSize(this.cachedValue, 1)
-			function approximateSize(object, depth) {
-				if (!object) {
-					return 1
-				} else if (typeof object === 'string') {
-					return object.length + 1
-				} else if (typeof object === 'object') {
-					if (depth > 20) {
-						debugger
-						return 1000
-					}
-					if ('length' in object) {
-						return object.length * approximateSize(object[0], depth + 1) + 1
-					} else {
-						let size = 1
-						for (var i in object) {
-							size += approximateSize(object[i], depth + 1)
-						}
-						return size
-					}
-				} else {
-					return 1
-				}
-			}
-		}
-
 		clearCache() {
 			this.cachedValue = undefined
 			this.cachedVersion = -1
@@ -457,7 +435,7 @@ export const Index = ({ Source }) => {
 					return when(this.constructor.whenUpdatedFrom(currentContext.requestVersion), () => {
 						context.setVersion(this.constructor.version)
 						return when(super.getValue(), (value) => {
-							expirationStrategy.useEntry(this, this.approximateSize * 10) // multiply by 10 because generally we want to expire index values pretty quickly
+							expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
 							return value
 						})
 					})
@@ -466,7 +444,7 @@ export const Index = ({ Source }) => {
 				}
 			}
 			return when(super.getValue(), (value) => {
-				expirationStrategy.useEntry(this, this.approximateSize * 10) // multiply by 10 because generally we want to expire index values pretty quickly
+				expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
 				return value
 			})
 		}

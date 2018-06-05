@@ -1,6 +1,7 @@
 import { fork } from 'child_process'
 import when from './util/when'
 import { currentContext, Transform } from 'alkali'
+import { mergeProgress, registerProcessing, whenClassIsReady } from './UpdateProgress'
 
 const processMap = new Map<string, any>()
 export const runInProcess = (Class, { processName, module }) => {
@@ -9,8 +10,13 @@ export const runInProcess = (Class, { processName, module }) => {
 	if (inProcess) {
 		createProxyServer(Class)
 		Class.inProcess = true
+		const baseIndex = Class.index
+		Class.index = function(name) {
+			return getDerivedClass(name, () => baseIndex.apply(Class, arguments))
+		}
 		return Class
 	}
+	// Create proxy client object. First start the child process
 	let childProcess = processMap.get(processName)
 	if (!childProcess) {
 		console.log('creating child process', processName)
@@ -32,6 +38,14 @@ export const runInProcess = (Class, { processName, module }) => {
 			}
 		} else if (message.instanceId) {
 			Class.for(message.instanceId).updated()
+		} else if (message.processing) {
+			if (message.started) {
+				ProcessProxy.whenReadable = new Promise((resolve, reject) => {
+					messageFulfillments.set('__whenReadable__', { resolve, reject })
+				})
+			} else {
+				messageFulfillments.get('__whenReadable__').resolve(message.downstreamUpdates)
+			}
 		} else {
 			console.warn('Unknown child process message', message)
 		}
@@ -56,6 +70,15 @@ export const runInProcess = (Class, { processName, module }) => {
 				instancesById.set(id, instance)
 			}
 			return instance
+		}
+		static updated(event, by) {
+			let context = currentContext
+			let updateContext = (context && context.updatesInProgress) ? context : DEFAULT_CONTEXT
+			registerProcessing(updateContext, this, this.whenReadable)
+			registerProcessing(event, this, this.whenReadable)
+		}
+		static index(name) {
+			return getDerivedClass(name, () => Class.index(...arguments))
 		}
 		constructor(id) {
 			super()
@@ -125,6 +148,15 @@ export const runInProcess = (Class, { processName, module }) => {
 				}
 			})
 		}
+	}
+	ProcessProxy.allow = Class.allow
+	const derivedClasses = new Map()
+	const getDerivedClass = (name, getDerived) => {
+		let derivedClass = derivedClasses.get(name)
+		if (!derivedClass) {
+			derivedClasses.set(name, derivedClass = runInProcess(getDerived(), { processName, module }))
+		}
+		return derivedClass
 	}
 	return ProcessProxy
 }
