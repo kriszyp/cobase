@@ -9,4 +9,7 @@ TestProcess = runInProcess(TestProcess, {
 	processName: 'process-1',
 	module
 })
+exports.TestProcessByName = TestProcess.index('name')
+
+
 exports.TestProcess = TestProcess

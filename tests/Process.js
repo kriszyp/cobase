@@ -1,7 +1,7 @@
 const { Persisted } = require('..')
-const { TestProcess } = require('./model/TestProcess')
+const { TestProcess, TestProcessByName } = require('./model/TestProcess')
 const { removeSync } = require('fs-extra')
-suite('Process', () => {
+suite.only('Process', () => {
 	Persisted.dbFolder = 'tests/db'
 //	Persistable.dbFolder = 'tests/db'
 	suiteSetup(() => {
@@ -9,7 +9,9 @@ suite('Process', () => {
 
 	test('run-in-process', () => {
 		TestProcess.for(10).put({ name: 'ten' })
+		console.log('sent ten')
 		return TestProcess.for(10).then(value => {
+			console.log('got response')
 			assert.equal(value.name, 'ten')
 			return TestProcess.instanceIds.then(ids => {
 				assert.deepEqual(ids, [10])
@@ -19,6 +21,19 @@ suite('Process', () => {
 				})
 			})
 		})
+	})
+	test('run-in-process with index', () => {
+		TestProcess.for(10).put({ name: 'ten' }).then(() =>
+			TestProcessByName.for('ten').then(value => {
+				console.log('got response for index of ten')
+				assert.equal(value[0].name, 'ten')
+				return TestProcess.for(10).delete().then(() =>
+					TestProcessByName.for('ten').then(value => {
+						assert.equal(value.length, 0)
+					})
+				)
+			})
+		)
 	})
 
 	/*

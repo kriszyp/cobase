@@ -14,10 +14,13 @@
   "main": "./dist/index.js",
   "typings": "./index.d.ts",
   "dependencies": {
-    "alkali": "^0.19.25",
     "fs-extra": "^5.0.0",
     "leveldown": "github:kriszyp/leveldown#v1.8.2-sync",
+    "msgpack-lite": "^0.1.26",
     "ordered-binary": "^0.0.2"
+  },
+  "peerDependencies": {
+    "alkali": "^0.19.25"
   },
   "optionalDependencies": {
     "mach": "^1.3.8",

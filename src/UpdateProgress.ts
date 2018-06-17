@@ -30,3 +30,6 @@ export function registerProcessing(target: HasUpdateProgress, Source: Function, 
 	}
 	target.updatesInProgress.set(Source, promise)
 }
+export const DEFAULT_CONTEXT = {
+	updatesInProgress: new Map()
+}

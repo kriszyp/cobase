@@ -4,7 +4,7 @@ import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
 import { OperationsArray, IterableOptions, Database } from './storage/Database'
-import { mergeProgress, registerProcessing, whenClassIsReady } from './UpdateProgress'
+import { mergeProgress, registerProcessing, whenClassIsReady, DEFAULT_CONTEXT } from './UpdateProgress'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const DEFAULT_INDEXING_CONCURRENCY = 15
@@ -14,9 +14,6 @@ const LAST_INDEXED_VERSION_KEY = Buffer.from([1, 2])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 120
 const INITIALIZATION_SOURCE = 'is-initializing'
-const DEFAULT_CONTEXT = {
-	updatesInProgress: new Map()
-}
 
 export interface IndexRequest {
 	previousState?: any
@@ -52,6 +49,7 @@ export const Index = ({ Source }) => {
 
 	return class extends Persistable.as(VArray) {
 		version: number
+		static Sources = [Source]
 		static whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index
 		static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
 		static get whenFullyReadable(): Promise<any> {
@@ -175,12 +173,15 @@ export const Index = ({ Source }) => {
 			console.info('rebuilding index', this.name, 'Source version', Source.startVersion, 'index version')
 			// first cancel any existing indexing
 			yield this.db.clear()
-			this.db.putSync(LAST_INDEXED_VERSION_KEY, 0) // indicates indexing has started
+			yield this.db.put(LAST_INDEXED_VERSION_KEY, 0) // indicates indexing has started
 		}
 
 		static queue = new Map<any, IndexRequest>()
 		static *processQueue() {
 			this.state = 'processing'
+			if (this.onStateChange) {
+				this.onStateChange({ processing: true, started: true })
+			}
 			let cpuUsage = process.cpuUsage()
 			let cpuTotalUsage = cpuUsage.user + cpuUsage.system
 			let cpuAdjustment = 2
@@ -243,6 +244,9 @@ export const Index = ({ Source }) => {
 				console.error('Error occurred in processing index queue for', this.name, error, 'remaining in queue', this.queue.size)
 			}
 			this.state = 'processed'
+			if (this.onStateChange) {
+				this.onStateChange({ processing: true, started: false })
+			}
 		}
 
 		static *resumeIndex() {
@@ -283,6 +287,7 @@ export const Index = ({ Source }) => {
 					triggers: new Set([INITIALIZATION_SOURCE])
 				})
 			}
+			console.log('indexing', idsAndVersionsToReindex, idsAndVersionsToReindex.size)
 			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}
 
@@ -450,11 +455,11 @@ export const Index = ({ Source }) => {
 		}
 
 		static initialize(module) {
-			this.Sources = [Source]
-				allIndices.push(this)
+			allIndices.push(this)
 			return when(super.initialize(module), () =>
 				spawn(this.resumeIndex()))
 		}
+		static hasProcessing = true
 		static updated(event, by) {
 			// we don't propagate immediately through the index, as the indexing must take place
 			// to determine the affecting index entries, and the indexing will send out the updates

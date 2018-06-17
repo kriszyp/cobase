@@ -85,7 +85,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		let instancesById = this.instancesById
 		if (!instancesById) {
-			this.initialize()
+			this.ready
 			instancesById = this.instancesById
 		}
 		let instance = instancesById.get(id)
@@ -177,7 +177,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 		Object.defineProperty(index, 'name', { value: this.name + '-index-' + propertyName })
-		index.register({ version : 1 })
 		return index
 	}
 
@@ -192,7 +191,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 		Object.defineProperty(reduced, 'name', { value: this.name + '-reduced-' + name })
-		reduced.register({ version : 1 })
 		return reduced
 	}
 
@@ -282,7 +280,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	transform(source) {
-		return source
 	}
 
 	get allowDirectJSON() {
@@ -310,14 +307,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static get ready() {
 		return this.hasOwnProperty('_ready') ? this._ready :
-			(this._ready = new Promise((resolve, reject) => {
-				this.onReady = () => {
-					resolve()
-				}
-				this.onDbFailure = reject
-				if (!this.instancesById) {
-					this.initialize()
-				}
+			(this._ready = Promise.resolve(this.initialize()).then(() => {
+				this.initialized = true
 			}))
 	}
 
@@ -333,11 +324,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				this.transformVersion = fs.statSync(moduleFilename).mtime.getTime()
 				let hmac = crypto.createHmac('sha256', 'cobase')
 				hmac.update(fs.readFileSync(moduleFilename, { encoding: 'utf8' }))
-				this.transformHash = hmac.digest('hex')
+			this.transformHash = hmac.digest('hex')
 			}
-		}
-		if (!this.instancesById) {
-			return this.initialize()
 		}
 		return this.ready
 	}
@@ -345,7 +333,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static initialize() {
 		this.instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
 		this.instancesById.name = this.name
-		this.ready // make sure the getter is called first
 		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name)
 		// make sure these are inherited
 		this.pendingWrites = []
@@ -372,7 +359,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			const clearDb = !!state // if there was previous state, clear out all entries
 			this.didReset = when(this.resetAll(clearDb), () => when(this.whenWritten, () => this.updateDBVersion()))
 		}
-		return when(this.didReset, this.onReady, this.onDbFailure)
+		return this.didReset
 	}
 
 	static findUntrackedInstances() {
@@ -436,7 +423,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 
 		mergeProgress(this, event) // record processing progress from the event, on this object
-
 		event.whenWritten = Class.whenWritten // promise for when the update is recorded, this will overwrite any downstream assignment of this property
 		return event
 	}
@@ -463,9 +449,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				instance.updated(event, by)
 				return event
 			}
-		}
-		if (event && event.type == 'reset' && !this.resetProcess) {
-			throw new Error('Deprecated')
 		}
 		for (let listener of this.listeners || []) {
 			listener.updated(event, by)
@@ -670,7 +653,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	* Iterate through all instances to find instances since the given version
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
-		return this.ready.then(() => {
+		return this.ready.then(() => this.whenWritten).then(() => {
 			let db = this.db
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			let isFullReset = this.startVersion > sinceVersion
