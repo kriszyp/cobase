@@ -1,8 +1,9 @@
 if (typeof assert === 'undefined') { assert = require('chai').assert }
 const inspector =  require('inspector')
-inspector.open(9329, null, true)
+inspector.open(9330, null, true)
 
 require('./Persisted')
-require('./Process')
+//require('./Process')
 require('./Relation')
 require('./Index')
+//require('./performance')

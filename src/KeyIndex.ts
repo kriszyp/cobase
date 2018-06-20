@@ -1,4 +1,5 @@
 import { spawn, currentContext, VArray, ReplacedEvent } from 'alkali'
+import { encode, decode } from 'msgpack-lite'
 import { Persistable } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
@@ -81,11 +82,11 @@ export const Index = ({ Source }) => {
 							}
 							for (let entry of previousEntries) {
 								let previousValue = entry.value
-								previousValue = previousValue === undefined ? '' : JSON.stringify(previousValue)
+								previousValue = previousValue === undefined ? Buffer.from([]) : encode(previousValue)
 								toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 							}
 						} else if (previousEntries != undefined) {
-							toRemove.set(previousEntries, '')
+							toRemove.set(previousEntries, Buffer.from([]))
 						}
 					}
 				} catch(error) {
@@ -126,17 +127,17 @@ export const Index = ({ Source }) => {
 						// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
 						let removedValue = toRemove.get(key)
 						// a value of '' is treated as a reference to the source object, so should always be treated as a change
-						let value = entry.value === undefined ? '' : JSON.stringify(entry.value)
+						let value = entry.value === undefined ? Buffer.from([]) : encode(entry.value)
 						if (removedValue !== undefined)
 							toRemove.delete(key)
-						let isJSONChanged = removedValue === undefined || value != removedValue
-						if (isJSONChanged || value === '') {
-							if (isJSONChanged) {
+						let isChanged = removedValue === undefined || !value.equals(removedValue)
+						if (isChanged || value.length === 0) {
+							if (isChanged) {
 								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
 								operations.push({
 									type: 'put',
 									key: fullKey,
-									value
+									value: Buffer.from(value)
 								})
 								operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
 							}
@@ -173,7 +174,7 @@ export const Index = ({ Source }) => {
 			console.info('rebuilding index', this.name, 'Source version', Source.startVersion, 'index version')
 			// first cancel any existing indexing
 			yield this.db.clear()
-			yield this.db.put(LAST_INDEXED_VERSION_KEY, 0) // indicates indexing has started
+			yield this.db.put(LAST_INDEXED_VERSION_KEY, Buffer.from('0')) // indicates indexing has started
 		}
 
 		static queue = new Map<any, IndexRequest>()
@@ -233,7 +234,7 @@ export const Index = ({ Source }) => {
 					yield this.whenIndexedProgress
 					//console.log('Finished indexing progress:', this.name, this.queuedIndexedProgress)
 					if (this.queuedIndexedProgress) { // store the last queued indexed progres
-						this.db.put(LAST_INDEXED_VERSION_KEY, this.queuedIndexedProgress)
+						this.db.put(LAST_INDEXED_VERSION_KEY, Buffer.from(this.queuedIndexedProgress.toString()))
 						this.queuedIndexedProgress = null
 					}
 				} while (queue.size > 0)
@@ -287,7 +288,6 @@ export const Index = ({ Source }) => {
 					triggers: new Set([INITIALIZATION_SOURCE])
 				})
 			}
-			console.log('indexing', idsAndVersionsToReindex, idsAndVersionsToReindex.size)
 			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}
 
@@ -317,7 +317,7 @@ export const Index = ({ Source }) => {
 				operationsToCommit.push({
 					type: 'put',
 					key: LAST_INDEXED_VERSION_KEY,
-					value: this.queuedIndexedProgress
+					value: Buffer.from(this.queuedIndexedProgress.toString())
 				})
 				this.queuedIndexedProgress = null
 			}
@@ -326,7 +326,7 @@ export const Index = ({ Source }) => {
 			// large number, commit asynchronously
 			// The order here is important, we first write the indexed data, then send updates,
 			// then record our progress once the updates have been written
-			return this.db.batch(operationsToCommit).then(() => {
+			return when(this.db.batch(operationsToCommit), () => {
 				// once the operations are recorded, we can send out updates
 				// we are *not* waiting for it to complete before continuing with indexing though
 				// but are waiting for it to complete before writing progress
@@ -388,8 +388,8 @@ export const Index = ({ Source }) => {
 				}
 				return returnFullKeyValue ? {
 					key: sourceId,
-					value: value !== null ? value.length > 0 ? JSON.parse(value) : Source.for(sourceId) : value,
-				} : value.length > 0 ? JSON.parse(value) : Source.for(sourceId)
+					value: value !== null ? value.length > 0 ? decode(value) : Source.for(sourceId) : value,
+				} : value.length > 0 ? decode(value) : Source.for(sourceId)
 			})
 		}
 		/**

@@ -1,26 +1,14 @@
 const { Persisted, Persistable, Cached } = require('..')
 const { removeSync } = require('fs-extra')
+const { City, Country, CityWithCountry, CountryWithCities } = require('./model/CountryCity')
 suite('Persisted', () => {
 	Persisted.dbFolder = 'tests/db'
 	Persistable.dbFolder = 'tests/db'
 	Cached.dbFolder = 'tests/db'
-	class City extends Persisted {
-
-	}
-	class Country extends Persisted {
-
-	}
-	class CityWithCountry extends City.cacheWith({
-		countryId: '',
-		country: Country.relatedBy('countryId'), // Country.relatedByAll('countryIds') for multiple values
-	}) {}
-	const CountryWithCities = Country.cacheWith({
-		cities: City.relatesBy('countryId')
-	})
 	suiteSetup(() => {
 		return Promise.all([
-			CityWithCountry.register({ version: 1 }),
-			CountryWithCities.register({ version: 1})
+			CityWithCountry.ready,
+			CountryWithCities.ready
 		])
 	})
 

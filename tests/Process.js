@@ -1,7 +1,7 @@
 const { Persisted } = require('..')
 const { TestProcess, TestProcessByName } = require('./model/TestProcess')
 const { removeSync } = require('fs-extra')
-suite.only('Process', () => {
+suite('Process', () => {
 	Persisted.dbFolder = 'tests/db'
 //	Persistable.dbFolder = 'tests/db'
 	suiteSetup(() => {
