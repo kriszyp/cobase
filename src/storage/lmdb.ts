@@ -37,6 +37,8 @@ export function open(name): Database {
 		maxDbs: 1,
 		noMetaSync: true,
 		noSync: true,
+		useWritemap: true,
+		mapAsync: true,
 	})
 	let db = env.openDbi({
 		name: 'data',
@@ -45,6 +47,7 @@ export function open(name): Database {
 	})
 	const cobaseDb = {
 		db,
+		name,
 		bytesRead: 0,
 		bytesWritten: 0,
 		reads: 0,
@@ -55,8 +58,8 @@ export function open(name): Database {
 			txn.abort()
 			this.bytesRead += result && result.length || 1
 			this.reads++
-			if (result === null)
-				return // missing entry, really should be undefined
+			if (result !== null) // missing entry, really should be undefined
+				return result
 		},
 		get(id) {
 			let txn = env.beginTxn(READING_TNX)
@@ -64,16 +67,16 @@ export function open(name): Database {
 			txn.abort()
 			this.bytesRead += result && result.length || 1
 			this.reads++
-			if (result === null)
-				return // missing entry, really should be undefined
+			if (result !== null) // missing entry, really should be undefined
+				return result
 		},
 		putSync(id, value) {
 			if (typeof value !== 'object') {
-				throw new Error('putting string')
+				throw new Error('putting string value')
 				value = Buffer.from(value)
 			}
 			if (typeof id !== 'object') {
-				throw new Error('putting string')
+				throw new Error('putting string key')
 				value = Buffer.from(value)
 			}
 			this.bytesWritten += value && value.length || 0
@@ -84,11 +87,11 @@ export function open(name): Database {
 		},
 		put(id, value) {
 			if (typeof value !== 'object') {
-				throw new Error('putting string')
+				throw new Error('putting string value')
 				value = Buffer.from(value)
 			}
 			if (typeof id !== 'object') {
-				throw new Error('putting string')
+				throw new Error('putting string key')
 				value = Buffer.from(value)
 			}
 			this.bytesWritten += value && value.length || 0
@@ -213,8 +216,6 @@ export function open(name): Database {
 			this.bytesWritten += operations.reduce((a, b) => a + (b.value && b.value.length || 0), 0)
 			let txn = env.beginTxn()
 			for (let operation of operations) {
-				if (typeof operation.value != 'object')
-					throw new Error('non-buffer value')
 				if (typeof operation.key != 'object')
 					throw new Error('non-buffer key')
 				txn[operation.type === 'del' ? 'del' : 'putBinary'](db, operation.key, operation.value, AS_BINARY)
@@ -225,7 +226,7 @@ export function open(name): Database {
 			db.close()
 		},
 		clear() {
-			console.log('clearing db', db.location)
+			console.log('clearing db', name)
 			db.drop()
 			db = env.openDbi({
 				name: 'data',

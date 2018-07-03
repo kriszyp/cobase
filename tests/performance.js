@@ -1,7 +1,8 @@
 const { removeSync } = require('fs-extra')
 const { open: openLevel } = require('../dist/storage/level')
 const { open: openLmdb } = require('../dist/storage/lmdb')
-suite.skip('performance', () => {
+const { deflateSync, inflateSync } = require('zlib')
+suite('performance', () => {
 	removeSync('tests/db')
 
 	const level = openLevel('tests/db/test-level')

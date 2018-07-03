@@ -1,5 +1,5 @@
 import { Cached } from './Persisted'
-import { encode, decode } from 'msgpack-lite'
+import { encode, decode } from 'dpack'
 import { toBufferKey, fromBufferKey, Metadata } from 'ordered-binary'
 import when from './util/when'
 const INVALIDATED_VALUE = Buffer.from([])

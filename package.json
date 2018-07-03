@@ -14,9 +14,10 @@
   "main": "./dist/index.js",
   "typings": "./index.d.ts",
   "dependencies": {
+    "dpack": "^0.0.1",
     "fs-extra": "^5.0.0",
-    "msgpack-lite": "^0.1.26",
     "node-lmdb": "^0.6.0",
+    "leveldown": "github:kriszyp/leveldown#v1.8.2-sync",
     "ordered-binary": "^0.0.2"
   },
   "peerDependencies": {

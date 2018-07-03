@@ -246,7 +246,6 @@ export const runInProcess = (Class, { processName, module, onProcessStart }) => 
 	}
 	return ProcessProxy
 }
-
 function ensureProcessRunning(processName, moduleId): Promise<string> {
 	let processReady = processMap.get(processName)
 	if (!processReady) {
@@ -324,7 +323,6 @@ if (SUBPROCESS) {
 	  // handle errors here
 	  throw err;
 	}).listen(path.join('\\\\?\\pipe', process.cwd(), 'myctl'))
-	setTimeout(() => console.log('hi'), 5000)
 	process.send({ ready: true })
 	console.log('finished setting up named pipe server')
 	createProxyServer = (Class) => {
@@ -373,4 +371,5 @@ if (SUBPROCESS) {
 		}
 	}
 }
+
 

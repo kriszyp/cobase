@@ -1,11 +1,12 @@
-import { spawn, currentContext, VArray, ReplacedEvent } from 'alkali'
-import { encode, decode } from 'msgpack-lite'
+import { spawn, currentContext, VArray, ReplacedEvent, UpdateEvent } from 'alkali'
+import { encode, decode } from 'dpack'
 import { Persistable } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
 import { OperationsArray, IterableOptions, Database } from './storage/Database'
-import { mergeProgress, registerProcessing, whenClassIsReady, DEFAULT_CONTEXT } from './UpdateProgress'
+import { DEFAULT_CONTEXT } from './RequestContext'
+//import { mergeProgress, registerProcessing, whenClassIsReady, DEFAULT_CONTEXT } from './UpdateProgress'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const DEFAULT_INDEXING_CONCURRENCY = 15
@@ -32,6 +33,8 @@ export const Index = ({ Source }) => {
 	let operations: OperationsArray = []
 	let lastIndexedVersion = 0
 	let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
+	const sourceVersions = new Map<String, number>()
+	const processingSourceVersions = new Map<String, number>()
 	function addUpdatedIndexEntry(key, sources, triggers) {
 		let entry = updatedIndexEntries.get(key)
 		if (!entry) {
@@ -253,6 +256,7 @@ export const Index = ({ Source }) => {
 		static *resumeIndex() {
 			// TODO: if it is over half the index, just rebuild
 			lastIndexedVersion = +this.db.getSync(LAST_INDEXED_VERSION_KEY) || 0
+			sourceVersions[Source.name] = lastIndexedVersion
 			const idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
 			let min = Infinity
 			let max = 0
@@ -347,7 +351,6 @@ export const Index = ({ Source }) => {
 					event.sources = indexEntryUpdate.sources
 					event.triggers = indexEntryUpdate.triggers
 					this.for(indexedEntry[0]).updated(event)
-					mergeProgress(this, event) // all downstream update progress is merged into our own list of ongoing progress
 					if (event.whenWritten) {
 						whenWritten.add(event.whenWritten)
 					}
@@ -411,11 +414,14 @@ export const Index = ({ Source }) => {
 
 		static whenUpdatedInContext() {
 			let context = currentContext
-			let updateContext = (context && context.updatesInProgress) ? context : DEFAULT_CONTEXT
+			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
 			return when(Source.whenUpdatedInContext(), () => {
-				let whenReadable = whenClassIsReady(this, updateContext)
-				if (whenReadable)
-					return this.requestProcessing(0) // up the priority
+				// Go through the expected source versions and see if we are behind and awaiting processing on any sources
+				for (const sourceName in context.expectedVersions) {
+					// if the expected version is behind, wait for processing to finish
+					if (context.expectedVersions[sourceName] > this.sourceVersions[sourceName])
+						return this.requestProcessing(0) // up the priority
+				}
 			})
 		}
 
@@ -455,59 +461,73 @@ export const Index = ({ Source }) => {
 		}
 
 		static initialize(module) {
+			this.Sources[0].start()
+			if (this.Sources[0].updatingProcessModule && !this.updatingProcessModule) {
+				this.updatingProcessModule = this.Sources[0].updatingProcessModule
+			}
 			allIndices.push(this)
-			return when(super.initialize(module), () =>
-				spawn(this.resumeIndex()))
+			return when(super.initialize(module), () => {
+				if (!this.updatingProcessConnection) {
+					return spawn(this.resumeIndex())
+				}
+			})
 		}
 		static hasProcessing = true
 		static updated(event, by) {
 			// we don't propagate immediately through the index, as the indexing must take place
 			// to determine the affecting index entries, and the indexing will send out the updates
+			if (event.type === 'indexing-completion') {
+				for (const sourceName in event.sourceVersions) {
+					processingSourceVersions[sourceName] = event.sourceVersions[sourceName]
+				}
+			}
 			let context = currentContext
-			let updateContext = (context && context.updatesInProgress) ? context : DEFAULT_CONTEXT
+			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
 
 			this.updateVersion()
 			let previousState = event.previousValues && event.previousValues.get(by)
 			let id = by && by.constructor == this.Sources[0] && by.id // if we are getting an update from a source instance
 			if (id && !this.gettingAllIds) {
-				let indexRequest = this.queue.get(id)
-				if (indexRequest) {
-					// put it at that end so version numbers are
-					this.queue.delete(id)
-					this.queue.set(id, indexRequest)
-					indexRequest.version = event.version
-					if (event.triggers)
-						for (let trigger of event.triggers)
-							indexRequest.triggers.add(trigger)
-				} else {
-					this.queue.set(id, indexRequest = {
-						previousState,
-						version: event.version,
-						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
-					})
-					this.requestProcessing(DEFAULT_INDEXING_DELAY)
-				}
-				if (!indexRequest.version) {
-					throw new Error('missing version')
-				}
-				indexRequest.deleted = event.type == 'deleted'
-				if (event.sources) {
-					if (!indexRequest.sources) {
-						indexRequest.sources = new Set()
+				if (!this.updatingProcessConnection) { // indexing should take place in a separate process
+					// queue up processing the event
+					let indexRequest = this.queue.get(id)
+					if (indexRequest) {
+						// put it at that end so version numbers are
+						this.queue.delete(id)
+						this.queue.set(id, indexRequest)
+						indexRequest.version = event.version
+						if (event.triggers)
+							for (let trigger of event.triggers)
+								indexRequest.triggers.add(trigger)
+					} else {
+						this.queue.set(id, indexRequest = {
+							previousState,
+							version: event.version,
+							triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
+						})
+						this.requestProcessing(DEFAULT_INDEXING_DELAY)
 					}
-					for (let source of event.sources) {
-						indexRequest.sources.add(source)
+					if (!indexRequest.version) {
+						throw new Error('missing version')
 					}
-				} else if (event.source) {
-					if (!indexRequest.sources) {
-						indexRequest.sources = new Set()
+					indexRequest.deleted = event.type == 'deleted'
+					if (event.sources) {
+						if (!indexRequest.sources) {
+							indexRequest.sources = new Set()
+						}
+						for (let source of event.sources) {
+							indexRequest.sources.add(source)
+						}
+					} else if (event.source) {
+						if (!indexRequest.sources) {
+							indexRequest.sources = new Set()
+						}
+						indexRequest.sources.add(event.source)
 					}
-					indexRequest.sources.add(event.source)
 				}
 
-				registerProcessing(updateContext, this, this.whenFullyReadable)
-				registerProcessing(event, this, this.whenFullyReadable)
-
+				//registerProcessing(updateContext, this, this.whenFullyReadable)
+				//registerProcessing(event, this, this.whenFullyReadable)
 			}
 			if (event && event.type == 'reset') {
 				return super.updated(event, by)
@@ -547,6 +567,13 @@ export const Index = ({ Source }) => {
 						this.state = 'ready'
 						this.whenProcessingComplete = null
 						currentlyProcessing.delete(this)
+						for (const sourceName in processingSourceVersions) {
+							sourceVersions[sourceName] = processingSourceVersions[sourceName]
+						}
+						const event = new IndexingCompletionEvent()
+						event.sourceVersions = sourceVersions
+						event.sourceVersions[this.name] = lastIndexedVersion
+						super.updated(event, this)
 					}))
 				this.whenProcessingComplete.version = this.version
 				this.whenFullyReadable = this.whenCommitted =
@@ -598,3 +625,7 @@ const allIndices = []
 export default Index
 
 let currentlyProcessing = new Set()
+
+class IndexingCompletionEvent extends UpdateEvent {
+	type = 'indexing-completion'
+}

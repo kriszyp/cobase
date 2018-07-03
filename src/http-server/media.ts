@@ -1,6 +1,7 @@
 import when from '../util/when'
 import * as bufferStream from 'mach/lib/utils/bufferStream'
 import { jsonMediaType } from './JSONStream'
+import { dpackMediaType } from './dpack'
 import { textMediaType } from './text'
 
 export const mediaTypes = new Map()
@@ -48,7 +49,8 @@ function serializer(returnValue, connection) {
 	responseHeaders.vary = (responseHeaders.vary ? responseHeaders.vary + ',' : '') + 'Accept'
 	let bestSerializer = jsonMediaType // default for now, TODO: return a 415
 	let bestQuality = 0
-	let bestType = 'application/json'
+	let bestType = 'application/json' // default
+	let bestParameters
 	const acceptTypes = acceptHeader.split(/\s*,\s*/);
 	for (const acceptType of acceptTypes) {
 		const [type, ...parameterParts] = acceptType.split(/\s*;\s*/)
@@ -66,13 +68,15 @@ function serializer(returnValue, connection) {
 				bestSerializer = serializer
 				bestType = type
 				bestQuality = quality
+				bestParameters = parameters
 			}
 		}
 	}
 	responseHeaders['Content-Type'] = bestType
-	connection.response.content = bestSerializer.serialize(returnValue === undefined ? connection.response.data : returnValue, connection)
+	connection.response.content = bestSerializer.serialize(returnValue === undefined ? connection.response.data : returnValue, connection, bestParameters)
 }
 
+mediaTypes.set('text/dpack', dpackMediaType)
 mediaTypes.set('application/json', jsonMediaType)
 mediaTypes.set('text/plain', textMediaType)
 const EMPTY_MEDIA_PARSER = {

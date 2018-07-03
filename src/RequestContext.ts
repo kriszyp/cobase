@@ -11,7 +11,12 @@ export class RequestContext extends Context {
 	newContext() {
 		return new this.constructor(this.request, this.session, this.subject)
 	}
-	get updatesInProgress(): Map<any, Promise<any>> {
-		return this.session.updatesInProgress || (this.session.updatesInProgress = new Map())
+	get expectedVersions(): Map<any, Promise<any>> {
+		const session = this.session || (this.session = {})
+		return session.expectedVersions || (session.expectedVersions = {})
 	}
+}
+
+export const DEFAULT_CONTEXT = {
+	expectedVersions: {}
 }

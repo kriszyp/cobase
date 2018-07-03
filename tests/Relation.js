@@ -1,7 +1,8 @@
 const { Persisted, Persistable, Cached } = require('..')
 const { removeSync } = require('fs-extra')
 const { City, Country, CityWithCountry, CountryWithCities } = require('./model/CountryCity')
-suite('Persisted', () => {
+suite('Persisted', function() {
+	this.timeout(20000)
 	Persisted.dbFolder = 'tests/db'
 	Persistable.dbFolder = 'tests/db'
 	Cached.dbFolder = 'tests/db'

@@ -1,43 +1,24 @@
 const { Persisted, Persistable, Index, Reduced } = require('..')
 const { removeSync } = require('fs-extra')
-suite('Index', () => {
-	Persisted.dbFolder = 'tests/db'
-	Persistable.dbFolder = 'tests/db'
-	class Test2 extends Persisted {
-
-	}
-	class TestByType extends Index.from(Test2) {
-		static indexBy(test) {
-			return test.isEven ? 'even' : 'odd'
-		}
-	}
-	let reduceCalls = 0
-	class SumOfNumbersByType extends Reduced.from(TestByType) {
-		reduceBy(a, b) {
-			reduceCalls++
-			return {
-				number: a.number + b.number
-			}
-		}
-		transform(total) {
-			return total.number
-		}
-	}
-	SumOfNumbersByType.startingValue = 0
+const { Test, TestByType, SumOfNumbersByType } = require('./model/Test2')
+suite('Index', function() {
+	this.timeout(20000)
 	suiteSetup(() => {
 	//	removeSync('tests/db')
 		return Promise.all([
-			Test2.register({ version: 1 }),
-			TestByType.register({ version: 1 }),
-			SumOfNumbersByType.register({ version: 1 }),
+			Test2.ready,
+			TestByType.ready,
+			SumOfNumbersByType.ready,
 		]).then(() => {
+			console.log('stores ready')
+			var promises = []
 			for (let i = 1; i < 11; i++)
-				Test2.for(i).put({
+				promises.push(Test2.for(i).put({
 					isEven: i % 2 == 0,
 					number: i,
-				})
+				}))
 			// return TestIndex.whenReadableAfter(Test2)
-			return Test2.whenFullyReadable
+			return Promise.all(promises)
 		})
 	})
 
