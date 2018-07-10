@@ -128,19 +128,17 @@ export function open(name): Database {
 			iterable[Symbol.iterator] = (async) => {
 				let currentKey = options.reverse ? options.lt || Buffer.from([255, 255]) : (options.gt || Buffer.from([0]))
 				let endKey = options.reverse ? options.gt || Buffer.from([0]) : (options.lt || Buffer.from([255, 255]))
-				const goToDirection = options.reverse ? 'goToPrevious' : 'goToNext'
+				let reverse = options.reverse
+				const goToDirection = reverse ? 'goToPrevious' : 'goToNext'
 				const getNextBlock = () => {
 					array = []
 					let txn = env.beginTxn(READING_TNX)
 					let cursor = new Cursor(txn, db, AS_BINARY)
-					currentKey = cursor.goToRange(currentKey, endKey)
+					currentKey = cursor.goToRange(currentKey)
 					let i = 0
-					while (currentKey !== null && i < 100) {
+					while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) < 0 : currentKey.compare(endKey) > 0)) && i++ < 100) {
 						array.push(currentKey, cursor.getCurrentBinary())
 						currentKey = cursor[goToDirection]()
-					}
-					if (currentKey === null) {
-						finished = true
 					}
 					cursor.close()
 					txn.commit()
@@ -156,11 +154,8 @@ export function open(name): Database {
 							if (finished) {
 								return { done: true }
 							} else {
-								console.log('calling next block')
 								getNextBlock()
-								console.log('finished next block')
 								i = 0
-								finished = array.finished // defined as a property on the sync api
 								return this.next()
 							}
 						}
@@ -220,7 +215,13 @@ export function open(name): Database {
 					throw new Error('non-buffer key')
 				txn[operation.type === 'del' ? 'del' : 'putBinary'](db, operation.key, operation.value, AS_BINARY)
 			}
-			txn.commit()
+			try {
+				txn.commit()
+			} catch (error) {
+				txn.abort()
+				error.message += 'trying to save batch ' + JSON.stringify(operations)
+				throw error
+			}
 		},
 		close() {
 			db.close()

@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { encode, decode } from 'dpack'
+import { createEncoder, encode, decode, createDecoder } from 'dpack'
 import * as lmdb from './storage/lmdb'
 import when from './util/when'
 import WeakValueMap from './util/WeakValueMap'
@@ -11,7 +11,8 @@ import { AccessError } from './util/errors'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
-import { getProcessConnection, createProxyServer } from './util/process'
+import { getProcessConnection, createProxyServer, processModules } from './util/process'
+import { DEFAULT_CONTEXT } from './RequestContext'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
@@ -34,6 +35,9 @@ class InstanceIds extends Transform.as(VArray) {
 			return ids
 		})
 	}
+	valueOf() {
+		return super.valueOf(true) // always allow promises to be returned
+	}
 	clearCache() {
 		this.cachedValue = undefined
 		this.cachedVersion = -1
@@ -50,7 +54,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	version: number
 	static useWeakMap = true
 	static dbFolder = 'cachedb'
-	static whenWritten: Promise<{}>
 	static db: Database
 	db: Database
 	static updatingProcessConnection: {
@@ -95,20 +98,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let instance = instancesById.get(id)
 		if (!instance) {
 			instance = new this(id)
-			let transform = this.prototype.transform
-			if (transform && !transform.hasVersion && this.transformVersion) {
-				let transformVersion = this.transformVersion
-				if (transformVersion)
-					transform.valueOf = function() {
-						if (currentContext) {
-							currentContext.setVersion(transformVersion)
-						}
-						return this
-					}
-				transform.hasVersion = true
-				this.prototype.version = Persisted.syncVersion
-				console.info('Setting default version to ', this.prototype.version)
-			}
 			instancesById.set(id, instance)
 		}
 		return instance
@@ -311,10 +300,15 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this.start()
 	}
 	static start() {
-		return this.hasOwnProperty('_ready') ? this._ready :
-			(this._ready = Promise.resolve(this.initialize()).then(() => {
+		if (!this.hasOwnProperty('_ready')) {
+			let resolver
+			this._ready = new Promise(resolve => resolver = resolve)
+			resolver(this.initialize())
+			this._ready.then(() => {
 				this.initialized = true
-			}))
+			})
+		}
+		return this._ready
 	}
 
 	static register(sourceCode?: { id?: string, version?: number }) {
@@ -347,8 +341,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			Source.notifies(this)
 		}
 		this.instancesById.name = this.name
-		if (this.updatingProcessModule) {
-			this.updatingProcessConnection = getProcessConnection(this, { processName: this.updatingProcessName, module: this.updatingProcessModule })
+		if (processModules.get(this.updatingProcessName)) {
+			this.updatingProcessConnection = getProcessConnection(this, { processName: this.updatingProcessName, module: this.module && this.module.id })
 			if (this.updatingProcessConnection) {
 				return
 			} else {
@@ -356,9 +350,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 		// make sure these are inherited
-		this.pendingWrites = []
 		this.currentWriteBatch = null
-		this.whenWritten = null
 		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 		let stateJSON = db.getSync(DB_VERSION_KEY)
 		let didReset
@@ -370,7 +362,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.log('transform/database version mismatch, reseting db table', this.name, state && state.dbVersion, this.transformVersion)
 			this.startVersion = this.version = getNextVersion()
 			const clearDb = !!state // if there was previous state, clear out all entries
-			this.didReset = when(this.resetAll(clearDb), () => when(this.whenWritten, () => this.updateDBVersion()))
+			this.didReset = when(this.resetAll(clearDb), () => this.updateDBVersion())
 		}
 		return this.didReset
 	}
@@ -385,32 +377,48 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	valueOf() {
-		return super.valueOf(true) // always allow promises to be returned
-	}
-
 	static updatingProcessName = 'updating-process'
 
-	remoteUpdated({ type }) {
+	set whenUpdateProcessed(promise) {
+		this._whenUpdateProcessed = promise = promise.then((event) => {
+			if (this._whenUpdateProcessed === promise) {
+				this.version = event.version
+				this._whenUpdateProcessed = null
+			}
+		}, (error) => {
+			if (this._whenUpdateProcessed === promise) {
+				this._whenUpdateProcessed = null
+			}
+		})
+	}
+	get whenUpdateProcessed() {
+		return this._whenUpdateProcessed
+	}
+	centralUpdated({ type }) { // this should only be called in the updating process
 		const event = new UpdateEvent()
 		event.type = type
 		this.updated(event, this)
+		return {
+			version: event.version
+		}
 	}
 	updated(event = new ReplacedEvent(), by?) {
+		const updatingProcessConnection = this.constructor.updatingProcessConnection
+		const isUpdatingProcess = !updatingProcessConnection
 		if (!event.source) {
 			event.source = this
 			// if we are the source, and there is a main updating process to notify, do that now, and use it as a mark not commit anything to the db (must be done in its updating process)
-			if (this.constructor.updatingProcessConnection) {
-				event.whenUpdateProcessed = this.constructor.updatingProcessConnection.sendMessage({
+			if (updatingProcessConnection) {
+				event.whenUpdateProcessed = updatingProcessConnection.sendMessage({
 					instanceId: this.id,
-					method: 'remoteUpdated',
+					method: 'updated',
 					args: [
 						{ type: event.type }
 					],
 				})
 			}
 		}
-		const context = currentContext
+		let context = currentContext
 		if (context && !event.triggers && context.connectionId) {
 			event.triggers = [ context.connectionId ]
 		}
@@ -427,17 +435,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 
-		if (Class.updateWithPrevious && !event.whenUpdateProcessed) {
+		if (Class.updateWithPrevious && isUpdatingProcess) {
 			this.assignPreviousValue(event)
-		}
-		// record the update in context so subsquent reads are consistent
-		if (this.listenersWithContext) {
-			for (let listener of this.listeners || []) {
-				const context = this.listenersWithContext.get(listener)
-				if (context) {
-					this.addAccessToContext(context)
-				}
-			}
 		}
 		if (by === this) // skip reset
 			Variable.prototype.updated.apply(this, arguments)
@@ -446,18 +445,21 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event.type == 'deleted') {
 			this.readyState = 'no-local-data'
 			this.constructor.instanceSetUpdated(event)
-		} else if (by !== this && !event.whenUpdateProcessed) {
+		} else if (by !== this && isUpdatingProcess) {
 			this.resetCache()
 		}
 		// notify class listeners too
 		for (let listener of this.constructor.listeners || []) {
 			listener.updated(event, this)
 		}
-
-		if (context) {
-			context.expectedVersions[this.constructor.name] = event.version
+		if (!context || !context.expectedVersions) {
+			context = DEFAULT_CONTEXT
 		}
-		event.whenWritten =  event.whenUpdateProcessed || Class.whenWritten // promise for when the update is recorded, this will overwrite any downstream assignment of this property
+		context.expectedVersions[this.constructor.name] = event.version
+		const whenUpdateProcessed = event.whenUpdateProcessed
+		if (whenUpdateProcessed) {
+			this.whenUpdateProcessed = whenUpdateProcessed
+		}
 		return event
 	}
 
@@ -529,11 +531,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return Variable.prototype.stopNotifies.call(this, target)
 	}
-	addAccessToContext(context?) {
-		context = context || currentContext
-		if (context)
-			mergeProgress(context, this)
-	}
 	static whenUpdatedInContext() {
 		// transitively wait on all sources that need to update to this version
 		let promises = []
@@ -591,34 +588,37 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Base {
 
-	get msgPackMultiplier() {
+	get dPackMultiplier() {
 		return 1
 	}
 
 	get approximateSize() {
-		return this.asMsgPack ? this.asMsgPack.length * this.msgPackMultiplier : 100
+		return this.asDPack ? this.asDPack.length * this.dPackMultiplier : 100
 	}
 
 	loadLocalData(now, asBuffer) {
 		let Class = this.constructor
 		let db = Class.db
-		return when(Class.dbGet(this.id, asBuffer), this.parseEntryValue)
+		return this.parseEntryValue(Class.db.get(toBufferKey(this.id)))
 	}
 
-	parseEntryValue(data) {
-		if (data) {
-			const decoded = decode(data)
-			if (decoded.length) {
+	parseEntryValue(buffer) {
+		if (buffer) {
+			const decoder = createDecoder()
+			decoder.setSource(buffer.toString(), 0)
+			//decoder.setSource(buffer.slice(0,20).toString(), 0)  // the lazy version only reads the first fews bits to get the version
+			const version = decoder.readOpen()
+			if (decoder.hasMoreData) {
 				return {
-					version: decoded[0],
-					data: decoded[1],
-					buffer: data
+					version,
+					data: decoder.readOpen(), // decodeLazy(buffer.slice(decoder.offset), decoder)
+					buffer,
 				}
-			} else if (isFinite(decoded)) {
+			} else {
 				// stored as an invalidated version
 				return {
-					version: decoded,
-					buffer: data,
+					version,
+					buffer,
 				}
 			}
 		} else {
@@ -640,7 +640,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				this.version = Math.max(version, this.version || 0)
 				this[versionProperty] = version
 				this._cachedValue = data
-				expirationStrategy.useEntry(this, this.msgPackMultiplier * buffer.length)
+				expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
 			} else if (version) {
 				this.version = Math.max(version, this.version || 0)
 				this.readyState = 'invalidated'
@@ -672,8 +672,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (range.lte != null)
 				options.lte = toBufferKey(range.lte)
 		}
-		return when(this.whenWritten, () =>
-			db.iterable(options).map(({ key }) => fromBufferKey(key)).asArray)
+		return db.iterable(options).map(({ key }) => fromBufferKey(key)).asArray
 	}
 
 	static entries(opts) {
@@ -687,7 +686,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	* Iterate through all instances to find instances since the given version
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
-		return this.ready.then(() => this.whenWritten).then(() => {
+		return this.ready.then(() => {
 			let db = this.db
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			let isFullReset = this.startVersion > sinceVersion
@@ -723,7 +722,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	put(value, event?) {
 		if (this.constructor.updatingProcessConnection) {
 			event = event || new ReplacedEvent()
-			event.whenUpdateProcessed = this.constructor.updatingProcessConnection.sendMessage({
+			this.whenUpdateProcessed = event.whenUpdateProcessed = this.constructor.updatingProcessConnection.sendMessage({
 				instanceId: this.id,
 				method: 'put',
 				args: [value],
@@ -740,7 +739,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		if (this.updatingProcessConnection) {
 			event = event || new DeletedEvent()
-			event.whenUpdateProcessed = this.updatingProcessConnection.sendMessage({
+			this.whenUpdateProcessed = event.whenUpdateProcessed = this.updatingProcessConnection.sendMessage({
 				method: 'delete',
 				instanceId: id,
 			})
@@ -758,10 +757,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			entity.assignPreviousValue(event)
 		}
 		expirationStrategy.deleteEntry(entity)
-		let whenWritten = this.dbPut(id)
+		this.dbPut(id)
 		this.instancesById.delete(id)
 		this.updated(event, entity)
-		return whenWritten
 	}
 
 	get [valueProperty]() {
@@ -773,6 +771,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let newToCache = this.readyState == 'no-local-data'
 		if (newToCache) {
 			this.readyState = 'loading-local-data'
+		}
+		if (this.constructor.updatingProcessConnection) {
+			return // only the updating process should update the value in the db
 		}
 		if (this.constructor.returnsAsyncIterables) {
 			value = when(value, value => {
@@ -807,152 +808,70 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				console.warn('Setting empty value', value, 'for', this.id, this.constructor.name)
 				this.readyState = 'invalidated'
 			}
-			let msgPack = value && encode(this._cachedValue = value)
+			let data = ''
 			let result
-			if (this.constructor.instancesById.get(this.id) != this) {
-				if (this.shouldPersist !== false)
-					console.warn('Attempt to set value on non-canonical instance', this.id)
-				return
-			}
+
 			let Class = this.constructor
 			if (this.shouldPersist !== false) {
 				let db = Class.db
 				let version = this[versionProperty]
-				let data = this.serializeEntryValue(version, msgPack)
+				data = this.serializeEntryValue(version, value)
 				Class.dbPut(this.id, data, version) // no need to wait for it, should be synchronously available through the cache
 				if (newToCache) {
 					// fire an updated, if it is a new object
 					let event = new AddedEvent()
 					event.triggers = [ INITIALIZATION_SOURCE ]
+					event.source = this
 					event.version = version
 					Class.instanceSetUpdated(event)
 					Class.updated(event, this)
 				}
 			}
-			expirationStrategy.useEntry(this, this.msgPackMultiplier * (msgPack || '').length)
-			return msgPack
+			expirationStrategy.useEntry(this, this.dPackMultiplier * (data || '').length)
 		})
 	}
 
-	serializeEntryValue(version, msgPack) {
-		return msgPack ? Buffer.concat([Buffer.from([0x92]) /*array of 2*/, encode(version), msgPack]) : encode(version)
+	serializeEntryValue(version, object) {
+		const encoder = createEncoder()
+		encoder.encode(version)
+		if (object)
+			encoder.encode(object)
+		return encoder.getEncoded()
 	}
 
 	static dbPut(key, value, version) {
-		if (!this.pendingWrites) {
-			this.pendingWrites = []
+		if (this.updatingProcessConnection) {
+			throw new Error('No updates out of process')
 		}
+
 		if (typeof value != 'object') {
 			value = Buffer.from(value.toString())
 		}
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
+		if (value) {
+			this.db.put(toBufferKey(key), value)
+		} else {
+			this.db.remove(toBufferKey(key))
+		}
 		let currentWriteBatch = this.currentWriteBatch
-		let whenWritten = this.whenWritten
 		if (!currentWriteBatch) {
-			currentWriteBatch = this.currentWriteBatch = new Map()
-			this.pendingWrites.push(currentWriteBatch)
-			currentWriteBatch.writes = 0
-			currentWriteBatch.writeSize = 0
-			const lastWriteCompletion = whenWritten
-			whenWritten = this.whenWritten = new Promise((resolve, reject) => {
-				currentWriteBatch.commitOperations = () => {
-					currentWriteBatch.commitOperations = () => {} // noop until finished
-					clearTimeout(delayedCommit)
-					// We are waiting for the last operation to finish before we start the next one
-					// not sure if that is the right way to do it, maybe we should allow overlapping commits?
-					when(lastWriteCompletion, () => { // always wait for last one to complete
-						let operations: OperationsArray = []
-						let lastVersion = 0
-						for (let [ key, putOperation ] of currentWriteBatch) {
-							if (putOperation.version)
-								lastVersion = Math.max(lastVersion, putOperation.version)
-							operations.push(putOperation)
-						}
-						// store the current version number
-						if (lastVersion > 0)
-							operations.push({
-								type: 'put',
-								key: LAST_VERSION_IN_DB_KEY,
-								value: Buffer.from(lastVersion.toString()),
-							})
-						this.currentWriteBatch = null
-						const finished = () => {
-							this.pendingWrites.splice(this.pendingWrites.indexOf(currentWriteBatch), 1)
-							if (this.whenWritten == whenWritten) {
-								this.whenWritten = null
-							}
-
-							resolve()
-						}
-						return when(this.db.batch(operations), finished, (error) => {
-							console.error(error)
-							finished()
-						})
-					})
-				}
-				const delayedCommit = setTimeout(currentWriteBatch.commitOperations, 20)
-			})
+			this.currentWriteBatch = setTimeout(() => {
+				this.db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
+				this.currentWriteBatch = null
+			}, 20)
 		}
-		currentWriteBatch.set(key, {
-			type: value === undefined ? 'del' : 'put',
-			key: toBufferKey(key),
-			value,
-			version
-		})
-		if (currentWriteBatch.writes++ > 100 || value && (currentWriteBatch.writeSize += (value.length || 10)) > 100000) {
-			currentWriteBatch.commitOperations()
-		}
-		return whenWritten
 	}
 
-	static dbGet(key, asBuffer) {
-		if (!this.pendingWrites) {
-			this.pendingWrites = []
-		}
-		for (let i = this.pendingWrites.length - 1; i >= 0; --i) {
-			let pendingWrite = this.pendingWrites[i]
-			if (pendingWrite.has(key)) {
-				return pendingWrite.get(key).value
-			}
-		}
-		return this.db[this.isSync ? 'getSync': 'get'](toBufferKey(key), asBuffer)
-	}
-
-	getValue() {
+	valueOf() {
 		let context = currentContext
 		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
 			context.ifModifiedSince = undefined
 		}
-		let result = when(when(this.constructor.whenUpdatedInContext(), () =>
-			this.readyState ?
-				this.readyState == 'loading-local-data' ? this.promise : null :
-				this.loadLatestLocalData()), () => {
-			const getValue = () => {
-				if (this.cachedVersion > -1) {
-					// it is live, so we can shortcut and just return the cached value
-					if (context) {
-						context.setVersion(this.cachedVersion)
-						if (context.ifModifiedSince >= this.cachedVersion) {
-							return NOT_MODIFIED
-						}
-					}
-					return this.cachedValue
-				}
-				if (this.constructor.updatingProcessConnection) {
-					// need to execute the transform, must do that on the updating process
-					return this.constructor.updatingProcessConnection.sendMessage({
-						instanceId: this.id,
-						method: 'getValue',
-					})
-				}
-				return super.getValue()
-			}
-			if (context && currentContext !== context)
-				return context.executeWithin(getValue)
-			else
-				return getValue()
-		})
-		return result
+		const whenUpdateProcessed = this._whenUpdateProcessed
+		if (whenUpdateProcessed) {
+			return whenUpdateProcessed.then(() => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
+		}
+		return when(this.constructor.whenUpdatedInContext(), () => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
 	}
 
 	/*gotValue(value) {
@@ -980,6 +899,11 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	static resetAll(clearDb): any {
 	}
 
+	getValue() {
+		if (!this.readyState)
+			this.loadLatestLocalData()
+		return super.getValue()
+	}
 	patch(properties) {
 		return this.then((value) =>
 			when(this.put(value = Object.assign(value || {}, properties)), () => value))
@@ -1006,13 +930,49 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	allowDirectJSON: boolean
 	static Sources: any[]
 	static fetchAllIds: () => {}[]
+
+	computeValue() {
+		return when(this.getValue(), () => null) // compute the value, but don't return anything, useful for the interprocess communication
+	}
+
+	getValue() {
+		let context = currentContext
+		if (!this.readyState)
+			this.loadLatestLocalData()
+		if (this.cachedVersion > -1 && this.readyState === 'up-to-date') {
+			// it is live, so we can shortcut and just return the cached value
+			if (context) {
+				context.setVersion(this.cachedVersion)
+				if (context.ifModifiedSince >= this.cachedVersion) {
+					return NOT_MODIFIED
+				}
+			}
+			return this.cachedValue
+		}
+		// if we don't have a cached version locally from the db, go to the updating process for transformation
+		const updatingProcessConnection = this.constructor.updatingProcessConnection
+		if (updatingProcessConnection) {
+			return updatingProcessConnection.sendMessage({
+				instanceId: this.id,
+				method: 'computeValue',
+			}).then(() => {
+				// reset and try again to get it from the db
+				this.readyState = null
+				return context ? context.executeWithin(() => this.getValue()) : this.getValue()
+			})
+		}
+		//else
+		return super.getValue()
+	}
+
 	is(value, event) {
 		// we skip loadLocalData and pretend it wasn't in the cache... not clear if
 		// that is how we want is() to behave or not
 		event = event || new ReplacedEvent()
 		event.triggers = [ INITIALIZATION_SOURCE ]
-		if (this.constructor.updatingProcessConnection) {
-			event.whenUpdateProcessed = this.constructor.updatingProcessConnection.sendMessage({
+		const updatingProcessConnection = this.constructor.updatingProcessConnection
+		if (updatingProcessConnection) {
+			this.whenUpdateProcessed = event.whenUpdateProcessed = updatingProcessConnection.sendMessage({
 				instanceId: this.id,
 				method: 'is',
 				args: [value],
@@ -1021,7 +981,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		event.source = this
 		this.updated(event, this)
 		this.cachedVersion = this.version
-		if (!event.whenUpdateProcess) {
+		if (!updatingProcessConnection) {
 			this.cachedValue = value
 		}
 		this.readyState = 'up-to-date'
@@ -1048,16 +1008,16 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
 				this.dbPut(id, this.prototype.serializeEntryValue(version), version)
 			}
-			yield (this.whenWritten)
 			console.info('Done reseting', this.name)
 		}.bind(this)))
 	}
 
 	resetCache(event) {
 		this._cachedValue = undefined
+		this.cachedVersion = undefined
 		let version = this.version
 		if (this.shouldPersist !== false) {
-//			if (!this.loaded || this.asMsgPack || oldJSON) { // maybe this might be a little faster if it is already invalidated
+//			if (!this.loaded || this.asDPack || oldJSON) { // maybe this might be a little faster if it is already invalidated
 			// storing as a version alone to indicate invalidation
 			this.constructor.dbPut(this.id, this.serializeEntryValue(version), version)
 //			}
@@ -1113,18 +1073,19 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static initialize(sourceCode) {
 		const registered = super.initialize(sourceCode)
-		if (this.updatingProcessConnection) {
+		const updatingProcessConnection = this.updatingProcessConnection
+		if (updatingProcessConnection) {
 			// we don't reset from this process if there is an updating process
 			return registered
 		}
-		when(registered, () => {
+		return when(registered, () => {
 			let receivedPendingVersion = []
 			for (let Source of this.Sources || []) {
 				let lastVersion = this.lastVersion
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(ids => {
 					if (ids.isFullReset) {
 						return when(this.resetAll(lastVersion > 0), // clear the old db if there are any entries
-							() => when(this.whenWritten, () => this.updateDBVersion()))
+							() => this.updateDBVersion())
 					}
 					//console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
 					let min = Infinity
@@ -1139,6 +1100,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
 			}
+			if (receivedPendingVersion.length > 0)
+				return Promise.all(receivedPendingVersion)
 		})
 		return registered
 	}
@@ -1233,8 +1196,8 @@ export function setDBFolder(folderName) {
 		Cached.dbFolder = folderName
 		Persistable.dbFolder = folderName
 	} else {
-		Persisted.dbFolder = folderName.db
-		Cached.dbFolder = folderName.cacheDb
-		Persistable.dbFolder = folderName.cacheDb
+		Persisted.dbFolder = folderName.dbFolder
+		Cached.dbFolder = folderName.cacheDbFolder
+		Persistable.dbFolder = folderName.cacheDbFolder
 	}
 }

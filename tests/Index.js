@@ -1,8 +1,8 @@
 const { Persisted, Persistable, Index, Reduced } = require('..')
 const { removeSync } = require('fs-extra')
 const { Test, TestByType, SumOfNumbersByType } = require('./model/Test2')
-suite('Index', function() {
-	this.timeout(20000)
+suite.only('Index', function() {
+	this.timeout(2000000)
 	suiteSetup(() => {
 	//	removeSync('tests/db')
 		return Promise.all([
@@ -25,6 +25,12 @@ suite('Index', function() {
 	test('index', () => {
 		return TestByType.for('even').then(value => {
 			assert.isTrue(value[0].isEven)
+			assert.equal(value.length, 5)
+			Test2.for(12).put({isEven: true, number: 12})
+			return TestByType.for('even').then(value => {
+				assert.isTrue(value[5].isEven)
+				assert.equal(value.length, 6)
+			})
 		})
 	})
 	test('index-reduce', async () => {

@@ -145,7 +145,7 @@ export class Reduced extends Cached {
 			// get the computed entry so we know how many levels we have
 			let level = this.rootLevel
 			if (!level) {
-				let data = await this.constructor.dbGet(this.id, true)
+				let data = this.constructor.db.get(toBufferKey(this.id))
 				if (data) {
 					let levelSeparatorIndex = data.indexOf(',')
 					//let version = data.slice(0, levelSeparatorIndex)

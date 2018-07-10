@@ -13,6 +13,7 @@ const DEFAULT_INDEXING_CONCURRENCY = 15
 const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
 const SEPARATOR_NEXT_BYTE = Buffer.from([31])
 const LAST_INDEXED_VERSION_KEY = Buffer.from([1, 2])
+const EMPTY_BUFFER = Buffer.from([])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 120
 const INITIALIZATION_SOURCE = 'is-initializing'
@@ -33,7 +34,7 @@ export const Index = ({ Source }) => {
 	let operations: OperationsArray = []
 	let lastIndexedVersion = 0
 	let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
-	const sourceVersions = new Map<String, number>()
+	const sourceVersions = {}
 	const processingSourceVersions = new Map<String, number>()
 	function addUpdatedIndexEntry(key, sources, triggers) {
 		let entry = updatedIndexEntries.get(key)
@@ -85,11 +86,11 @@ export const Index = ({ Source }) => {
 							}
 							for (let entry of previousEntries) {
 								let previousValue = entry.value
-								previousValue = previousValue === undefined ? Buffer.from([]) : encode(previousValue)
+								previousValue = previousValue === undefined ? EMPTY_BUFFER : encode(previousValue)
 								toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 							}
 						} else if (previousEntries != undefined) {
-							toRemove.set(previousEntries, Buffer.from([]))
+							toRemove.set(previousEntries, EMPTY_BUFFER)
 						}
 					}
 				} catch(error) {
@@ -130,7 +131,7 @@ export const Index = ({ Source }) => {
 						// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
 						let removedValue = toRemove.get(key)
 						// a value of '' is treated as a reference to the source object, so should always be treated as a change
-						let value = entry.value === undefined ? Buffer.from([]) : encode(entry.value)
+						let value = entry.value === undefined ? EMPTY_BUFFER : encode(entry.value)
 						if (removedValue !== undefined)
 							toRemove.delete(key)
 						let isChanged = removedValue === undefined || !value.equals(removedValue)
@@ -140,7 +141,7 @@ export const Index = ({ Source }) => {
 								operations.push({
 									type: 'put',
 									key: fullKey,
-									value: Buffer.from(value)
+									value: value
 								})
 								operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
 							}
@@ -234,7 +235,6 @@ export const Index = ({ Source }) => {
 					}
 					yield Promise.all(indexingInProgress)
 					yield this.commitOperations()
-					yield this.whenIndexedProgress
 					//console.log('Finished indexing progress:', this.name, this.queuedIndexedProgress)
 					if (this.queuedIndexedProgress) { // store the last queued indexed progres
 						this.db.put(LAST_INDEXED_VERSION_KEY, Buffer.from(this.queuedIndexedProgress.toString()))
@@ -307,11 +307,8 @@ export const Index = ({ Source }) => {
 			}
 			if (operations.length == 0) {
 				if (updatedIndexEntries.size > 0)
-					this.whenIndexedProgress = this.sendUpdates().then(() => {
-						return this.queuedIndexedProgress = indexedProgress
-					})
-				else
-					this.queuedIndexedProgress = indexedProgress
+					this.sendUpdates()
+				this.queuedIndexedProgress = indexedProgress
 				return
 			}
 			let operationsToCommit = operations
@@ -334,16 +331,14 @@ export const Index = ({ Source }) => {
 				// once the operations are recorded, we can send out updates
 				// we are *not* waiting for it to complete before continuing with indexing though
 				// but are waiting for it to complete before writing progress
-				this.whenIndexedProgress = this.sendUpdates().then(() => {
-					return this.queuedIndexedProgress = indexedProgress
-				})
+				this.sendUpdates()
+				return this.queuedIndexedProgress = indexedProgress
 			})
 		}
 		static sendUpdates() {
 			let updatedIndexEntriesArray = Array.from(updatedIndexEntries).reverse()
 			updatedIndexEntries = new Map()
 			let indexedEntry
-			let whenWritten = new Set()
 			while ((indexedEntry = updatedIndexEntriesArray.pop())) {
 				try {
 					let event = new ReplacedEvent()
@@ -351,14 +346,10 @@ export const Index = ({ Source }) => {
 					event.sources = indexEntryUpdate.sources
 					event.triggers = indexEntryUpdate.triggers
 					this.for(indexedEntry[0]).updated(event)
-					if (event.whenWritten) {
-						whenWritten.add(event.whenWritten)
-					}
 				} catch (error) {
 					console.error('Error sending index updates', error)
 				}
 			}
-			return Promise.all(whenWritten)
 		}
 
 		transform() {
@@ -417,9 +408,9 @@ export const Index = ({ Source }) => {
 			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
 			return when(Source.whenUpdatedInContext(), () => {
 				// Go through the expected source versions and see if we are behind and awaiting processing on any sources
-				for (const sourceName in context.expectedVersions) {
+				for (const sourceName in updateContext.expectedVersions) {
 					// if the expected version is behind, wait for processing to finish
-					if (context.expectedVersions[sourceName] > this.sourceVersions[sourceName])
+					if (updateContext.expectedVersions[sourceName] > sourceVersions[sourceName])
 						return this.requestProcessing(0) // up the priority
 				}
 			})
@@ -462,9 +453,9 @@ export const Index = ({ Source }) => {
 
 		static initialize(module) {
 			this.Sources[0].start()
-			if (this.Sources[0].updatingProcessModule && !this.updatingProcessModule) {
+			/*if (this.Sources[0].updatingProcessModule && !this.updatingProcessModule) {
 				this.updatingProcessModule = this.Sources[0].updatingProcessModule
-			}
+			}*/
 			allIndices.push(this)
 			return when(super.initialize(module), () => {
 				if (!this.updatingProcessConnection) {

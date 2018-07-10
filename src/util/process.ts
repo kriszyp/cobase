@@ -8,12 +8,15 @@ import { RequestContext } from '../RequestContext'
 const SUBPROCESS = process.env.COBASE_SUBPROCESS
 export const outstandingProcessRequests = new Map()
 
-const processMap = new Map<string, {
-	processName: string
-	moduleId: string
-}>()
+const processMap = new Map<string, Promise<any>>()
+export const processModules = new Map<string, string>()
 let requestId = 1
 
+export const configure = (updatedProcessMap) => {
+	for (const key in updatedProcessMap) {
+		processModules.set(key, updatedProcessMap[key])
+	}
+}
 const ipcRequests = new Map<number, { resolve: (result) => void, reject: (error) => void }>()
 
 export const getProcessConnection = (Class, { processName, module, onProcessStart }) => {
@@ -88,7 +91,7 @@ export function ensureProcessRunning(processName, moduleId): Promise<string> {
 		} else {
 			let childProcess
 			const startProcess = () => {
-				childProcess = fork(moduleId, [], {
+				childProcess = fork(processModules.get(processName) || moduleId, [], {
 					env: Object.assign({}, process.env, {
 						COBASE_SUBPROCESS: processName,
 					}),
@@ -163,9 +166,11 @@ export function ensureProcessRunning(processName, moduleId): Promise<string> {
 						let response = messageFulfillments.get(id)
 						if (response) {
 							if (message.error) {
-								const error = new Error(message.error.message)
-								error.status = message.error.status
-								error.isExpected = message.error.isExpected
+								const error = {
+									message: message.error.message,
+									status: message.error.status,
+									isExpected: message.error.isExpected,
+								}
 								response.reject(error)
 							} else {
 								response.resolve(message.result)
@@ -209,35 +214,50 @@ export function ensureProcessRunning(processName, moduleId): Promise<string> {
 			}
 		}))
 	}
-	return processReady
+	return processReady.then((channel) => {
+		if (moduleId) {
+			channel.sendRequest({
+				startModule: moduleId
+			})
+		}
+		return channel
+	})
 }
 
 export let createProxyServer
 
 if (SUBPROCESS) {
 	const classListeners = new Map<string, any>()
-	process.on('message', message => ipcRequests.get(message.id).resolve(message))
+	process.on('message', message => {
+		if (message.id) {
+			ipcRequests.get(message.id).resolve(message)
+		}
+	})
 	let sockets = []
 	const broadcastToOtherProcesses = (message, method) => {
 		const buffer = encode(message)
-		console.log(' * <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
+		//console.log(' * <<<', method, message.error ? message.error.message : ('result ' + typeof message.result), buffer.constructor.name)
 		for (const socket of sockets)
 			socket.write(buffer)
 	}
 	const sendToProcess = (message, socket, method?) => {
-		const buffer = encode(message)
-		console.log('   <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
-		socket.write(buffer)
+		when(encode(message), buffer => {
+			console.log('   <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
+			socket.write(buffer)
+		})
 	}
 	net.createServer((socket) => {
 		socket.pipe(createDecodeStream()).on('data', (message) => {
 			console.log('   >>>', message.method || message.type, message.className, message.instanceId)
 			let listener = classListeners.get(message.className)
 			if (!listener) {
-				const errorMessage = 'No class ' + message.className + ' registered to receive messages, ensure ' + message.className + '.start() is called first'
+				if (message.startModule) {
+					console.log('starting module', message.startModule)
+					return require(message.startModule)
+				}				const errorMessage = 'No class ' + message.className + ' registered to receive messages, ensure ' + message.className + '.start() is called first'
 				if (message.id) {
 					console.warn(errorMessage)
-					sendToProcess({
+					return sendToProcess({
 						id: message.id,
 						error: errorMessage
 					}, socket)
@@ -261,7 +281,7 @@ if (SUBPROCESS) {
 				console.log('Class not initalized yet, waiting to initialize')
 				return Class.ready.then(() => processMessage(message, socket))
 			}
-			const { id, instanceId, method, args, context } = message
+			const { id, instanceId, method, args, context, startModule } = message
 			let target = Class
 			if (instanceId) {
 				console.log('using instanceId', instanceId)
@@ -289,6 +309,7 @@ if (SUBPROCESS) {
 				onError(error)
 			}
 			function onError(error) {
+				console.error(error)
 				var errorObject = {
 					message: error.message,
 					status: error.status,
@@ -298,24 +319,27 @@ if (SUBPROCESS) {
 			}
 		}
 		classListeners.set(Class.name, processMessage)
-		Class.notifies({
-			updated(event, by) {
-				// TODO: debounce
-				console.log('sending update event')
-				let id = by && by.id
-				if (id) {
-					broadcastToOtherProcesses({
-						instanceId: id,
-						method: 'updated',
-						className: Class.name,
-						type: event.type,
-						triggers: event.triggers,
-					}, event.type)
+		Class.ready.then(() => {
+//			console.log(Class.name, 'is ready, listening for updates')
+			Class.notifies({
+				updated(event, by) {
+					// TODO: debounce
+					console.log('sending update event')
+					let id = by && by.id
+					if (id && by === event.source) {
+						broadcastToOtherProcesses({
+							instanceId: id,
+							method: 'updated',
+							className: Class.name,
+							type: event.type,
+							triggers: event.triggers,
+						}, event.type)
+					}
 				}
+			})
+			Class.onStateChange = state => {
+				broadcastToOtherProcesses(state, 'state change')
 			}
 		})
-		Class.onStateChange = state => {
-			broadcastToOtherProcesses(state, 'state change')
-		}
 	}
 }
