@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { createEncoder, encode, decode, createDecoder } from 'dpack'
+import { createEncoder, encode, decode, decodeLazy, createDecoder } from 'dpack'
 import * as lmdb from './storage/lmdb'
 import when from './util/when'
 import WeakValueMap from './util/WeakValueMap'
@@ -352,10 +352,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// make sure these are inherited
 		this.currentWriteBatch = null
 		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
-		let stateJSON = db.getSync(DB_VERSION_KEY)
+		let stateDPack = db.getSync(DB_VERSION_KEY)
 		let didReset
-		//console.log('DB starting state', this.name, stateJSON)
-		let state = stateJSON && decode(stateJSON)
+		//console.log('DB starting state', this.name, stateDPack)
+		let state = stateDPack && decode(stateDPack)
 		if (state && (state.dbVersion || state.transformHash) == this.transformVersion) {
 			this.startVersion = this.version = state.startVersion
 		} else {
@@ -605,13 +605,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	parseEntryValue(buffer) {
 		if (buffer) {
 			const decoder = createDecoder()
-			decoder.setSource(buffer.toString(), 0)
-			//decoder.setSource(buffer.slice(0,20).toString(), 0)  // the lazy version only reads the first fews bits to get the version
+			decoder.setSource(buffer.slice(0,20).toString(), 0)  // the lazy version only reads the first fews bits to get the version
 			const version = decoder.readOpen()
 			if (decoder.hasMoreData) {
 				return {
 					version,
-					data: decoder.readOpen(), // decodeLazy(buffer.slice(decoder.offset), decoder)
+					data: decodeLazy(buffer.slice(decoder.offset), decoder),
 					buffer,
 				}
 			} else {
