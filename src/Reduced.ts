@@ -1,5 +1,5 @@
 import { Cached } from './Persisted'
-import { encode, decode } from 'dpack'
+import { serialize, parse } from 'dpack'
 import { toBufferKey, fromBufferKey, Metadata } from 'ordered-binary'
 import when from './util/when'
 const INVALIDATED_VALUE = Buffer.from([])
@@ -43,7 +43,7 @@ export class Reduced extends Cached {
 					this.rootLevel = 1
 				}
 				// now it should be written to the node
-				// this should be done by Cached: Class.dbPut(this.id, version + ',' + this.rootLevel + ',' + encode(accumulator))
+				// this should be done by Cached: Class.dbPut(this.id, version + ',' + this.rootLevel + ',' + serialize(accumulator))
 				return accumulator
 			}
 		})
@@ -72,7 +72,7 @@ export class Reduced extends Cached {
 					level: key[1],
 					key: startKey,
 					endKey,
-					value: value.length > 0 ? decode(value) : INVALIDATED_VALUE,
+					value: value.length > 0 ? parse(value) : INVALIDATED_VALUE,
 				}
 			})[Symbol.asyncIterator]()
 		}
@@ -94,7 +94,7 @@ export class Reduced extends Cached {
 				childrenProcessed = 0
 				let nextDividingKey = endKey || key
 				put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, lastDividingKey, SEPARATOR_BYTE, lastDividingKey = toBufferKey(nextDividingKey)]),
-					encode(accumulator))
+					serialize(accumulator))
 				if (!split)
 					totalAccumulator = accumulator // start with existing accumulation
 				else
@@ -109,7 +109,7 @@ export class Reduced extends Cached {
 				put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, toBufferKey(key), SEPARATOR_BYTE, toBufferKey(endKey)]),
 					result.split || result.noChildren ?
 						undefined :// if it is a split, we have to remove the existing node
-						encode(value)) // otherwise write our value
+						serialize(value)) // otherwise write our value
 				if (result.noChildren) {
 					continue
 				}
@@ -124,7 +124,7 @@ export class Reduced extends Cached {
 		// store the last accumulated value if we are splitting
 		if (split) {
 			put(Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, lastDividingKey, SEPARATOR_BYTE, rangeEndKey]),
-				encode(accumulator))
+				serialize(accumulator))
 			// do one final merge of the sectional accumulator into the total to determine what to return
 			accumulator = await this.reduceBy(totalAccumulator, accumulator)
 		}

@@ -2,7 +2,6 @@ export { Persisted, Cached, Persistable, secureAccess, setDBFolder } from './Per
 export { Index } from './KeyIndex'
 export { RequestContext } from './RequestContext'
 export { Reduced } from './Reduced'
-export { runInProcess } from './Process'
 export { AccessError } from './util/errors'
 export { JSONStream } from './http-server/JSONStream'
 export { media, mediaTypes } from './http-server/media'

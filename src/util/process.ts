@@ -2,7 +2,7 @@ import { fork } from 'child_process'
 import when from './when'
 import * as net from 'net'
 import * as path from 'path'
-import { encode, createDecodeStream, decode } from 'dpack'
+import { createSerializeStream, createParseStream } from 'dpack'
 import { UpdateEvent, currentContext } from 'alkali'
 import { RequestContext } from '../RequestContext'
 const SUBPROCESS = process.env.COBASE_SUBPROCESS
@@ -31,9 +31,10 @@ export const getProcessConnection = (Class, { processName, module, onProcessStar
 	}))
 
 	ensureProcessRunning(processName, module).then(({ sendRequest, addListener }) => {
+		let whenReadable
 		addListener(Class.name, (message) => {
 			if (message.instanceId) {
-				console.log('<<<', message.type, message.className, message.instanceId)
+				//console.log('<<<', message.type, message.className, message.instanceId)
 				if (!Class.instancesById) {
 					console.log('Process proxy didnt have instancesById', ProcessProxy.name)
 					Class.initialize()
@@ -46,13 +47,13 @@ export const getProcessConnection = (Class, { processName, module, onProcessStar
 					instance.updated(event)
 				}
 			} else if (message.processing) {
-				console.log('<<<', 'processing', message.started ? 'started' : 'finished')
+				//console.log('<<<', 'processing', message.started ? 'started' : 'finished')
 				if (message.started) {
 					Class.whenReadable = new Promise((resolve, reject) => {
-						messageFulfillments.set('__whenReadable__', { resolve, reject })
+						whenReadable = { resolve, reject }
 					})
 				} else {
-					messageFulfillments.get('__whenReadable__').resolve(message.downstreamUpdates)
+					whenReadable.resolve(message.downstreamUpdates)
 				}
 			} else {
 				console.warn('Unknown child process message', message)
@@ -154,12 +155,18 @@ export function ensureProcessRunning(processName, moduleId): Promise<string> {
 		const classListeners = new Map<name, Function>()
 		processMap.set(processName, processReady = processReady.then(() => {
 			const socket = net.createConnection(path.join('\\\\?\\pipe', process.cwd(), processName))
-			let decodedStream = socket.pipe(createDecodeStream()).on('error', (err) => {
+			let parsedStream = socket.pipe(createParseStream({
+				//encoding: 'utf16le',
+			})).on('error', (err) => {
 			  // handle errors here
 			  throw err;
 			})
+			let serializingStream = createSerializeStream({
+				//encoding: 'utf16le'
+			})
+			serializingStream.pipe(socket)
 			socket.unref()
-			decodedStream.on('data', (message) => {
+			parsedStream.on('data', (message) => {
 				try {
 					const id = message.id
 					if (id) {
@@ -189,14 +196,13 @@ export function ensureProcessRunning(processName, moduleId): Promise<string> {
 					console.error(error)
 				}
 			})
-			const send = (data) => socket.write(data)
+			const send = (data) => serializingStream.write(data)
 			return {
 				sendRequest(data) {
 					const id = requestId++
 					outstandingProcessRequests.set(id, data)
 					data.id = id
-					const encoded = encode(data)
-					send(encoded)
+					send(data)
 					return new Promise((resolve, reject) => messageFulfillments.set(id, {
 						resolve(result) {
 							outstandingProcessRequests.delete(id)
@@ -233,21 +239,21 @@ if (SUBPROCESS) {
 			ipcRequests.get(message.id).resolve(message)
 		}
 	})
-	let sockets = []
+	let streams = []
 	const broadcastToOtherProcesses = (message, method) => {
-		const buffer = encode(message)
-		//console.log(' * <<<', method, message.error ? message.error.message : ('result ' + typeof message.result), buffer.constructor.name)
-		for (const socket of sockets)
-			socket.write(buffer)
+		// TODO: Use a Block and find a way to serialize once, and send to all messages
+		//console.log(' * <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
+		for (const stream of streams)
+			stream.write(message)
 	}
-	const sendToProcess = (message, socket, method?) => {
-		when(encode(message), buffer => {
-			console.log('   <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
-			socket.write(buffer)
-		})
+	const sendToProcess = (message, stream, method?) => {
+		//console.log('   <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
+		stream.write(message)
 	}
 	net.createServer((socket) => {
-		socket.pipe(createDecodeStream()).on('data', (message) => {
+		socket.pipe(createParseStream({
+			//encoding: 'utf16le',
+		})).on('data', (message) => {
 			console.log('   >>>', message.method || message.type, message.className, message.instanceId)
 			let listener = classListeners.get(message.className)
 			if (!listener) {
@@ -260,14 +266,18 @@ if (SUBPROCESS) {
 					return sendToProcess({
 						id: message.id,
 						error: errorMessage
-					}, socket)
+					}, serializingStream)
 				} else {
 					throw new Error(errorMessage)
 				}
 			}
-			listener(message, socket)
+			listener(message, serializingStream)
 		})
-		sockets.push(socket)
+		let serializingStream = createSerializeStream({
+			encoding: 'utf16le',
+		})
+		serializingStream.pipe(socket)
+		streams.push(serializingStream)
 
 	}).on('error', (err) => {
 	  // handle errors here
@@ -276,22 +286,21 @@ if (SUBPROCESS) {
 	process.send({ ready: true })
 	console.log('finished setting up named pipe server')
 	createProxyServer = (Class) => {
-		const processMessage = (message, socket) => {
+		const processMessage = (message, stream) => {
 			if (!Class.initialized) {
 				console.log('Class not initalized yet, waiting to initialize')
-				return Class.ready.then(() => processMessage(message, socket))
+				return Class.ready.then(() => processMessage(message, stream))
 			}
 			const { id, instanceId, method, args, context, startModule } = message
 			let target = Class
 			if (instanceId) {
-				console.log('using instanceId', instanceId)
+				//console.log('using instanceId', instanceId)
 				if (instanceId == 'instanceIds')
 					target = target.instanceIds
 				else
 					target = target.for(instanceId)
 			}
 			try {
-				console.log('executing', method)
 				const localContext = context && new RequestContext(null, context.session)
 				const func = target[method]
 				if (!func) {
@@ -300,9 +309,9 @@ if (SUBPROCESS) {
 				when(localContext ? localContext.executeWithin(() => func.apply(target, args)) : func.apply(target, args),
 					(result) => {
 						if (result === undefined)
-							sendToProcess({ id }, socket, method) // undefined gets converted to null with msgpack
+							sendToProcess({ id }, stream, method) // undefined gets converted to null with msgpack
 						else
-							sendToProcess({ id, result }, socket, method)
+							sendToProcess({ id, result }, stream, method)
 					},
 					onError)
 			} catch (error) {
@@ -315,7 +324,7 @@ if (SUBPROCESS) {
 					status: error.status,
 					isExpected: error.isExpected
 				}
-				sendToProcess({ id, error: errorObject }, socket, method)
+				sendToProcess({ id, error: errorObject }, stream, method)
 			}
 		}
 		classListeners.set(Class.name, processMessage)
@@ -324,7 +333,7 @@ if (SUBPROCESS) {
 			Class.notifies({
 				updated(event, by) {
 					// TODO: debounce
-					console.log('sending update event')
+					//console.log('sending update event')
 					let id = by && by.id
 					if (id && by === event.source) {
 						broadcastToOtherProcesses({
@@ -338,6 +347,7 @@ if (SUBPROCESS) {
 				}
 			})
 			Class.onStateChange = state => {
+				state.className = Class.name
 				broadcastToOtherProcesses(state, 'state change')
 			}
 		})

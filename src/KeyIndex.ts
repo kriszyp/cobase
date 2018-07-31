@@ -1,5 +1,5 @@
 import { spawn, currentContext, VArray, ReplacedEvent, UpdateEvent } from 'alkali'
-import { encode, decode } from 'dpack'
+import { serialize, parse } from 'dpack'
 import { Persistable } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
@@ -86,7 +86,7 @@ export const Index = ({ Source }) => {
 							}
 							for (let entry of previousEntries) {
 								let previousValue = entry.value
-								previousValue = previousValue === undefined ? EMPTY_BUFFER : encode(previousValue)
+								previousValue = previousValue === undefined ? EMPTY_BUFFER : serialize(previousValue)
 								toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 							}
 						} else if (previousEntries != undefined) {
@@ -131,7 +131,7 @@ export const Index = ({ Source }) => {
 						// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
 						let removedValue = toRemove.get(key)
 						// a value of '' is treated as a reference to the source object, so should always be treated as a change
-						let value = entry.value === undefined ? EMPTY_BUFFER : encode(entry.value)
+						let value = entry.value === undefined ? EMPTY_BUFFER : serialize(entry.value)
 						if (removedValue !== undefined)
 							toRemove.delete(key)
 						let isChanged = removedValue === undefined || !value.equals(removedValue)
@@ -382,8 +382,8 @@ export const Index = ({ Source }) => {
 				}
 				return returnFullKeyValue ? {
 					key: sourceId,
-					value: value !== null ? value.length > 0 ? decode(value) : Source.for(sourceId) : value,
-				} : value.length > 0 ? decode(value) : Source.for(sourceId)
+					value: value !== null ? value.length > 0 ? parse(value) : Source.for(sourceId) : value,
+				} : value.length > 0 ? parse(value) : Source.for(sourceId)
 			})
 		}
 		/**

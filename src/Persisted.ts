@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { createEncoder, encode, decode, decodeLazy, createDecoder } from 'dpack'
+import { createSerializer, serialize, parse, parseLazy, createParser } from 'dpack'
 import * as lmdb from './storage/lmdb'
 import when from './util/when'
 import WeakValueMap from './util/WeakValueMap'
@@ -355,7 +355,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let stateDPack = db.getSync(DB_VERSION_KEY)
 		let didReset
 		//console.log('DB starting state', this.name, stateDPack)
-		let state = stateDPack && decode(stateDPack)
+		let state = stateDPack && parse(stateDPack)
 		if (state && (state.dbVersion || state.transformHash) == this.transformVersion) {
 			this.startVersion = this.version = state.startVersion
 		} else {
@@ -405,13 +405,16 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	updated(event = new ReplacedEvent(), by?) {
 		const updatingProcessConnection = this.constructor.updatingProcessConnection
 		const isUpdatingProcess = !updatingProcessConnection
+		if (!event.visited) {
+			event.visited = new Set() // TODO: Would like to remove this at some point
+		}
 		if (!event.source) {
 			event.source = this
 			// if we are the source, and there is a main updating process to notify, do that now, and use it as a mark not commit anything to the db (must be done in its updating process)
 			if (updatingProcessConnection) {
 				event.whenUpdateProcessed = updatingProcessConnection.sendMessage({
 					instanceId: this.id,
-					method: 'updated',
+					method: 'centralUpdated',
 					args: [
 						{ type: event.type }
 					],
@@ -494,7 +497,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static updateDBVersion() {
 		let version = this.startVersion
-		this.db.put(DB_VERSION_KEY, encode({
+		this.db.put(DB_VERSION_KEY, serialize({
 			startVersion: version,
 			dbVersion: this.transformVersion
 		}))
@@ -604,13 +607,13 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	parseEntryValue(buffer) {
 		if (buffer) {
-			const decoder = createDecoder()
-			decoder.setSource(buffer.slice(0,20).toString(), 0)  // the lazy version only reads the first fews bits to get the version
-			const version = decoder.readOpen()
-			if (decoder.hasMoreData) {
+			const parser = createParser()
+			parser.setSource(buffer.slice(0,24).toString(), 0)  // the lazy version only reads the first fews bits to get the version
+			const version = parser.readOpen()
+			if (parser.hasMoreData()) {
 				return {
 					version,
-					data: decodeLazy(buffer.slice(decoder.offset), decoder),
+					data: parseLazy(buffer.slice(parser.getOffset()), parser),
 					buffer,
 				}
 			} else {
@@ -693,11 +696,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				return []
 			}
 			console.log('Scanning for updates from', sinceVersion, this.lastVersion, isFullReset, this.name)
+			const parser = createParser()
 			return db.iterable({
 				gt: Buffer.from([2])
 			}).map(({ key, value }) => {
-				const separatorIndex = value.indexOf(',')
-				const version = separatorIndex > -1 ? +value.slice(0, separatorIndex) : +value
+				parser.setSource(value.slice(0,24).toString(), 0)  // the lazy version only reads the first fews bits to get the version
+				const version = parser.readOpen()
 				return version > sinceVersion ? {
 					id: fromBufferKey(key),
 					version
@@ -831,11 +835,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	serializeEntryValue(version, object) {
-		const encoder = createEncoder()
-		encoder.encode(version)
+		const serializer = createSerializer()
+		serializer.serialize(version)
 		if (object)
-			encoder.encode(object)
-		return encoder.getEncoded()
+			serializer.serialize(object)
+		return serializer.getSerialized()
 	}
 
 	static dbPut(key, value, version) {
@@ -951,14 +955,18 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		// if we don't have a cached version locally from the db, go to the updating process for transformation
 		const updatingProcessConnection = this.constructor.updatingProcessConnection
 		if (updatingProcessConnection) {
-			return updatingProcessConnection.sendMessage({
+			var promise = this.remotelyUpdating = this.remotelyUpdating || updatingProcessConnection.sendMessage({
 				instanceId: this.id,
 				method: 'computeValue',
 			}).then(() => {
 				// reset and try again to get it from the db
+				if (this.remotelyUpdating == promise) {
+					this.remotelyUpdating = null
+				}
 				this.readyState = null
 				return context ? context.executeWithin(() => this.getValue()) : this.getValue()
 			})
+			return promise
 		}
 		//else
 		return super.getValue()

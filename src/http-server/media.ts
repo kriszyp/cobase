@@ -3,48 +3,53 @@ import * as bufferStream from 'mach/lib/utils/bufferStream'
 import { jsonMediaType } from './JSONStream'
 import { dpackMediaType } from './dpack'
 import { textMediaType } from './text'
+import { htmlMediaType, sendResourceEditor } from './html'
 
 export const mediaTypes = new Map()
-export function media(app) {
-	return (connection) => {
-		let headers = connection.request.headers
-		const options = {
-			charset: 'utf8'
-		}
-		const contentType = headers['Content-Type']
-		if (contentType) {
-			let [mimeType, optionsString] = contentType.split(/\s*;\s*/)
-			if (optionsString) {
-				optionsString.replace(/([^=]+)=([^;]+)/g, (t, name, value) =>
-					options[name] = value)
-			}
-			let parser = mediaTypes.get(mimeType)
-			if (!parser || !parser.parse) {
-				if (headers['Content-Length'] == '0') {
-					parser = EMPTY_MEDIA_PARSER
-				} else {
-					connection.status = 415
-					connection.response.content = 'Unsupported media type ' + mimeType
-					return
-				}
-			}
-			if (parser.handlesRequest) {
-				return when(parser.handle(connection), () =>
-					when(connection.call(app), (returnValue) => serializer(returnValue, connection)))
-			}
-			return bufferStream(connection.request.content).then(data => {
-				connection.request.data = parser.parse(data.toString(options.charset))
-				return when(connection.call(app), (returnValue) => serializer(returnValue, connection))
-			})
-		}
-		return when(connection.call(app), (returnValue) => serializer(returnValue, connection))
+export function media(connection, next) {
+	let request = connection.request
+	if (connection.path.indexOf('cobase-resource-viewer') > -1) {
+		return sendResourceEditor(connection)
 	}
+	let headers = request.headers
+	const options = {
+		charset: 'utf8'
+	}
+	const contentType = headers['Content-Type']
+	if (contentType) {
+		let [mimeType, optionsString] = contentType.split(/\s*;\s*/)
+		if (optionsString) {
+			optionsString.replace(/([^=]+)=([^;]+)/g, (t, name, value) =>
+				options[name] = value)
+		}
+		let parser = mediaTypes.get(mimeType)
+		if (!parser || !parser.parse) {
+			if (headers['Content-Length'] == '0') {
+				parser = EMPTY_MEDIA_PARSER
+			} else {
+				connection.status = 415
+				connection.response.content = 'Unsupported media type ' + mimeType
+				return
+			}
+		}
+		if (parser.handlesRequest) {
+			return when(parser.handle(connection), () =>
+				when(connection.call(app), (returnValue) => serializer(returnValue, connection)))
+		}
+		return bufferStream(connection.request.content).then(data => {
+			connection.data = connection.request.data = parser.parse(data.toString(options.charset))
+			return when(next(), (returnValue) => serializer(returnValue, connection))
+		})
+	}
+	return when(next(), (returnValue) => serializer(returnValue, connection))
 }
 function serializer(returnValue, connection) {
-	if (connection.response.data === undefined && returnValue === undefined)
+	returnValue = connection.data !== undefined ? connection.data :
+		connection.response.data !== undefined ? connection.response.data : returnValue
+	if (returnValue === undefined)
 		return // nothing to serialize
 	let requestHeaders = connection.request.headers
-	let acceptHeader = requestHeaders.Accept || '*/*'
+	let acceptHeader = requestHeaders.accept || requestHeaders.Accept || '*/*'
 	let responseHeaders = connection.response.headers
 	responseHeaders.vary = (responseHeaders.vary ? responseHeaders.vary + ',' : '') + 'Accept'
 	let bestSerializer = jsonMediaType // default for now, TODO: return a 415
@@ -72,13 +77,19 @@ function serializer(returnValue, connection) {
 			}
 		}
 	}
-	responseHeaders['Content-Type'] = bestType
-	connection.response.content = bestSerializer.serialize(returnValue === undefined ? connection.response.data : returnValue, connection, bestParameters)
+	if (connection.response.set) {
+		connection.response.set('content-type', bestType)
+		connection.response.set('vary', 'Accept')
+	} else {
+		responseHeaders['Content-Type'] = bestType
+	}
+	connection.response.body = connection.response.content = bestSerializer.serialize(returnValue, connection, bestParameters)
 }
 
 mediaTypes.set('text/dpack', dpackMediaType)
 mediaTypes.set('application/json', jsonMediaType)
 mediaTypes.set('text/plain', textMediaType)
+mediaTypes.set('text/html', htmlMediaType)
 const EMPTY_MEDIA_PARSER = {
 	parse() {
 	}
