@@ -274,7 +274,7 @@ export const Index = ({ Source }) => {
 			} else if (idsAndVersionsToReindex.length > 0) {
 				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
 				yield db.iterable({
-					gt: Buffer.from([2])
+					start: Buffer.from([2])
 				}).map(({ key, value }) => {
 					let [, sourceId] = fromBufferKey(key, true)
 					if (setOfIds.has(sourceId)) {
@@ -355,8 +355,8 @@ export const Index = ({ Source }) => {
 		transform() {
 			let keyPrefix = toBufferKey(this.id)
 			let iterable = this.getIndexedValues({
-				gt: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
-				lt: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
+				start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
+				end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
 				recordApproximateSize: true,
 			})
 			return this.constructor.returnsAsyncIterables ? iterable : iterable.asArray
@@ -365,8 +365,8 @@ export const Index = ({ Source }) => {
 		getIndexedKeys() {
 			let keyPrefix = toBufferKey(this.id)
 			return this.getIndexedValues({
-				gt: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
-				lt: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
+				start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
+				end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
 				values: false,
 			}, true).map(({ key, value }) => key)
 		}
@@ -403,8 +403,8 @@ export const Index = ({ Source }) => {
 			return Promise.resolve(spawn(this.rebuildIndex())).then(() => spawn(this.resumeIndex()))
 		}
 
-		static whenUpdatedInContext() {
-			let context = currentContext
+		static whenUpdatedInContext(context) {
+			context = context || currentContext
 			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
 			return when(Source.whenUpdatedInContext(), () => {
 				// Go through the expected source versions and see if we are behind and awaiting processing on any sources
@@ -430,24 +430,14 @@ export const Index = ({ Source }) => {
 
 		getValue() {
 			// First: ensure that all the source instances are up-to-date
-			if (currentContext) {
-				let context = currentContext
-				// set to current version of index
-				if (currentContext.requestedVersion) {
-					return when(this.constructor.whenUpdatedFrom(currentContext.requestVersion), () => {
+			const context = currentContext
+			return when(this.constructor.whenUpdatedInContext(context), () => {
+				if (context)
 						context.setVersion(this.constructor.version)
-						return when(super.getValue(), (value) => {
-							expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
-							return value
-						})
-					})
-				} else {
-					context.setVersion(this.constructor.version)
-				}
-			}
-			return when(super.getValue(), (value) => {
-				expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
-				return value
+				return when(super.getValue(), (value) => {
+					expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
+					return value
+				})
 			})
 		}
 
@@ -577,18 +567,14 @@ export const Index = ({ Source }) => {
 		static getInstanceIds(range: IterableOptions) {
 			let db = this.db
 			let options: IterableOptions = {
-				gt: Buffer.from([2]),
+				start: Buffer.from([2]),
 				values: false
 			}
 			if (range) {
-				if (range.gt != null)
-					options.gt = toBufferKey(range.gt)
-				if (range.lt != null)
-					options.lt = toBufferKey(range.lt)
-				if (range.gte != null)
-					options.gte = toBufferKey(range.gte)
-				if (range.lte != null)
-					options.lte = toBufferKey(range.lte)
+				if (range.start != null)
+					options.start = toBufferKey(range.start)
+				if (range.end != null)
+					options.end = toBufferKey(range.end)
 			}
 			let lastKey
 			return when(this.whenProcessingComplete, () =>

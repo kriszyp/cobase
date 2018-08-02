@@ -187,7 +187,6 @@ In addition, the following methods are available as *`static`* methods on entity
 `set(id, value)` - Shorthand for `Entity.for(id).put(value)`.
 `instanceIds` - This property returns a variable array (VArray) with ids of all the available instances of the entity.
 `subscribe((event) => void)` - Subscribe to any changes to any instances of this class.
-`whenUpdatedFrom(Source)` - Wait for any updates made to the source to be propagated to this entity.
 `index(propertyName)` - This returns an `Index` class defined such it indexes this class using the provided property name, or `indexBy` function (that can be referenced by the provided name).
 
 ## Connecting to different databases

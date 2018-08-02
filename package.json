@@ -15,7 +15,7 @@
   "main": "./dist/index.js",
   "typings": "./index.d.ts",
   "dependencies": {
-    "dpack": "^0.1.0",
+    "dpack": "^0.2.0",
     "fs-extra": "^5.0.0",
     "node-lmdb": "^0.6.0",
     "ordered-binary": "^0.0.2",

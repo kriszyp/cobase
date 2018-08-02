@@ -115,15 +115,30 @@ export function open(name): Database {
 		iterable(options) {
 			let iterable = new ArrayLikeIterable()
 			iterable[Symbol.iterator] = (async) => {
-				let currentKey = options.reverse ? options.lt || Buffer.from([255, 255]) : (options.gt || Buffer.from([0]))
-				let endKey = options.reverse ? options.gt || Buffer.from([0]) : (options.lt || Buffer.from([255, 255]))
-				let reverse = options.reverse
-				const goToDirection = reverse ? 'goToPrevious' : 'goToNext'
+				let currentKey = options.start || (options.reverse ? Buffer.from([255, 255]) : Buffer.from([0]))
+				let endKey = options.end || (options.reverse ? Buffer.from([0]) : Buffer.from([255, 255]))
+				const reverse = options.reverse
+				const goToDirection = reverse ? 'goToPrev' : 'goToNext'
 				const getNextBlock = () => {
 					array = []
 					let txn = env.beginTxn(READING_TNX)
 					let cursor = new Cursor(txn, db, AS_BINARY)
-					currentKey = cursor.goToRange(currentKey)
+					if (reverse) {
+						// for reverse retrieval, goToRange is backwards because it positions at the key equal or *greater than* the provided key
+						let nextKey = cursor.goToRange(currentKey)
+						if (nextKey) {
+							if (!nextKey.equals(currentKey)) {
+								// goToRange positioned us at a key after the provided key, so we need to go the previous key to be less than the provided key
+								currentKey = cursor.goToPrev()
+							} // else they match, we are good, and currentKey is already correct
+						} else {
+							// likewise, we have been position beyond the end of the index, need to go to last
+							currentKey = cursor.goToLast()
+						}
+					} else {
+						// for forward retrieval, goToRange does what we want
+						currentKey = cursor.goToRange(currentKey)
+					}
 					let i = 0
 					while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) < 0 : currentKey.compare(endKey) > 0)) && i++ < 100) {
 						array.push(currentKey, uncompressSync(cursor.getCurrentBinaryUnsafe()))

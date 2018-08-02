@@ -1,6 +1,6 @@
 const { Persisted, Persistable, Index, Reduced } = require('..')
 const { removeSync } = require('fs-extra')
-const { Test, TestByType, SumOfNumbersByType } = require('./model/Test2')
+const { Test, TestByType, SumOfNumbersByType, getReduceCalls } = require('./model/Test2')
 suite.only('Index', function() {
 	this.timeout(2000000)
 	suiteSetup(() => {
@@ -30,33 +30,37 @@ suite.only('Index', function() {
 			return TestByType.for('even').then(value => {
 				assert.isTrue(value[5].isEven)
 				assert.equal(value.length, 6)
+				Test2.remove(12)
+				return TestByType.for('even').then(value => {
+					assert.equal(value.length, 5)
+				})
 			})
 		})
 	})
 	test('index-reduce', async () => {
 		let value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 30)
-		assert.isTrue(reduceCalls < 10)
+		assert.isTrue(getReduceCalls() < 10)
 
 		Test2.remove(4)
 		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 26)
-		assert.isTrue(reduceCalls < 10)
+		assert.isTrue(getReduceCalls() < 10)
 
 		Test2.for(8).put({ description: 'changing 8 to 10', isEven: true, number: 10})
 		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 28)
-		assert.isTrue(reduceCalls < 10)
+		assert.isTrue(getReduceCalls() < 10)
 
 		Test2.for(12).put({ name: 'twelve', isEven: true, number: 12})
 		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 40)
-		assert.isTrue(reduceCalls < 13)
+		assert.isTrue(getReduceCalls() < 13)
 
 		Test2.remove(2)
 		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 38)
-		assert.isTrue(reduceCalls < 16)
+		assert.isTrue(getReduceCalls() < 16)
 
 		Test2.remove(6)
 		Test2.remove(8)
@@ -64,12 +68,12 @@ suite.only('Index', function() {
 		Test2.remove(12)
 		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, undefined)
-		assert.isTrue(reduceCalls < 16)
+		assert.isTrue(getReduceCalls() < 16)
 
 		Test2.for(4).put({ name: 'four', isEven: true, number: 4})
 		value = await SumOfNumbersByType.for('even')
 		assert.equal(value, 4)
-		assert.isTrue(reduceCalls < 18)
+		assert.isTrue(getReduceCalls() < 18)
 
 	})
 

@@ -1,5 +1,5 @@
 import { Cached } from './Persisted'
-import { serialize, parse } from 'dpack'
+import { createSerializer, serialize, parse, parseLazy, createParser } from 'dpack'
 import { toBufferKey, fromBufferKey, Metadata } from 'ordered-binary'
 import when from './util/when'
 const INVALIDATED_VALUE = Buffer.from([])
@@ -57,14 +57,14 @@ export class Reduced extends Cached {
 		if (level === 1) {
 			// leaf-node, go to source index
 			iterator = this.indexSource.getIndexedValues({
-				gte: Buffer.concat([indexBufferKey, SEPARATOR_BYTE, rangeStartKey]),
-				lt: Buffer.concat([indexBufferKey, SEPARATOR_BYTE, rangeEndKey]),
-			}, true)[Symbol.asyncIterator]()
+				start: Buffer.concat([indexBufferKey, SEPARATOR_BYTE, rangeStartKey]),
+				end: Buffer.concat([indexBufferKey, SEPARATOR_BYTE, rangeEndKey]),
+			}, true)[Symbol.iterator]()
 		} else {
 			// mid-node, use our own nodes/ranges here
 			iterator = db.iterable({
-				gt: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeStartKey]),
-				lt: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeEndKey]),
+				start: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeStartKey]),
+				end: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeEndKey]),
 				reverse: false,
 			}).map(({ key, value }) => {
 				let [, startKey, endKey] = fromBufferKey(key.slice(2), true)
@@ -74,7 +74,7 @@ export class Reduced extends Cached {
 					endKey,
 					value: value.length > 0 ? parse(value) : INVALIDATED_VALUE,
 				}
-			})[Symbol.asyncIterator]()
+			})[Symbol.iterator]()
 		}
 		let next
 		let version = Date.now()
@@ -84,7 +84,7 @@ export class Reduced extends Cached {
 		let accumulator
 		let totalAccumulator
 		let childrenProcessed = 0		// asynchronously iterate
-		while(!(next = await iterator.next()).done) {
+		while(!(next = iterator.next()).done) {
 			let { key, endKey, value } = next.value
 			if (value && value.then) // if the index has references to variables, need to resolve them
 				value = await value
@@ -147,10 +147,10 @@ export class Reduced extends Cached {
 			if (!level) {
 				let data = this.constructor.db.get(toBufferKey(this.id))
 				if (data) {
-					let levelSeparatorIndex = data.indexOf(',')
-					//let version = data.slice(0, levelSeparatorIndex)
-					let dataSeparatorIndex = data.indexOf(',', levelSeparatorIndex + 1)
-					level = +data.slice(levelSeparatorIndex + 1, dataSeparatorIndex > -1 ? dataSeparatorIndex : data.length)
+					const parser = createParser()
+					parser.setSource(data.slice(0, 28).toString(), 0)  // the lazy version only reads the first fews bits to get the version
+					const version = parser.readOpen()
+					level = parser.hasMoreData() && parser.readOpen()
 				} else {
 					return // no entry, no levels
 				}
@@ -158,7 +158,7 @@ export class Reduced extends Cached {
 			for (let i = 1; i < level; i++) {
 				let sourceKeyBuffer = toBufferKey(sourceKey)
 				let [ nodeToInvalidate ] = await db.iterable({
-					lt: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([i]), toBufferKey(this.id), SEPARATOR_BYTE, sourceKeyBuffer, Buffer.from([255])]),
+					start: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([i]), toBufferKey(this.id), SEPARATOR_BYTE, sourceKeyBuffer, Buffer.from([255])]),
 					values: false,
 					reverse: true,
 					limit: 1,
@@ -170,34 +170,38 @@ export class Reduced extends Cached {
 		})
 		// rebalancing nodes will take place when we when we do the actual reduce operation
 	}
-	parseEntryValue(data) {
-		if (data) {
-			let levelSeparatorIndex = data.indexOf(',')
-			let dataSeparatorIndex = data.indexOf(',', levelSeparatorIndex + 1)
-			if (dataSeparatorIndex > -1) {
-				this.rootLevel = +data.slice(levelSeparatorIndex + 1, dataSeparatorIndex)
+	parseEntryValue(buffer) {
+		if (buffer) {
+			const parser = createParser()
+			parser.setSource(buffer.slice(0, 28).toString(), 0)  // the lazy version only reads the first fews bits to get the version
+			const version = parser.readOpen()
+			this.rootLevel = parser.hasMoreData() && parser.readOpen()
+			if (parser.hasMoreData()) {
 				return {
-					version: +data.slice(0, levelSeparatorIndex),
-					asMsgPack: data.slice(dataSeparatorIndex + 1)
+					version,
+					data: parseLazy(buffer.slice(parser.getOffset()), parser),
+					buffer,
 				}
-			} else if (levelSeparatorIndex > -1) {
-				this.rootLevel = +data.slice(levelSeparatorIndex + 1)
-				return {
-					version: +data.slice(0, levelSeparatorIndex),
-				}
-			} else if (isFinite(data)) {
+			} else {
 				// stored as an invalidated version
 				return {
-					version: +data
+					version,
+					buffer,
 				}
 			}
 		} else {
 			return {}
 		}
 	}
-	serializeEntryValue(version, json) {
-		return json ? version + ',' + (this.rootLevel || 1) + ',' + json : (version + ',' + (this.rootLevel || 1))
+	serializeEntryValue(version, object) {
+		const serializer = createSerializer()
+		serializer.serialize(version)
+		serializer.serialize(this.rootLevel || 1)
+		if (object)
+			serializer.serialize(object)
+		return serializer.getSerialized()
 	}
+
 	transaction(action) {
 		const Class = this.constructor
 		const db = Class.db

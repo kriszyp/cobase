@@ -33,3 +33,6 @@ SumOfNumbersByType.start()
 exports.Test2 = Test2
 exports.TestByType = TestByType
 exports.SumOfNumbersByType = SumOfNumbersByType
+exports.getReduceCalls = function() {
+	return reduceCalls
+}

@@ -666,18 +666,14 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static getInstanceIds(range: IterableOptions) {
 		let db = this.db
 		let options: IterableOptions = {
-			gt: Buffer.from([4]),
+			start: Buffer.from([4]),
 			values: false
 		}
 		if (range) {
-			if (range.gt != null)
-				options.gt = toBufferKey(range.gt)
-			if (range.lt != null)
-				options.lt = toBufferKey(range.lt)
-			if (range.gte != null)
-				options.gte = toBufferKey(range.gte)
-			if (range.lte != null)
-				options.lte = toBufferKey(range.lte)
+			if (range.start != null)
+				options.start = toBufferKey(range.start)
+			if (range.end != null)
+				options.end = toBufferKey(range.end)
 		}
 		return db.iterable(options).map(({ key }) => fromBufferKey(key)).asArray
 	}
@@ -685,7 +681,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static entries(opts) {
 		let db = this.db
 		return db.iterable({
-			gt: Buffer.from([2])
+			start: Buffer.from([2])
 		}).map(({ key, value }) => ({key: fromBufferKey(key), value})).asArray
 	}
 
@@ -703,7 +699,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			console.log('Scanning for updates from', sinceVersion, this.lastVersion, isFullReset, this.name)
 			const parser = createParser()
 			return db.iterable({
-				gt: Buffer.from([2])
+				start: Buffer.from([2])
 			}).map(({ key, value }) => {
 				parser.setSource(value.slice(0,24).toString(), 0)  // the lazy version only reads the first fews bits to get the version
 				const version = parser.readOpen()
@@ -879,7 +875,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (whenUpdateProcessed) {
 			return whenUpdateProcessed.then(() => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
 		}
-		return when(this.constructor.whenUpdatedInContext(), () => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
+		return when(this.constructor.whenUpdatedInContext(context), () => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
 	}
 
 	/*gotValue(value) {
