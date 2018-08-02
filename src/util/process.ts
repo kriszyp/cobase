@@ -3,8 +3,8 @@ import when from './when'
 import * as net from 'net'
 import * as path from 'path'
 import { createSerializeStream, createParseStream } from 'dpack'
-import { UpdateEvent, currentContext } from 'alkali'
-import { RequestContext } from '../RequestContext'
+import { spawn, UpdateEvent, currentContext } from 'alkali'
+import { CurrentRequestContext } from '../RequestContext'
 const SUBPROCESS = process.env.COBASE_SUBPROCESS
 export const outstandingProcessRequests = new Map()
 
@@ -222,6 +222,7 @@ export function ensureProcessRunning(processName, moduleId): Promise<string> {
 	}
 	return processReady.then((channel) => {
 		if (moduleId) {
+			console.log('requesting starting module id ', moduleId)
 			channel.sendRequest({
 				startModule: moduleId
 			})
@@ -260,7 +261,8 @@ if (SUBPROCESS) {
 				if (message.startModule) {
 					console.log('starting module', message.startModule)
 					return require(message.startModule)
-				}				const errorMessage = 'No class ' + message.className + ' registered to receive messages, ensure ' + message.className + '.start() is called first'
+				}
+				const errorMessage = 'No class ' + message.className + ' registered to receive messages, ensure ' + message.className + '.start() is called first'
 				if (message.id) {
 					console.warn(errorMessage)
 					return sendToProcess({
@@ -301,13 +303,23 @@ if (SUBPROCESS) {
 					target = target.for(instanceId)
 			}
 			try {
-				const localContext = context && new RequestContext(null, context.session)
+				const localContext = context && new CurrentRequestContext(null, context.session)
 				const func = target[method]
 				if (!func) {
 					throw new Error('No method ' + method + ' found on ' + Class.name + ' ' + instanceId)
 				}
-				when(localContext ? localContext.executeWithin(() => func.apply(target, args)) : func.apply(target, args),
-					(result) => {
+				const execute = () => {
+					let result = func.apply(target, args)
+					if (result && result.next) {
+						let constructor = result.constructor.constructor
+						if ((constructor.displayName || constructor.name) === 'GeneratorFunction') {
+							result = spawn(result)
+						}
+					}
+					return result
+				}
+
+				when(localContext ? localContext.executeWithin(execute) : execute(), (result) => {
 						if (result === undefined)
 							sendToProcess({ id }, stream, method) // undefined gets converted to null with msgpack
 						else

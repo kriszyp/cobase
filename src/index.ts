@@ -1,4 +1,4 @@
-export { Persisted, Cached, Persistable, secureAccess, setDBFolder } from './Persisted'
+export { Persisted, Cached, Persistable, secureAccess, setDBFolder, inUpdatingProcess } from './Persisted'
 export { Index } from './KeyIndex'
 export { RequestContext } from './RequestContext'
 export { Reduced } from './Reduced'

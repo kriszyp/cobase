@@ -16,6 +16,10 @@ export class RequestContext extends Context {
 		return session.expectedVersions || (session.expectedVersions = {})
 	}
 }
+export let CurrentRequestContext = RequestContext
+export function setRequestContextClass(Context) {
+  CurrentRequestContext = Context
+}
 
 export const DEFAULT_CONTEXT = {
 	expectedVersions: {}

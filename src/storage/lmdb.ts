@@ -1,5 +1,6 @@
 import * as fs from 'fs-extra'
 import { Env, openDbi, Cursor } from 'node-lmdb'
+import { compressSync, uncompressSync } from 'snappy'
 import ArrayLikeIterable from '../util/ArrayLikeIterable'
 import { Database } from './Database'
 
@@ -54,7 +55,8 @@ export function open(name): Database {
 		writes: 0,
 		getSync(id, asBuffer) {
 			let txn = env.beginTxn(READING_TNX)
-			let result = txn.getBinary(db, id, AS_BINARY)
+			let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
+			result = result && uncompressSync(result)
 			txn.abort()
 			this.bytesRead += result && result.length || 1
 			this.reads++
@@ -63,7 +65,8 @@ export function open(name): Database {
 		},
 		get(id) {
 			let txn = env.beginTxn(READING_TNX)
-			let result = txn.getBinary(db, id, AS_BINARY)
+			let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
+			result = result && uncompressSync(result)
 			txn.abort()
 			this.bytesRead += result && result.length || 1
 			this.reads++
@@ -75,10 +78,7 @@ export function open(name): Database {
 				throw new Error('putting string value')
 				value = Buffer.from(value)
 			}
-			if (typeof id !== 'object') {
-				throw new Error('putting string key')
-				value = Buffer.from(value)
-			}
+			value = compressSync(value)
 			this.bytesWritten += value && value.length || 0
 			this.writes++
 			let txn = env.beginTxn()
@@ -90,10 +90,7 @@ export function open(name): Database {
 				throw new Error('putting string value')
 				value = Buffer.from(value)
 			}
-			if (typeof id !== 'object') {
-				throw new Error('putting string key')
-				value = Buffer.from(value)
-			}
+			value = compressSync(value)
 			this.bytesWritten += value && value.length || 0
 			this.writes++
 			let txn = env.beginTxn()
@@ -101,20 +98,12 @@ export function open(name): Database {
 			txn.commit()
 		},
 		remove(id) {
-			if (typeof id !== 'object') {
-				throw new Error('putting string')
-				value = Buffer.from(value)
-			}
 			this.writes++
 			let txn = env.beginTxn()
 			txn.del(db, id)
 			txn.commit()
 		},
 		removeSync(id) {
-			if (typeof id !== 'object') {
-				throw new Error('putting string')
-				value = Buffer.from(value)
-			}
 			this.writes++
 			let txn = env.beginTxn()
 			txn.del(db, id)
@@ -137,7 +126,7 @@ export function open(name): Database {
 					currentKey = cursor.goToRange(currentKey)
 					let i = 0
 					while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) < 0 : currentKey.compare(endKey) > 0)) && i++ < 100) {
-						array.push(currentKey, cursor.getCurrentBinary())
+						array.push(currentKey, uncompressSync(cursor.getCurrentBinaryUnsafe()))
 						currentKey = cursor[goToDirection]()
 					}
 					cursor.close()
@@ -213,7 +202,12 @@ export function open(name): Database {
 			for (let operation of operations) {
 				if (typeof operation.key != 'object')
 					throw new Error('non-buffer key')
-				txn[operation.type === 'del' ? 'del' : 'putBinary'](db, operation.key, operation.value, AS_BINARY)
+				try {
+					let value = operation.value && compressSync(operation.value)
+					txn[operation.type === 'del' ? 'del' : 'putBinary'](db, operation.key, value, AS_BINARY)
+				} catch (error) {
+					console.warn('MDB_NOTFOUND errors may safely be ignored', error)
+				}
 			}
 			try {
 				txn.commit()

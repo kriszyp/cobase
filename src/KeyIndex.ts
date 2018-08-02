@@ -110,7 +110,7 @@ export const Index = ({ Source }) => {
 							data = yield entity.valueOf(INDEXING_MODE)
 						} catch(error) {
 							if (indexRequest.version !== version) return // if at any point it is invalidated, break out
-							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name)
+							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name, entity && entity.id)
 						}
 					}
 					if (indexRequest.version !== version) return // if at any point it is invalidated, break out

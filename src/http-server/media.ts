@@ -37,7 +37,7 @@ export function media(connection, next) {
 				when(connection.call(app), (returnValue) => serializer(returnValue, connection)))
 		}
 		return bufferStream(connection.request.content).then(data => {
-			connection.data = connection.request.data = parser.parse(data.toString(options.charset))
+			connection.request.data = parser.parse(data.toString(options.charset))
 			return when(next(), (returnValue) => serializer(returnValue, connection))
 		})
 	}

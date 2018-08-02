@@ -18,7 +18,8 @@
     "dpack": "^0.1.0",
     "fs-extra": "^5.0.0",
     "node-lmdb": "^0.6.0",
-    "ordered-binary": "^0.0.2"
+    "ordered-binary": "^0.0.2",
+    "snappy": "^6.0.4"
   },
   "peerDependencies": {
     "alkali": "^0.20.0"

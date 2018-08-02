@@ -394,6 +394,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	get whenUpdateProcessed() {
 		return this._whenUpdateProcessed
 	}
+
+	gotValue(value) {
+		// bypass any variable checks, since the data is coming from a DB
+		return value
+	}
 	centralUpdated({ type }) { // this should only be called in the updating process
 		const event = new UpdateEvent()
 		event.type = type
@@ -847,7 +852,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			throw new Error('No updates out of process')
 		}
 
-		if (typeof value != 'object') {
+		if (typeof value != 'object' && value) {
 			value = Buffer.from(value.toString())
 		}
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
@@ -1206,5 +1211,20 @@ export function setDBFolder(folderName) {
 		Persisted.dbFolder = folderName.dbFolder
 		Cached.dbFolder = folderName.cacheDbFolder
 		Persistable.dbFolder = folderName.cacheDbFolder
+	}
+}
+
+export function inUpdatingProcess(target, key, descriptor) {
+	const method = descriptor.value
+	descriptor.value = function() {
+		const updatingProcessConnection = this.constructor.updatingProcessConnection || this.updatingProcessConnection
+		if (updatingProcessConnection) {
+			return updatingProcessConnection.sendMessage({
+				instanceId: this.id,
+				method: key,
+				args: Array.from(arguments),
+			})
+		}
+		return method.apply(this, arguments)
 	}
 }

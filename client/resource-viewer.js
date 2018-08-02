@@ -1,7 +1,7 @@
 dpack.fetch(location.href).then(function(response) {
 	return response.dpack()
 }).then(function(data) {
-	console.log(data)
+	console.log(window.data = data)
 	document.getElementById('details').append(renderExpandedObject(data))
 })
 HTMLElement.prototype.append = alkali.append
