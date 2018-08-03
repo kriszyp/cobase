@@ -78,10 +78,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return false
 	}
 
-	get staysUpdated() {
-		return true
-	}
-
 	static get defaultInstance() {
 		return this._defaultInstance || (this._defaultInstance = new Variable())
 	}
@@ -966,6 +962,13 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				}
 				this.readyState = null
 				return context ? context.executeWithin(() => this.getValue()) : this.getValue()
+			}, (error) => {
+				// reset and try again to get it from the db
+				if (this.remotelyUpdating == promise) {
+					this.remotelyUpdating = null
+				}
+				this.readyState = 'invalidated'
+				throw error
 			})
 			return promise
 		}

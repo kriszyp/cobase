@@ -1,5 +1,5 @@
 import when from '../util/when'
-import * as bufferStream from 'mach/lib/utils/bufferStream'
+import { bufferStream } from '../util/bufferStream'
 import { jsonMediaType } from './JSONStream'
 import { dpackMediaType } from './dpack'
 import { textMediaType } from './text'
@@ -15,7 +15,7 @@ export function media(connection, next) {
 	const options = {
 		charset: 'utf8'
 	}
-	const contentType = headers['Content-Type']
+	const contentType = headers['content-type']
 	if (contentType) {
 		let [mimeType, optionsString] = contentType.split(/\s*;\s*/)
 		if (optionsString) {
@@ -24,7 +24,7 @@ export function media(connection, next) {
 		}
 		let parser = mediaTypes.get(mimeType)
 		if (!parser || !parser.parse) {
-			if (headers['Content-Length'] == '0') {
+			if (headers['content-length'] == '0') {
 				parser = EMPTY_MEDIA_PARSER
 			} else {
 				connection.status = 415
@@ -36,7 +36,7 @@ export function media(connection, next) {
 			return when(parser.handle(connection), () =>
 				when(connection.call(app), (returnValue) => serializer(returnValue, connection)))
 		}
-		return bufferStream(connection.request.content).then(data => {
+		return bufferStream(connection.req).then(data => {
 			connection.request.data = parser.parse(data.toString(options.charset))
 			return when(next(), (returnValue) => serializer(returnValue, connection))
 		})
@@ -49,7 +49,7 @@ function serializer(returnValue, connection) {
 	if (returnValue === undefined)
 		return // nothing to serialize
 	let requestHeaders = connection.request.headers
-	let acceptHeader = requestHeaders.accept || requestHeaders.Accept || '*/*'
+	let acceptHeader = requestHeaders.accept || '*/*'
 	let responseHeaders = connection.response.headers
 	responseHeaders.vary = (responseHeaders.vary ? responseHeaders.vary + ',' : '') + 'Accept'
 	let bestSerializer = jsonMediaType // default for now, TODO: return a 415
@@ -81,7 +81,7 @@ function serializer(returnValue, connection) {
 		connection.response.set('content-type', bestType)
 		connection.response.set('vary', 'Accept')
 	} else {
-		responseHeaders['Content-Type'] = bestType
+		responseHeaders['content-type'] = bestType
 	}
 	connection.response.body = connection.response.content = bestSerializer.serialize(returnValue, connection, bestParameters)
 }
