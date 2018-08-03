@@ -710,6 +710,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		event || (event = new DeletedEvent())
 		let entity = this.for(id)
+		entity.resetCache()
 		entity.readyState = 'no-local-data'
 		event.source = entity
 		event.oldValue = when(entity.loadLocalData(), ({ asJSON }) => {
