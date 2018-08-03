@@ -140,7 +140,7 @@ export function open(name): Database {
 						currentKey = cursor.goToRange(currentKey)
 					}
 					let i = 0
-					while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) < 0 : currentKey.compare(endKey) > 0)) && i++ < 100) {
+					while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) <= 0 : currentKey.compare(endKey) >= 0)) && i++ < 100) {
 						array.push(currentKey, uncompressSync(cursor.getCurrentBinaryUnsafe()))
 						currentKey = cursor[goToDirection]()
 					}

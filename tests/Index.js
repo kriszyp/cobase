@@ -1,7 +1,7 @@
 const { Persisted, Persistable, Index, Reduced } = require('..')
 const { removeSync } = require('fs-extra')
 const { Test, TestByType, SumOfNumbersByType, getReduceCalls } = require('./model/Test2')
-suite.only('Index', function() {
+suite('Index', function() {
 	this.timeout(2000000)
 	suiteSetup(() => {
 	//	removeSync('tests/db')
