@@ -20,8 +20,10 @@ export const configure = (updatedProcessMap) => {
 const ipcRequests = new Map<number, { resolve: (result) => void, reject: (error) => void }>()
 
 export const getProcessConnection = (Class, { processName, module, onProcessStart }) => {
-	const inProcess = SUBPROCESS == processName
+	const inProcess = (SUBPROCESS || 'main') == processName
 	if (inProcess) {
+		if (processName === 'main')
+			startPipeServer()
 		return
 	}
 	let startingQueue = []
@@ -132,28 +134,33 @@ export function ensureProcessRunning(processName, moduleId): Promise<string> {
 			      }
 			    }, 500000000).unref()
 			}
-			startProcess()
+			if (processName === 'main') {
+				processReady = Promise.resolve() // main process started this, so it is already ready
+			} else {
+				startProcess()
 
-			processReady = new Promise((resolve, reject) => {
-				childProcess.on('exit', (code, signal) => {
-					console.log('Child process', processName, 'died', code, signal)
-					setTimeout(startProcess, 1000)
+				processReady = new Promise((resolve, reject) => {
+					childProcess.on('exit', (code, signal) => {
+						console.log('Child process', processName, 'died', code, signal)
+						setTimeout(startProcess, 1000)
+					})
+					childProcess.on('error', (error) => console.log('Child process error', error.toString()))
+					childProcess.on('message', message => {
+						console.log('got IPC message from child', processName)
+						if (message.ready)
+							resolve(processName)
+						else if (message.startProcess)
+							ensureProcessRunning(message.startProcess, message.moduleId).then(() => {
+								childProcess.send({ id: message.id })
+							})
+					})
 				})
-				childProcess.on('error', (error) => console.log('Child process error', error.toString()))
-				childProcess.on('message', message => {
-					console.log('got IPC message from child', processName)
-					if (message.ready)
-						resolve(processName)
-					else if (message.startProcess)
-						ensureProcessRunning(message.startProcess, message.moduleId).then(() => {
-							childProcess.send({ id: message.id })
-						})
-				})
-			})
+			}
 		}
 		const messageFulfillments = new Map<number, { resolve: (result) => void, reject: (error) => void }>()
 		const classListeners = new Map<name, Function>()
 		processMap.set(processName, processReady = processReady.then(() => {
+			console.log('create piped connection to', processName)
 			const socket = net.createConnection(path.join('\\\\?\\pipe', process.cwd(), processName))
 			let parsedStream = socket.pipe(createParseStream({
 				//encoding: 'utf16le',
@@ -187,7 +194,7 @@ export function ensureProcessRunning(processName, moduleId): Promise<string> {
 						const className = message.className
 						const listener = classListeners.get(className)
 						if (listener) {
-							listener(message)
+							listener(message, serializingStream)
 						} else {
 							console.warn('No listener found for ' + className)
 						}
@@ -232,25 +239,24 @@ export function ensureProcessRunning(processName, moduleId): Promise<string> {
 }
 
 export let createProxyServer
+const classListeners = new Map<string, any>()
+let pipeServerStarted
 
 if (SUBPROCESS) {
-	const classListeners = new Map<string, any>()
 	process.on('message', message => {
 		if (message.id) {
 			ipcRequests.get(message.id).resolve(message)
 		}
 	})
-	let streams = []
-	const broadcastToOtherProcesses = (message, method) => {
-		// TODO: Use a Block and find a way to serialize once, and send to all messages
-		//console.log(' * <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
-		for (const stream of streams)
-			stream.write(message)
-	}
-	const sendToProcess = (message, stream, method?) => {
-		//console.log('   <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
-		stream.write(message)
-	}
+	startPipeServer()
+	process.send({ ready: true })
+}
+
+function startPipeServer() {
+	if (pipeServerStarted)
+		return
+	pipeServerStarted = true
+	console.log('starting pipe server on ', SUBPROCESS || 'main')
 	net.createServer((socket) => {
 		socket.pipe(createParseStream({
 			//encoding: 'utf16le',
@@ -284,84 +290,93 @@ if (SUBPROCESS) {
 	}).on('error', (err) => {
 	  // handle errors here
 	  throw err;
-	}).listen(path.join('\\\\?\\pipe', process.cwd(), SUBPROCESS))
-	process.send({ ready: true })
-	console.log('finished setting up named pipe server')
-	createProxyServer = (Class) => {
-		const processMessage = (message, stream) => {
-			if (!Class.initialized) {
-				console.log('Class not initalized yet, waiting to initialize')
-				return Class.ready.then(() => processMessage(message, stream))
-			}
-			const { id, instanceId, method, args, context, startModule } = message
-			let target = Class
-			if (instanceId) {
-				//console.log('using instanceId', instanceId)
-				if (instanceId == 'instanceIds')
-					target = target.instanceIds
-				else
-					target = target.for(instanceId)
-			}
-			try {
-				const localContext = context && new CurrentRequestContext(null, context.session)
-				const func = target[method]
-				if (!func) {
-					throw new Error('No method ' + method + ' found on ' + Class.name + ' ' + instanceId)
-				}
-				const execute = () => {
-					let result = func.apply(target, args)
-					if (result && result.next) {
-						let constructor = result.constructor.constructor
-						if ((constructor.displayName || constructor.name) === 'GeneratorFunction') {
-							result = spawn(result)
-						}
-					}
-					return result
-				}
-
-				when(localContext ? localContext.executeWithin(execute) : execute(), (result) => {
-						if (result === undefined)
-							sendToProcess({ id }, stream, method) // undefined gets converted to null with msgpack
-						else
-							sendToProcess({ id, result }, stream, method)
-					},
-					onError)
-			} catch (error) {
-				onError(error)
-			}
-			function onError(error) {
-				console.error(error)
-				var errorObject = {
-					message: error.message,
-					status: error.status,
-					isExpected: error.isExpected
-				}
-				sendToProcess({ id, error: errorObject }, stream, method)
-			}
+	}).listen(path.join('\\\\?\\pipe', process.cwd(), SUBPROCESS || 'main'))
+}
+let streams = []
+const broadcastToOtherProcesses = (message, method) => {
+	// TODO: Use a Block and find a way to serialize once, and send to all messages
+	//console.log(' * <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
+	for (const stream of streams)
+		stream.write(message)
+}
+const sendToProcess = (message, stream, method?) => {
+	//console.log('   <<<', method, message.error ? message.error.message : ('result ' + typeof message.result))
+	stream.write(message)
+}
+createProxyServer = (Class) => {
+	const processMessage = (message, stream) => {
+		if (!Class.initialized) {
+			console.log('Class not initalized yet, waiting to initialize')
+			return Class.ready.then(() => processMessage(message, stream))
 		}
-		classListeners.set(Class.name, processMessage)
-		Class.ready.then(() => {
-//			console.log(Class.name, 'is ready, listening for updates')
-			Class.notifies({
-				updated(event, by) {
-					// TODO: debounce
-					//console.log('sending update event')
-					let id = by && by.id
-					if (id && by === event.source) {
-						broadcastToOtherProcesses({
-							instanceId: id,
-							method: 'updated',
-							className: Class.name,
-							type: event.type,
-							triggers: event.triggers,
-						}, event.type)
+		const { id, instanceId, method, args, context, startModule } = message
+		let target = Class
+		if (instanceId) {
+			//console.log('using instanceId', instanceId)
+			if (instanceId == 'instanceIds')
+				target = target.instanceIds
+			else
+				target = target.for(instanceId)
+		}
+		try {
+			const localContext = context && new CurrentRequestContext(null, context.session)
+			const func = target[method]
+			if (!func) {
+				throw new Error('No method ' + method + ' found on ' + Class.name + ' ' + instanceId)
+			}
+			const execute = () => {
+				let result = func.apply(target, args)
+				if (result && result.next) {
+					let constructor = result.constructor.constructor
+					if ((constructor.displayName || constructor.name) === 'GeneratorFunction') {
+						result = spawn(result)
 					}
 				}
-			})
-			Class.onStateChange = state => {
-				state.className = Class.name
-				broadcastToOtherProcesses(state, 'state change')
+				return result
+			}
+
+			when(localContext ? localContext.executeWithin(execute) : execute(), (result) => {
+					if (result === undefined)
+						sendToProcess({ id }, stream, method) // undefined gets converted to null with msgpack
+					else
+						sendToProcess({ id, result }, stream, method)
+				},
+				onError)
+		} catch (error) {
+			onError(error)
+		}
+		function onError(error) {
+			console.error(error)
+			var errorObject = {
+				message: error.message,
+				status: error.status,
+				isExpected: error.isExpected
+			}
+			sendToProcess({ id, error: errorObject }, stream, method)
+		}
+	}
+	classListeners.set(Class.name, processMessage)
+	Class.ready.then(() => {
+//			console.log(Class.name, 'is ready, listening for updates')
+		Class.notifies({
+			updated(event, by) {
+				// TODO: debounce
+				//console.log('sending update event')
+				let id = by && by.id
+				if (id && by === event.source) {
+					broadcastToOtherProcesses({
+						instanceId: id,
+						method: 'updated',
+						className: Class.name,
+						type: event.type,
+						triggers: event.triggers,
+					}, event.type)
+				}
 			}
 		})
-	}
+		Class.onStateChange = state => {
+			state.className = Class.name
+			broadcastToOtherProcesses(state, 'state change')
+		}
+	})
 }

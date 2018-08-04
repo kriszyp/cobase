@@ -338,6 +338,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		this.instancesById.name = this.name
 		if (processModules.get(this.updatingProcessName)) {
+			if (!processModules.has('main'))
+				processModules.set('main', true) // declare the "main" module
 			this.updatingProcessConnection = getProcessConnection(this, { processName: this.updatingProcessName, module: this.module && this.module.id })
 			if (this.updatingProcessConnection) {
 				return
@@ -749,6 +751,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 		event || (event = new DeletedEvent())
 		let entity = this.for(id)
+		entity.resetCache()
 		entity.readyState = 'no-local-data'
 		event.source = entity
 		event.oldValue = when(entity.loadLocalData(), ({ data }) => data)
