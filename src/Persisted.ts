@@ -11,7 +11,7 @@ import { AccessError } from './util/errors'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
-import { getProcessConnection, createProxyServer, processModules } from './util/process'
+import { registerClass } from './util/process'
 import { DEFAULT_CONTEXT } from './RequestContext'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
@@ -19,6 +19,7 @@ const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // SOH, code 1
 const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // SOH, code 2
 const INITIALIZATION_SOURCE = 'is-initializing'
+let globalDoesInitialization
 
 global.cache = expirationStrategy // help with debugging
 
@@ -163,6 +164,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 		Object.defineProperty(index, 'name', { value: this.name + '-index-' + propertyName })
+		index.start()
 		return index
 	}
 
@@ -262,6 +264,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		Object.defineProperty(CachedWith, 'name', {
 			value: this.name + '-with-' + Object.keys(properties).filter(key => properties[key] && properties[key].defineAs).join('-')
 		})
+		CachedWith.start()
 		return CachedWith
 	}
 
@@ -325,6 +328,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this.ready
 	}
 
+	static get doesInitialization() {
+		return this._doesInitialization === undefined ? globalDoesInitialization : this._doesInitialization
+	}
+	static set doesInitialization(flag) {
+		this._doesInitialization = flag
+	}
 	static initialize() {
 		this.instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
 		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name)
@@ -337,18 +346,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			Source.notifies(this)
 		}
 		this.instancesById.name = this.name
-		if (processModules.get(this.updatingProcessName)) {
-			if (!processModules.has('main'))
-				processModules.set('main', true) // declare the "main" module
-			this.updatingProcessConnection = getProcessConnection(this, { processName: this.updatingProcessName, module: this.module && this.module.id })
-			if (this.updatingProcessConnection) {
-				return
-			} else {
-				createProxyServer(this)
-			}
-		}
+		registerClass(this)
 		// make sure these are inherited
 		this.currentWriteBatch = null
+		if (this.doesInitialization === false) {
+			return
+		}
 		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 		let stateDPack = db.getSync(DB_VERSION_KEY)
 		let didReset
@@ -375,8 +378,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	static updatingProcessName = 'updating-process'
-
 	set whenUpdateProcessed(promise) {
 		this._whenUpdateProcessed = promise = promise.then((event) => {
 			if (this._whenUpdateProcessed === promise) {
@@ -397,32 +398,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// bypass any variable checks, since the data is coming from a DB
 		return value
 	}
-	centralUpdated({ type }) { // this should only be called in the updating process
-		const event = new UpdateEvent()
-		event.type = type
-		this.updated(event, this)
-		return {
-			version: event.version
-		}
-	}
 	updated(event = new ReplacedEvent(), by?) {
-		const updatingProcessConnection = this.constructor.updatingProcessConnection
-		const isUpdatingProcess = !updatingProcessConnection
 		if (!event.visited) {
 			event.visited = new Set() // TODO: Would like to remove this at some point
 		}
 		if (!event.source) {
 			event.source = this
-			// if we are the source, and there is a main updating process to notify, do that now, and use it as a mark not commit anything to the db (must be done in its updating process)
-			if (updatingProcessConnection) {
-				event.whenUpdateProcessed = updatingProcessConnection.sendMessage({
-					instanceId: this.id,
-					method: 'centralUpdated',
-					args: [
-						{ type: event.type }
-					],
-				})
-			}
 		}
 		let context = currentContext
 		if (context && !event.triggers && context.connectionId) {
@@ -441,7 +422,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 
-		if (Class.updateWithPrevious && isUpdatingProcess) {
+		if (Class.updateWithPrevious) {
 			this.assignPreviousValue(event)
 		}
 		if (by === this) // skip reset
@@ -451,7 +432,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event.type == 'deleted') {
 			this.readyState = 'no-local-data'
 			this.constructor.instanceSetUpdated(event)
-		} else if (by !== this && isUpdatingProcess) {
+		} else if (by !== this) {
 			this.resetCache()
 		}
 		// notify class listeners too
@@ -721,37 +702,14 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		})
 	}
 
-	put(value, event?) {
-		if (this.constructor.updatingProcessConnection) {
-			event = event || new ReplacedEvent()
-			this.whenUpdateProcessed = event.whenUpdateProcessed = this.constructor.updatingProcessConnection.sendMessage({
-				instanceId: this.id,
-				method: 'put',
-				args: [value],
-			})
-			this.updated(event)
-			return event.whenUpdateProcessed
-		}
-		return super.put(value, event)
-	}
-
 	static remove(id, event?) {
 		if (id > 0 && typeof id === 'string' || !id) {
 			throw new Error('Id should be a number or non-numeric string: ' + id)
 		}
-		if (this.updatingProcessConnection) {
-			event = event || new DeletedEvent()
-			this.whenUpdateProcessed = event.whenUpdateProcessed = this.updatingProcessConnection.sendMessage({
-				method: 'delete',
-				instanceId: id,
-			})
-			this.updated(event)
-			return event.whenUpdateProcessed
-		}
 
 		event || (event = new DeletedEvent())
 		let entity = this.for(id)
-		entity.resetCache()
+		entity.updated(event)
 		entity.readyState = 'no-local-data'
 		event.source = entity
 		event.oldValue = when(entity.loadLocalData(), ({ data }) => data)
@@ -774,9 +732,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let newToCache = this.readyState == 'no-local-data'
 		if (newToCache) {
 			this.readyState = 'loading-local-data'
-		}
-		if (this.constructor.updatingProcessConnection) {
-			return // only the updating process should update the value in the db
 		}
 		if (this.constructor.returnsAsyncIterables) {
 			value = when(value, value => {
@@ -843,9 +798,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	static dbPut(key, value, version) {
-		if (this.updatingProcessConnection) {
-			throw new Error('No updates out of process')
-		}
 
 		if (typeof value != 'object' && value) {
 			value = Buffer.from(value.toString())
@@ -952,30 +904,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}
 			return this.cachedValue
 		}
-		// if we don't have a cached version locally from the db, go to the updating process for transformation
-		const updatingProcessConnection = this.constructor.updatingProcessConnection
-		if (updatingProcessConnection) {
-			var promise = this.remotelyUpdating = this.remotelyUpdating || updatingProcessConnection.sendMessage({
-				instanceId: this.id,
-				method: 'computeValue',
-			}).then(() => {
-				// reset and try again to get it from the db
-				if (this.remotelyUpdating == promise) {
-					this.remotelyUpdating = null
-				}
-				this.readyState = null
-				return context ? context.executeWithin(() => this.getValue()) : this.getValue()
-			}, (error) => {
-				// reset and try again to get it from the db
-				if (this.remotelyUpdating == promise) {
-					this.remotelyUpdating = null
-				}
-				this.readyState = 'invalidated'
-				throw error
-			})
-			return promise
-		}
-		//else
 		return super.getValue()
 	}
 
@@ -984,20 +912,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		// that is how we want is() to behave or not
 		event = event || new ReplacedEvent()
 		event.triggers = [ INITIALIZATION_SOURCE ]
-		const updatingProcessConnection = this.constructor.updatingProcessConnection
-		if (updatingProcessConnection) {
-			this.whenUpdateProcessed = event.whenUpdateProcessed = updatingProcessConnection.sendMessage({
-				instanceId: this.id,
-				method: 'is',
-				args: [value],
-			})
-		}
 		event.source = this
 		this.updated(event, this)
 		this.cachedVersion = this.version
-		if (!updatingProcessConnection) {
-			this.cachedValue = value
-		}
+		this.cachedValue = value
 		this.readyState = 'up-to-date'
 		return this
 	}
@@ -1087,8 +1005,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static initialize(sourceCode) {
 		const registered = super.initialize(sourceCode)
-		const updatingProcessConnection = this.updatingProcessConnection
-		if (updatingProcessConnection) {
+		if (this.doesInitialization === false) {
 			// we don't reset from this process if there is an updating process
 			return registered
 		}
@@ -1204,29 +1121,9 @@ const checkInputTransform = {
 secureAccess.checkPermissions = () => true
 import { Reduced } from './Reduced'
 
-export function setDBFolder(folderName) {
-	if (typeof folderName === 'string') {
-		Persisted.dbFolder = folderName
-		Cached.dbFolder = folderName
-		Persistable.dbFolder = folderName
-	} else {
-		Persisted.dbFolder = folderName.dbFolder
-		Cached.dbFolder = folderName.cacheDbFolder
-		Persistable.dbFolder = folderName.cacheDbFolder
-	}
-}
-
-export function inUpdatingProcess(target, key, descriptor) {
-	const method = descriptor.value
-	descriptor.value = function() {
-		const updatingProcessConnection = this.constructor.updatingProcessConnection || this.updatingProcessConnection
-		if (updatingProcessConnection) {
-			return updatingProcessConnection.sendMessage({
-				instanceId: this.id,
-				method: key,
-				args: Array.from(arguments),
-			})
-		}
-		return method.apply(this, arguments)
-	}
+export function configure(options) {
+	Persisted.dbFolder = options.dbFolder
+	Cached.dbFolder = options.cacheDbFolder
+	Persistable.dbFolder = options.cacheDbFolder
+	globalDoesInitialization = options.doesInitialization
 }

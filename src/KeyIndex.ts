@@ -194,7 +194,7 @@ export const Index = ({ Source }) => {
 				let queue = this.queue
 				let initialQueueSize = queue.size
 				currentlyProcessing.add(this)
-				if (initialQueueSize > 0) {
+				if (initialQueueSize > 100) {
 					console.log('Indexing', initialQueueSize, Source.name, 'for', this.name)
 				}
 				let indexingInProgress = []
@@ -241,7 +241,7 @@ export const Index = ({ Source }) => {
 						this.queuedIndexedProgress = null
 					}
 				} while (queue.size > 0)
-				if (initialQueueSize > 0) {
+				if (initialQueueSize > 100) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
 				}
 			} catch (error) {
@@ -448,7 +448,7 @@ export const Index = ({ Source }) => {
 			}*/
 			allIndices.push(this)
 			return when(super.initialize(module), () => {
-				if (!this.updatingProcessConnection) {
+				if (this.doesInitialization !== false) {
 					return spawn(this.resumeIndex())
 				}
 			})

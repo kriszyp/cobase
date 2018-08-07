@@ -1,9 +1,23 @@
-dpack.fetch(location.href).then(function(response) {
-	return response.dpack()
-}).then(function(data) {
-	console.log(window.data = data)
-	document.getElementById('details').append(renderExpandedObject(data))
-})
+/*dpack.fetch(location.href).then(function(response) {
+	return response.text()
+}).then(function(text) {
+	window.text = text
+	//console.log(window.data = data)
+	for (var i = 0; i < text.length; i++) {
+		if (text.charCodeAt(i) !== data.charCodeAt(i)) {
+			console.log('Differ at',i, text.charCodeAt(i), data.charCodeAt(i))
+			break
+		}
+	}
+	document.getElementById('details').append(renderExpandedObject(dpack.parse(text)))
+})*/
+var data = ''
+window.nextData = function(nextData) {
+	data += nextData
+}
+window.finished = function() {
+	document.getElementById('details').append(renderExpandedObject(dpack.parse(data)))
+}
 HTMLElement.prototype.append = alkali.append
 
 var Table = alkali.Table

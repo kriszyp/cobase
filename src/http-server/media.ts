@@ -78,7 +78,7 @@ function serializer(returnValue, connection) {
 		}
 	}
 	if (connection.response.set) {
-		connection.response.set('content-type', bestType)
+		connection.response.set('content-type', bestType.startsWith('text') ? bestType + '; charset=utf8' : bestType)
 		connection.response.set('vary', 'Accept')
 	} else {
 		responseHeaders['content-type'] = bestType
