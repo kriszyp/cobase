@@ -6,5 +6,5 @@ class TestProcess extends Persisted {
 }
 TestProcess.start()
 exports.TestProcess = TestProcess
-exports.TestProcessByName = TestProcess.index('name')
-exports.TestProcessWithExtra = TextProcess.cacheWith({ extra: 'test' })
+exports.TestProcessWithExtra = TestProcess.cacheWith({ extra: 'test' })
+exports.TestProcessByName = exports.TestProcessWithExtra.index('name')

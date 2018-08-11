@@ -1,7 +1,9 @@
 const inspector =  require('inspector')
-inspector.open(9330, null)
-const { setDBFolder } = require('..')
-setDBFolder('tests/db')
+inspector.open(9330, null, true)
+const { configure } = require('..')
+configure({
+	dbFolder: 'tests/db'
+})
 
 const { TestProcess, TestProcessByName } = require('./model/TestProcess')
 function start() {

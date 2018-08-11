@@ -55,6 +55,14 @@ function startPipeClient(processId) {
 					instance.updated(event)
 				}
 			} else {
+				if (message.type) {
+					const event = new UpdateEvent()
+					event.source = { id: message.instanceId, remote: true }
+					Object.assign(event, message)
+					Class.updated(event)
+				} else {
+					Class.update(message)
+				}
 				//console.warn('No listener found for ' + className)
 			}
 		} catch(error) {
@@ -117,9 +125,11 @@ function startClassNotification(stream) {
 				}
 			}
 		})
-		Class.onStateChange = state => {
-			state.className = className
-			stream.write(state)
+		Class.sendBroadcast = notification => {
+			for (const stream of streams) {
+				notification.className = className
+				stream.write(notification)
+			}
 		}
 	}
 }

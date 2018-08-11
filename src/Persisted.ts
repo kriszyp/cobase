@@ -147,10 +147,16 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (!previousValues) {
 			previousValues = event.previousValues = new Map()
 		}
-		if (this.readyState === 'up-to-date' && this._cachedValue) {
+		const isMultiProcess = true
+		if (!isMultiProcess && this.readyState === 'up-to-date' && this._cachedValue) {
 			return previousValues.set(this, this._cachedValue)
 		}
-		previousValues.set(this, when(this.loadLocalData(), ({ data }) => data))
+		previousValues.set(this, when(this.loadLocalData(), ({ version, data }) => {
+			if (!data && version) {
+				event.noPreviousValue = true // need to communicate this cross-process
+			}
+			return data
+		}))
 	}
 
 	static index(propertyName: string, indexBy?: (value, sourceKey) => any) {
@@ -422,18 +428,25 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 
-		if (Class.updateWithPrevious) {
-			this.assignPreviousValue(event)
+		const doUpdate = () => {
+			if (Class.updateWithPrevious) {
+				this.assignPreviousValue(event)
+			}
+			if (by === this) // skip reset
+				Variable.prototype.updated.apply(this, arguments)
+			else
+				super.updated(event, by)
+			if (event.type == 'deleted') {
+				this.readyState = 'no-local-data'
+				this.constructor.instanceSetUpdated(event)
+			} else if (by !== this) {
+				this.resetCache()
+			}
 		}
-		if (by === this) // skip reset
-			Variable.prototype.updated.apply(this, arguments)
-		else
-			super.updated(event, by)
-		if (event.type == 'deleted') {
-			this.readyState = 'no-local-data'
-			this.constructor.instanceSetUpdated(event)
-		} else if (by !== this) {
-			this.resetCache()
+		if (Class.updateWithPrevious /* && isMultiProcess */) {
+			this.constructor.db.transaction(doUpdate)
+		} else {
+			doUpdate()
 		}
 		// notify class listeners too
 		for (let listener of this.constructor.listeners || []) {
@@ -1123,7 +1136,7 @@ import { Reduced } from './Reduced'
 
 export function configure(options) {
 	Persisted.dbFolder = options.dbFolder
-	Cached.dbFolder = options.cacheDbFolder
-	Persistable.dbFolder = options.cacheDbFolder
+	Cached.dbFolder = options.cacheDbFolder || options.dbFolder
+	Persistable.dbFolder = options.cacheDbFolder || options.dbFolder
 	globalDoesInitialization = options.doesInitialization
 }

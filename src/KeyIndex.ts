@@ -13,6 +13,7 @@ const DEFAULT_INDEXING_CONCURRENCY = 15
 const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
 const SEPARATOR_NEXT_BYTE = Buffer.from([31])
 const LAST_INDEXED_VERSION_KEY = Buffer.from([1, 2])
+const INDEXING_STATE = Buffer.from([1, 3])
 const EMPTY_BUFFER = Buffer.from([])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 120
@@ -36,6 +37,9 @@ export const Index = ({ Source }) => {
 	let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
 	const sourceVersions = {}
 	const processingSourceVersions = new Map<String, number>()
+	const tentativeEntityOperations = new Map<number, {}>()
+	const waitingForEntityToBeIndexedInOtherProcess = []
+	let otherProcesses = new Map<number, number>()
 	function addUpdatedIndexEntry(key, sources, triggers) {
 		let entry = updatedIndexEntries.get(key)
 		if (!entry) {
@@ -99,6 +103,7 @@ export const Index = ({ Source }) => {
 				}
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 				let entries
+				const localOperations = []
 				if (!deleted) {
 					let attempts = 0
 					let data
@@ -138,7 +143,7 @@ export const Index = ({ Source }) => {
 						if (isChanged || value.length === 0) {
 							if (isChanged) {
 								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
-								operations.push({
+								localOperations.push({
 									type: 'put',
 									key: fullKey,
 									value: value
@@ -150,12 +155,17 @@ export const Index = ({ Source }) => {
 					}
 				}
 				for (let [key] of toRemove) {
-					operations.push({
+					localOperations.push({
 						type: 'del',
 						key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
 					})
 					addUpdatedIndexEntry(key, sources, triggers)
 				}
+				operations.push({
+					id,
+					version,
+					operations: localOperations
+				})
 				if (Index.onIndexEntry) {
 					Index.onIndexEntry(this.name, id, previousEntries, entries)
 				}
@@ -187,6 +197,9 @@ export const Index = ({ Source }) => {
 			if (this.onStateChange) {
 				this.onStateChange({ processing: true, started: true })
 			}
+			if (this.waitingToJoinIndexing) { // if we are not starting as a solo indexer, need to wait for acknowledgement from other processes
+				yield this.waitingToJoinIndexing
+			}
 			let cpuUsage = process.cpuUsage()
 			let cpuTotalUsage = cpuUsage.user + cpuUsage.system
 			let cpuAdjustment = 2
@@ -203,7 +216,6 @@ export const Index = ({ Source }) => {
 					if (this.nice > 0)
 						yield this.delay(this.nice) // short delay for other processing to occur
 					for (let [id, indexRequest] of queue) {
-
 						indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
 
 						if (sinceLastStateUpdate++ > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * cpuAdjustment) {
@@ -241,6 +253,8 @@ export const Index = ({ Source }) => {
 						this.queuedIndexedProgress = null
 					}
 				} while (queue.size > 0)
+				this.finishAsIndexer()
+				// TODO: Wait for tentative values to be dismissed
 				if (initialQueueSize > 100) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
 				}
@@ -251,6 +265,25 @@ export const Index = ({ Source }) => {
 			if (this.onStateChange) {
 				this.onStateChange({ processing: true, started: false })
 			}
+		}
+
+		static finishAsIndexer() {
+			const db = this.db
+			return db.transaction(() => {
+				const indexingStateBuffer = db.get(INDEXING_STATE)
+				const indexingState = indexingStateBuffer && parse(indexingStateBuffer) || {}
+				if (!indexingState.processes)
+					indexingState.processes = new Map()
+				indexingState.processes.delete(process.pid)
+				if (indexingState.processes.size == 0) {
+					indexingState.version = lastIndexedVersion
+				}
+
+				if (!serialize(indexingState).toString().match(/Map/))
+					debugger
+				db.put(INDEXING_STATE, serialize(indexingState))
+				this.isRegisteredAsIndexing = false // no longer indexing
+			})
 		}
 
 		static *resumeIndex() {
@@ -311,8 +344,12 @@ export const Index = ({ Source }) => {
 				this.queuedIndexedProgress = indexedProgress
 				return
 			}
-			let operationsToCommit = operations
+			let operationsToCommit = []
+			let entityOperationsToCommit = operations
 			operations = []
+			for (const entityOperations of entityOperationsToCommit) {
+				operationsToCommit.push(...entityOperations.operations)
+			}
 			if (this.queuedIndexedProgress) {
 				// if a queued index progress is ready, add it to the operations to batch commit
 				operationsToCommit.push({
@@ -321,6 +358,17 @@ export const Index = ({ Source }) => {
 					value: Buffer.from(this.queuedIndexedProgress.toString())
 				})
 				this.queuedIndexedProgress = null
+			}
+			// start transaction
+			const indexingState = parse(this.db.get(INDEXING_STATE))
+			for (const [pid, version] of indexingState.processes) {
+				for (const entityOperations of entityOperationsToCommit) {
+					if (pid != process.pid && version < entityOperations.version) {
+						// it is possible that these operations are being written *before* operations that are expected to precede it, in another process
+						// so we hold on to them, in case we get an update with a version before
+						tentativeEntityOperations.set(entityOperations.id, entityOperations)
+					}
+				}
 			}
 
 			//if (operationsToCommit.length > 200 || operationsToCommit.byteCount > 100000) {
@@ -332,9 +380,16 @@ export const Index = ({ Source }) => {
 				// we are *not* waiting for it to complete before continuing with indexing though
 				// but are waiting for it to complete before writing progress
 				this.sendUpdates()
+				this.sendBroadcast({
+					updates: entityOperationsToCommit.map(entityOperation => ({
+						id: entityOperation.id,
+						version: entityOperation.version,
+					}))
+				})
 				return this.queuedIndexedProgress = indexedProgress
 			})
 		}
+
 		static sendUpdates() {
 			let updatedIndexEntriesArray = Array.from(updatedIndexEntries).reverse()
 			updatedIndexEntries = new Map()
@@ -348,6 +403,44 @@ export const Index = ({ Source }) => {
 					this.for(indexedEntry[0]).updated(event)
 				} catch (error) {
 					console.error('Error sending index updates', error)
+				}
+			}
+		}
+		static receiveMessage(notification) {
+			let minimumIndexedVersion = lastIndexedVersion
+			if (notification.updates) {
+				let operationsToRedo = []
+				for (const update of notification.updates) {
+					const tentativeOperation = tentativeEntityOperations.get(update.id)
+					if (tentativeOperation.version > update.version) {
+						// some other process had indexed an earlier version of this, we need to re-execute our operations to have be properly sequenced (our operations are idempotent)
+						operationsToRedo.push(tentativeOperation)
+					}
+				}
+				if (operationsToRedo.length > 0) {
+					this.db.batch(operationsToRedo)
+				}
+				// update the version of the process
+				for (let [pid, version] of otherProcesses) {
+					if (pid === notification.pid)
+						otherProcesses.set(pid, version = notification.version)
+					minimumIndexedVersion = Math.min(version, minimumIndexedVersion)
+				}
+			}
+			if (notification.completed) {
+				// remove other process
+				for (const [pid, version] of otherProcesses) {
+					if (pid === notification.pid)
+						this.otherProcesses.delete(pid)
+					else
+						minimumIndexedVersion = Math.min(version, minimumIndexedVersion)
+				}
+
+			}
+			for (const tentativeOperation of tentativeEntityOperations.values()) {
+				if (tentativeOperation.version < minimumIndexedVersion) {
+					//everything before this has been indexed, so we can safely dismiss it now
+					tentativeEntityOperations.delete(tentativeOperation.id)
 				}
 			}
 		}
@@ -453,14 +546,46 @@ export const Index = ({ Source }) => {
 				}
 			})
 		}
-		static hasProcessing = true
+		static isRegisteredAsIndexing = false // has a lock as the the current indexing process
+		static registerToIndex() {
+			const db = this.db
+			db.transaction(() => {
+				const indexingStateBuffer = db.get(INDEXING_STATE)
+				const indexingState = indexingStateBuffer && parse(indexingStateBuffer) || {}
+
+				if (!indexingState.processes) {
+					indexingState.processes = new Map()
+				} else if (indexingState.processes.size) {
+					otherProcesses = indexingState.processes
+				}
+				indexingState.processes.set(process.pid, lastIndexedVersion)
+
+				// otherwise this should be added to our queue, and processed when it is our turn
+				// we record waiting processes so the main process doesn't record a version update beyond the version of this process
+				if (!serialize(indexingState).toString().match(/Map/))
+					debugger
+				db.put(INDEXING_STATE, serialize(indexingState))
+				this.isRegisteredAsIndexing = true
+			})
+		}
+		static sendBroadcast(message) {
+			message.indexingUpdate = true
+		}
 		static updated(event, by) {
+			if (event.indexingUpdate) {
+				return this.receiveMessage(event)
+			}
 			// we don't propagate immediately through the index, as the indexing must take place
 			// to determine the affecting index entries, and the indexing will send out the updates
 			if (event.type === 'indexing-completion') {
 				for (const sourceName in event.sourceVersions) {
 					processingSourceVersions[sourceName] = event.sourceVersions[sourceName]
 				}
+				return event
+			}
+			if (event.fromOtherProcess) {
+				// just skip these
+				return event
 			}
 			let context = currentContext
 			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
@@ -469,42 +594,48 @@ export const Index = ({ Source }) => {
 			let previousState = event.previousValues && event.previousValues.get(by)
 			let id = by && by.constructor == this.Sources[0] && by.id // if we are getting an update from a source instance
 			if (id && !this.gettingAllIds) {
-				if (!this.updatingProcessConnection) { // indexing should take place in a separate process
-					// queue up processing the event
-					let indexRequest = this.queue.get(id)
-					if (indexRequest) {
-						// put it at that end so version numbers are
-						this.queue.delete(id)
-						this.queue.set(id, indexRequest)
-						indexRequest.version = event.version
-						if (event.triggers)
-							for (let trigger of event.triggers)
-								indexRequest.triggers.add(trigger)
-					} else {
-						this.queue.set(id, indexRequest = {
-							previousState,
-							version: event.version,
-							triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
-						})
-						this.requestProcessing(DEFAULT_INDEXING_DELAY)
+				if (!this.isRegisteredAsIndexing) {
+					this.registerToIndex()
+				}
+				if (event.noPreviousValue) {
+					// this should mean that the entity was also updated in another process, and we don't have the previous state, so we need to let that process index it
+					waitingForEntityToBeIndexedInOtherProcess.push(id)
+					return true
+				}
+				// queue up processing the event
+				let indexRequest = this.queue.get(id)
+				if (indexRequest) {
+					// put it at that end so version numbers are
+					this.queue.delete(id)
+					this.queue.set(id, indexRequest)
+					indexRequest.version = event.version
+					if (event.triggers)
+						for (let trigger of event.triggers)
+							indexRequest.triggers.add(trigger)
+				} else {
+					this.queue.set(id, indexRequest = {
+						previousState,
+						version: event.version,
+						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
+					})
+					this.requestProcessing(DEFAULT_INDEXING_DELAY)
+				}
+				if (!indexRequest.version) {
+					throw new Error('missing version')
+				}
+				indexRequest.deleted = event.type == 'deleted'
+				if (event.sources) {
+					if (!indexRequest.sources) {
+						indexRequest.sources = new Set()
 					}
-					if (!indexRequest.version) {
-						throw new Error('missing version')
+					for (let source of event.sources) {
+						indexRequest.sources.add(source)
 					}
-					indexRequest.deleted = event.type == 'deleted'
-					if (event.sources) {
-						if (!indexRequest.sources) {
-							indexRequest.sources = new Set()
-						}
-						for (let source of event.sources) {
-							indexRequest.sources.add(source)
-						}
-					} else if (event.source) {
-						if (!indexRequest.sources) {
-							indexRequest.sources = new Set()
-						}
-						indexRequest.sources.add(event.source)
+				} else if (event.source) {
+					if (!indexRequest.sources) {
+						indexRequest.sources = new Set()
 					}
+					indexRequest.sources.add(event.source)
 				}
 
 				//registerProcessing(updateContext, this, this.whenFullyReadable)

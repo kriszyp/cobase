@@ -2,7 +2,7 @@ const { Persisted, createProcess, registerProcesses } = require('..')
 const { TestProcess, TestProcessByName } = require('./model/TestProcess')
 const { removeSync } = require('fs-extra')
 let child
-suite.only('Process', function() {
+suite.skip('Process', function() {
 	this.timeout(2000000)
 	Persisted.dbFolder = 'tests/db'
 //	Persistable.dbFolder = 'tests/db'
@@ -37,7 +37,7 @@ suite.only('Process', function() {
 					Promise.all([
 						TestProcessByName.for('change a').then(value => {
 							assert.equal(value.length, 0)
-						})
+						}),
 						TestProcessByName.for('change b').then(value => {
 							assert.equal(value.length, 1)
 						})

@@ -44,20 +44,20 @@ suite('performance', () => {
 		}
 		return level.batch(operations)
 	})
-	test('lmdb-write', () => {
+	test.only('lmdb-write', () => {
 		for (let i = 0; i < 10000; i++) {
-			lmdb.putSync(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
+			lmdb.put(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
 		}
 	})
-	test('lmdb-read', () => {
+	test.only('lmdb-read', () => {
 		for (let i = 0; i < 10000; i++) {
-			lmdb.getSync(Buffer.from((i % 1000).toString()))
+			lmdb.get(Buffer.from((i % 1000).toString()))
 		}
 	})
 	test('lmdb-read-write', () => {
 		for (let i = 0; i < 10000; i++) {
-			lmdb.putSync(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
-			lmdb.getSync(Buffer.from((i % 1000).toString()))
+			lmdb.put(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
+			lmdb.get(Buffer.from((i % 1000).toString()))
 		}
 	})
 	test('lmdb-batch', () => {

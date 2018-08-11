@@ -132,8 +132,10 @@ export class Reduced extends Cached {
 	}
 
 	updated(event) {
-		for (let source of event.sources) {
-			this.invalidateEntry(source.id, event.version)
+		if (event && event.sources) {
+			for (let source of event.sources) {
+				this.invalidateEntry(source.id, event.version)
+			}
 		}
 		if (!this.rootLevel)
 			this.rootLevel = 1

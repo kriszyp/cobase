@@ -34,18 +34,26 @@ export function open(name): Database {
 	const env = new Env()
 	env.open({
 		path: location,
-		mapSize: 1024*1024*1024, // maximum database size
 		maxDbs: 1,
 		noMetaSync: true,
+		mapSize: 1024*1024*1024, // it can be as high 16TB
 		noSync: true,
 		useWritemap: true,
 		mapAsync: true,
 	})
-	let db = env.openDbi({
-		name: 'data',
-		create: true,
-		keyIsBuffer: true,
-	})
+	let db
+	function openDB() {
+		try {
+			db = env.openDbi({
+				name: 'data',
+				create: true,
+				keyIsBuffer: true,
+			})
+		} catch(error) {
+			handleError(error, null, null, openDB)
+		}
+	}
+	openDB()
 	const cobaseDb = {
 		db,
 		name,
@@ -53,61 +61,79 @@ export function open(name): Database {
 		bytesWritten: 0,
 		reads: 0,
 		writes: 0,
-		getSync(id, asBuffer) {
-			let txn = env.beginTxn(READING_TNX)
-			let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
-			result = result && uncompressSync(result)
-			txn.abort()
-			this.bytesRead += result && result.length || 1
-			this.reads++
-			if (result !== null) // missing entry, really should be undefined
+		transaction(execute) {
+			let txn = this.writeTxn = env.beginTxn()
+			let result
+			try {
+				result = execute()
+				txn.commit()
 				return result
+			} catch(error) {
+				handleError(error, this, txn, () => this.transaction(execute))
+			} finally {
+				this.writeTxn = null
+			}
+		},
+		getSync(id, asBuffer) {
+			return this.get(id, asBuffer)
 		},
 		get(id) {
-			let txn = env.beginTxn(READING_TNX)
-			let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
-			result = result && uncompressSync(result)
-			txn.abort()
-			this.bytesRead += result && result.length || 1
-			this.reads++
-			if (result !== null) // missing entry, really should be undefined
-				return result
+			let txn
+			try {
+				const writeTxn = this.writeTxn
+				if (writeTxn) {
+					txn = writeTxn
+				} else if ((txn = this.readTxn))
+					txn.renew()
+				else
+					txn = this.readTxn = env.beginTxn(READING_TNX)
+				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
+				result = result && uncompressSync(result)
+				if (!writeTxn) {
+					txn.reset()
+				}
+				this.bytesRead += result && result.length || 1
+				this.reads++
+				if (result !== null) // missing entry, really should be undefined
+					return result
+			} catch(error) {
+				handleError(error, this, txn, () => this.get(id))
+			}
 		},
 		putSync(id, value) {
-			if (typeof value !== 'object') {
-				throw new Error('putting string value')
-				value = Buffer.from(value)
-			}
-			value = compressSync(value)
-			this.bytesWritten += value && value.length || 0
-			this.writes++
-			let txn = env.beginTxn()
-			txn.putBinary(db, id, value, AS_BINARY)
-			txn.commit()
+			return this.put(id, value)
 		},
 		put(id, value) {
-			if (typeof value !== 'object') {
-				throw new Error('putting string value')
-				value = Buffer.from(value)
+			let txn
+			try {
+				if (typeof value !== 'object') {
+					throw new Error('putting string value')
+					value = Buffer.from(value)
+				}
+				const compressedValue = compressSync(value)
+				this.bytesWritten += compressedValue && compressedValue.length || 0
+				this.writes++
+				txn = this.writeTxn || env.beginTxn()
+				txn.putBinary(db, id, compressedValue, AS_BINARY)
+				if (!this.writeTxn)
+					txn.commit()
+			} catch(error) {
+				handleError(error, this, txn, () => this.put(id, value))
 			}
-			value = compressSync(value)
-			this.bytesWritten += value && value.length || 0
-			this.writes++
-			let txn = env.beginTxn()
-			txn.putBinary(db, id, value, AS_BINARY)
-			txn.commit()
 		},
 		remove(id) {
-			this.writes++
-			let txn = env.beginTxn()
-			txn.del(db, id)
-			txn.commit()
+			let txn = this.writeTxn || env.beginTxn()
+			try {
+				this.writes++
+				txn.del(db, id)
+				if (!this.writeTxn)
+					txn.commit()
+			} catch(error) {
+				handleError(error, this, txn, () => this.remove(id))
+			}
 		},
 		removeSync(id) {
-			this.writes++
-			let txn = env.beginTxn()
-			txn.del(db, id)
-			txn.commit()
+			this.remove(id)
 		},
 		iterator(options) {
 			return db.iterator(options)
@@ -121,31 +147,36 @@ export function open(name): Database {
 				const goToDirection = reverse ? 'goToPrev' : 'goToNext'
 				const getNextBlock = () => {
 					array = []
-					let txn = env.beginTxn(READING_TNX)
-					let cursor = new Cursor(txn, db, AS_BINARY)
-					if (reverse) {
-						// for reverse retrieval, goToRange is backwards because it positions at the key equal or *greater than* the provided key
-						let nextKey = cursor.goToRange(currentKey)
-						if (nextKey) {
-							if (!nextKey.equals(currentKey)) {
-								// goToRange positioned us at a key after the provided key, so we need to go the previous key to be less than the provided key
-								currentKey = cursor.goToPrev()
-							} // else they match, we are good, and currentKey is already correct
+					let txn
+					try {
+						txn = env.beginTxn(READING_TNX)
+						let cursor = new Cursor(txn, db, AS_BINARY)
+						if (reverse) {
+							// for reverse retrieval, goToRange is backwards because it positions at the key equal or *greater than* the provided key
+							let nextKey = cursor.goToRange(currentKey)
+							if (nextKey) {
+								if (!nextKey.equals(currentKey)) {
+									// goToRange positioned us at a key after the provided key, so we need to go the previous key to be less than the provided key
+									currentKey = cursor.goToPrev()
+								} // else they match, we are good, and currentKey is already correct
+							} else {
+								// likewise, we have been position beyond the end of the index, need to go to last
+								currentKey = cursor.goToLast()
+							}
 						} else {
-							// likewise, we have been position beyond the end of the index, need to go to last
-							currentKey = cursor.goToLast()
+							// for forward retrieval, goToRange does what we want
+							currentKey = cursor.goToRange(currentKey)
 						}
-					} else {
-						// for forward retrieval, goToRange does what we want
-						currentKey = cursor.goToRange(currentKey)
+						let i = 0
+						while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) <= 0 : currentKey.compare(endKey) >= 0)) && i++ < 100) {
+							array.push(currentKey, uncompressSync(cursor.getCurrentBinaryUnsafe()))
+							currentKey = cursor[goToDirection]()
+						}
+						cursor.close()
+						txn.commit()
+					} catch(error) {
+						handleError(error, this, txn, getNextBlock)
 					}
-					let i = 0
-					while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) <= 0 : currentKey.compare(endKey) >= 0)) && i++ < 100) {
-						array.push(currentKey, uncompressSync(cursor.getCurrentBinaryUnsafe()))
-						currentKey = cursor[goToDirection]()
-					}
-					cursor.close()
-					txn.commit()
 				}
 				let array
 				let i = 0
@@ -208,28 +239,31 @@ export function open(name): Database {
 			iterator.endSync()
 		},
 		batchSync(operations) {
-			return db.batchSync(operations)
+			return db.batch(operations)
 		},
 		batch(operations) {
 			this.writes += operations.length
 			this.bytesWritten += operations.reduce((a, b) => a + (b.value && b.value.length || 0), 0)
-			let txn = env.beginTxn()
-			for (let operation of operations) {
-				if (typeof operation.key != 'object')
-					throw new Error('non-buffer key')
-				try {
-					let value = operation.value && compressSync(operation.value)
-					txn[operation.type === 'del' ? 'del' : 'putBinary'](db, operation.key, value, AS_BINARY)
-				} catch (error) {
-					console.warn('MDB_NOTFOUND errors may safely be ignored', error)
-				}
-			}
+			let txn
 			try {
+				txn = env.beginTxn()
+				for (let operation of operations) {
+					if (typeof operation.key != 'object')
+						throw new Error('non-buffer key')
+					try {
+						let value = operation.value && compressSync(operation.value)
+						txn[operation.type === 'del' ? 'del' : 'putBinary'](db, operation.key, value, AS_BINARY)
+					} catch (error) {
+						if (error.message.startsWith('MDB_NOTFOUND')) {
+							console.warn('MDB_NOTFOUND errors may safely be ignored', error)
+						} else {
+							throw error
+						}
+					}
+				}
 				txn.commit()
-			} catch (error) {
-				txn.abort()
-				error.message += 'trying to save batch ' + JSON.stringify(operations)
-				throw error
+			} catch(error) {
+				handleError(error, this, txn, () => this.batch(operations))
 			}
 		},
 		close() {
@@ -237,89 +271,38 @@ export function open(name): Database {
 		},
 		clear() {
 			console.log('clearing db', name)
-			db.drop()
-			db = env.openDbi({
-				name: 'data',
-				create: true,
-				keyIsBuffer: true,
-			})
+			try {
+				db.drop()
+				db = env.openDbi({
+					name: 'data',
+					create: true,
+					keyIsBuffer: true,
+				})
+			} catch(error) {
+				handleError(error, this, null, () => this.clear())
+			}
 		}
 	}
 	allDbs.set(name, cobaseDb)
 	return cobaseDb
-
-	function alterDatabase(action) {
-		if (db.repairing) {
-			return db.repairing
+	function handleError(error, db, txn, retry) {
+		try {
+			if (txn)
+				txn.abort()
+		} catch(error) {
+			console.warn('txn already aborted')
 		}
-		let location = db.location
-		console.info(action + 'ing database at ' + location)
-		return db.repairing = new Promise((resolve, reject) => {
-			// suspend all activity on the db
-			let queued = []
-			let originalGet = db.get
-			db.get = function(...args) {
-				console.log('queueing get', location)
-				queued.push(() => {
-					console.log('finishing get')
-					db.get(...args)
-				})
+		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
+			if (db && db.readTxn) {
+				db.readTxn.abort()
+				db.readTxn = null // needs to be closed and recreated during resize
 			}
-			let originalPut = db.put
-			db.put = function(...args) {
-				console.log('queueing put', location)
-				queued.push(() => {
-					console.log('finishing put')
-					db.put(...args)
-				})
-			}
-			let originalDel = db.del
-			db.del = function(...args) {
-				console.log('queueing del', location)
-				queued.push(() => {
-					console.log('finishing del')
-					db.del(...args)
-				})
-			}
-			let originalBatch = db.batch
-			db.batch = function(...args) {
-				console.log('queueing batch', location)
-				queued.push(() => {
-					console.log('finishing batch')
-					db.batch(...args)
-				})
-			}
-			// close it down
-			db.close((error) => {
-				if (error) {
-					console.error('Error closing db', error)
-				}
-				// do the repair
-				leveldown[action](location, (err) => {
-					if (err) {
-						console.error('Failed to ' + action + ' database at ' + location, err)
-					} else {
-						console.info('Finished ' + action + 'ing database at ' + location)
-					}
-					db.open((error) => {
-						if (error) {
-							console.error('Error opening db', error)
-							reject(error)
-						}
-						// resume
-						db.repairing = false
-						console.info('Resuming database operations at ' + location)
-						db.get = originalGet
-						db.put = originalPut
-						db.batch = originalBatch
-						db.del = originalDel
-						for (let action of queued) {
-							action()
-						}
-						resolve()
-					})
-				})
-			})
-		})
+			const newSize = env.info().mapSize * 4
+			console.info('Resizing database', name, 'to', newSize)
+			env.resize(newSize)
+			return retry()
+		}
+		error.message = 'In database ' + name + ': ' + error.message
+		throw error
 	}
 }
