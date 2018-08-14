@@ -1,14 +1,21 @@
 const { Persisted, createProcess, registerProcesses } = require('..')
 const { TestProcess, TestProcessByName } = require('./model/TestProcess')
 const { removeSync } = require('fs-extra')
-let child
-suite.skip('Process', function() {
+const { fork } = require('child_process')
+let childProcess
+suite('Process', function() {
 	this.timeout(2000000)
 	Persisted.dbFolder = 'tests/db'
 //	Persistable.dbFolder = 'tests/db'
 	suiteSetup(() => {
-		child = createProcess('tests/second-process')
-		registerProcesses([child])
+		childProcess = fork('tests/second-process', [], {
+			env: process.env,
+			execArgv:['--stack-trace-limit=100'],
+			stdio: [0, 1, 2, 'ipc'],
+		})
+
+		process.on('exit', () => childProcess.kill())
+		console.log('created child test process')
 	})
 
 	test('run-in-process', () => {
@@ -28,37 +35,30 @@ suite.skip('Process', function() {
 		})
 	})
 	test('run-in-process with index', () => {
-		return sendMessage('put10').then(() =>
-			TestProcessByName.for('ten').then(value => {
-				console.log('got response for index of ten')
-				assert.equal(value[0].name, 'ten')
-				TestProcess.for(10).put({ name: 'change a' })
-				return sendMessage('change10').then(() =>
-					Promise.all([
-						TestProcessByName.for('change a').then(value => {
-							assert.equal(value.length, 0)
-						}),
-						TestProcessByName.for('change b').then(value => {
-							assert.equal(value.length, 1)
-						})
-					])
-				)
-			})
-		)
+		return sendMessage('put10').then(() => {
+			console.log('got response for index of ten')
+			TestProcess.for(10).put({ name: 'change a' })
+			return sendMessage('change10').then(() =>
+				Promise.all([
+					TestProcessByName.for('change a').then(value => {
+						assert.equal(value.length, 0)
+					}),
+					TestProcessByName.for('change b').then(value => {
+						assert.equal(value.length, 1)
+					})
+				])
+			)
+		})
 	})
 
-	/*
 	suiteTeardown(() => {
-		return Promise.all([
-			Test2.db.close(),
-			TestIndex.db.close()
-		])
-	})*/
+		childProcess.kill()
+	})
 })
 
 function sendMessage(action) {
-	child.send({ action })
-	return new Promise(resolve => child.on('message', (data) => {
+	childProcess.send({ action })
+	return new Promise(resolve => childProcess.on('message', (data) => {
 		if (data.completed == action) {
 			resolve()
 		}

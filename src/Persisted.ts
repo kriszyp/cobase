@@ -11,13 +11,14 @@ import { AccessError } from './util/errors'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
-import { registerClass } from './util/process'
+import { registerClass, addProcess } from './util/process'
 import { DEFAULT_CONTEXT } from './RequestContext'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
-const DB_VERSION_KEY = Buffer.from([1, 1]) // SOH, code 1
-const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // SOH, code 2
+const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
+const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // table metadata 2
+const REGISTERED_PROCESSES = Buffer.from([1, 4]) // table metadata 4
 const INITIALIZATION_SOURCE = 'is-initializing'
 let globalDoesInitialization
 
@@ -151,12 +152,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (!isMultiProcess && this.readyState === 'up-to-date' && this._cachedValue) {
 			return previousValues.set(this, this._cachedValue)
 		}
-		previousValues.set(this, when(this.loadLocalData(), ({ version, data }) => {
-			if (!data && version) {
-				event.noPreviousValue = true // need to communicate this cross-process
-			}
-			return data
-		}))
+		if (!previousValues.has(this))
+			previousValues.set(this, when(this.loadLocalData(), (entry) => {
+				if (!entry.data && entry.version) {
+					event.noPreviousValue = true // need to communicate this cross-process
+				}
+				return entry
+			}))
 	}
 
 	static index(propertyName: string, indexBy?: (value, sourceKey) => any) {
@@ -352,12 +354,49 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			Source.notifies(this)
 		}
 		this.instancesById.name = this.name
+		db.transaction(() => {
+			this.otherProcesses = parse(db.get(REGISTERED_PROCESSES)) || []
+			db.put(REGISTERED_PROCESSES, serialize(this.otherProcesses.concat(process.pid)))
+		})
 		registerClass(this)
+		for (const pid of this.otherProcesses) {
+			addProcess(pid).catch(() => {
+				let index = this.otherProcesses.indexOf(pid)
+				if (index > -1)
+					this.otherProcesses.splice(index, 1)
+				db.transaction(() => {
+					const allProcesses = parse(db.get(REGISTERED_PROCESSES)) || []
+					index = allProcesses.indexOf(pid)
+					if (index > -1) {
+						allProcesses.splice(index, 1)
+						db.put(REGISTERED_PROCESSES, serialize(allProcesses))
+					}
+				})
+			})
+		}
 		// make sure these are inherited
 		this.currentWriteBatch = null
 		if (this.doesInitialization === false) {
 			return
 		}
+		db.startTransaction()
+		function whenFinished() {
+			try {
+				db.commitTransaction()
+			} catch (error) {
+				console.warn(error.toString())
+			}
+		}
+		try {
+			return when(this.initializeData(), whenFinished, whenFinished)
+		} catch (error) {
+			whenFinished()
+			throw error
+		}
+
+	}
+	static initializeData() {
+		const db = this.db
 		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 		let stateDPack = db.getSync(DB_VERSION_KEY)
 		let didReset
@@ -428,26 +467,23 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 
-		const doUpdate = () => {
-			if (Class.updateWithPrevious) {
-				this.assignPreviousValue(event)
+		if (Class.updateWithPrevious) {
+			if (true/* isMultiProcess */) {
+				this.constructor.db.transaction(() => {
+					this.assignPreviousValue(event)
+					this.resetCache(event)
+				})
 			}
-			if (by === this) // skip reset
-				Variable.prototype.updated.apply(this, arguments)
-			else
-				super.updated(event, by)
-			if (event.type == 'deleted') {
-				this.readyState = 'no-local-data'
-				this.constructor.instanceSetUpdated(event)
-			} else if (by !== this) {
-				this.resetCache()
-			}
+		} else
+			this.resetCache(event)
+		if (event.type == 'deleted') {
+			this.readyState = 'no-local-data'
+			this.constructor.instanceSetUpdated(event)
 		}
-		if (Class.updateWithPrevious /* && isMultiProcess */) {
-			this.constructor.db.transaction(doUpdate)
-		} else {
-			doUpdate()
-		}
+		if (by === this) // skip reset
+			Variable.prototype.updated.apply(this, arguments)
+		else
+			super.updated(event, by)
 		// notify class listeners too
 		for (let listener of this.constructor.listeners || []) {
 			listener.updated(event, this)
@@ -470,13 +506,17 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	resetCache() {
+	resetCache(event) {
 	}
 
 	static updated(event, by?) {
 		// this should be called by outside classes
 		if (event && !event.version) {
 			event.version = getNextVersion()
+		}
+		if (event.type === 'process-identification') {
+			this.otherProcesses.push(event.pid)
+			return // shouldn't propagate
 		}
 		let instance
 		for (let Source of this.Sources || []) {
@@ -722,18 +762,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 		event || (event = new DeletedEvent())
 		let entity = this.for(id)
-		entity.updated(event)
-		entity.readyState = 'no-local-data'
-		event.source = entity
-		event.oldValue = when(entity.loadLocalData(), ({ data }) => data)
-		this.instanceSetUpdated(event)
-		if (this.updateWithPrevious) {
-			entity.assignPreviousValue(event)
-		}
+		entity.assignPreviousValue(event)
+		// TODO: Don't need to delete for cached entries, as it will be done in the event handler
+		this.dbPut(id) // do the db level delete
 		expirationStrategy.deleteEntry(entity)
-		this.dbPut(id)
 		this.instancesById.delete(id)
-		this.updated(event, entity)
+		entity.updated(event)
 	}
 
 	get [valueProperty]() {
@@ -787,7 +821,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				let db = Class.db
 				let version = this[versionProperty]
 				data = this.serializeEntryValue(version, value)
-				Class.dbPut(this.id, data, version) // no need to wait for it, should be synchronously available through the cache
+				Class.dbPut(this.id, data, version, (oldEntry) => {
+					// the check version  so it will only write if the version matches (in case another process modified it) or it is new entry
+					const { data, version: oldVersion } = this.parseEntryValue(oldEntry)
+					return data || !oldVersion || version == oldVersion // ok
+				})
 				if (newToCache) {
 					// fire an updated, if it is a new object
 					let event = new AddedEvent()
@@ -810,17 +848,24 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return serializer.getSerialized()
 	}
 
-	static dbPut(key, value, version) {
+	static dbPut(key, value, version, checkVersion) {
 
 		if (typeof value != 'object' && value) {
 			value = Buffer.from(value.toString())
 		}
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
-		if (value) {
-			this.db.put(toBufferKey(key), value)
-		} else {
-			this.db.remove(toBufferKey(key))
-		}
+		this.db.transaction(() => {
+			const keyAsBuffer = toBufferKey(key)
+			if (checkVersion) {
+				if (!checkVersion(this.db.get(keyAsBuffer)))
+					return // don't write if the check version doesn't match.
+			}
+			if (value) {
+				this.db.put(keyAsBuffer, value)
+			} else {
+				this.db.remove(keyAsBuffer)
+			}
+		})
 		let currentWriteBatch = this.currentWriteBatch
 		if (!currentWriteBatch) {
 			this.currentWriteBatch = setTimeout(() => {
@@ -876,13 +921,17 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 		return this.then((value) =>
 			when(this.put(value = Object.assign(value || {}, properties)), () => value))
 	}
-	assignPreviousValue(event) {
-		// for Persisted objects, we can use the event.oldValue
-		let previousValues = event.previousValues
-		if (!previousValues) {
-			previousValues = event.previousValues = new Map()
+	put(value, event) {
+		let newToCache = !this.getValue()
+		event = event || (newToCache ? new AddedEvent() : new ReplacedEvent())
+		event.source = this
+		this.assignPreviousValue(event)
+		this.readyState = 'up-to-date'
+		let result = super.put(value, event)
+		if (newToCache) {
+			this.constructor.instanceSetUpdated(event)
 		}
-		previousValues.set(this, event.oldValue)
+		return result
 	}
 	static DB = lmdb
 	static syncVersion = 10
@@ -961,10 +1010,16 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		this._cachedValue = undefined
 		this.cachedVersion = undefined
 		let version = this.version
-		if (this.shouldPersist !== false) {
-//			if (!this.loaded || this.asDPack || oldJSON) { // maybe this might be a little faster if it is already invalidated
+		const Class = this.constructor
+		if (this.shouldPersist !== false &&
+			!(event && event.sourceProcess && Class.otherProcesses.includes(event.sourceProcess))) { // if it came from another process we can count on it to have written the update
 			// storing as a version alone to indicate invalidation
-			this.constructor.dbPut(this.id, this.serializeEntryValue(version), version)
+			if (event && event.type === 'deleted') {
+				// completely empty entry for deleted items
+				Class.dbPut(this.id)
+			} else {
+				Class.dbPut(this.id, this.serializeEntryValue(version), version)
+			}
 //			}
 		}
 	}
@@ -1016,8 +1071,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return super.getInstanceIds(range)
 	}
 
-	static initialize(sourceCode) {
-		const registered = super.initialize(sourceCode)
+	static initializeData() {
+		const registered = super.initializeData()
 		if (this.doesInitialization === false) {
 			// we don't reset from this process if there is an updating process
 			return registered

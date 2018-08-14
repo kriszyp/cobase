@@ -62,6 +62,10 @@ export function open(name): Database {
 		reads: 0,
 		writes: 0,
 		transaction(execute) {
+			if (this.writeTxn) {
+				// already nested in a transaction, just execute and return
+				return execute()
+			}
 			let txn = this.writeTxn = env.beginTxn()
 			let result
 			try {
@@ -73,6 +77,13 @@ export function open(name): Database {
 			} finally {
 				this.writeTxn = null
 			}
+		},
+		startTransaction() {
+			this.writeTxn = env.beginTxn()
+		},
+		commitTransaction() {
+			this.writeTxn.commit()
+			this.writeTxn = null
 		},
 		getSync(id, asBuffer) {
 			return this.get(id, asBuffer)
@@ -128,7 +139,11 @@ export function open(name): Database {
 				txn.del(db, id)
 				if (!this.writeTxn)
 					txn.commit()
+				return true // object found and deleted
 			} catch(error) {
+				if (error.message.startsWith('MDB_NOTFOUND')) {
+					return false // calling remove on non-existent property is fine, but we will indicate its lack of existence with the return value
+				}
 				handleError(error, this, txn, () => this.remove(id))
 			}
 		},
@@ -246,7 +261,7 @@ export function open(name): Database {
 			this.bytesWritten += operations.reduce((a, b) => a + (b.value && b.value.length || 0), 0)
 			let txn
 			try {
-				txn = env.beginTxn()
+				txn = this.writeTxn || env.beginTxn()
 				for (let operation of operations) {
 					if (typeof operation.key != 'object')
 						throw new Error('non-buffer key')
@@ -261,7 +276,8 @@ export function open(name): Database {
 						}
 					}
 				}
-				txn.commit()
+				if (!this.writeTxn)
+					txn.commit()
 			} catch(error) {
 				handleError(error, this, txn, () => this.batch(operations))
 			}
@@ -272,11 +288,9 @@ export function open(name): Database {
 		clear() {
 			console.log('clearing db', name)
 			try {
-				db.drop()
-				db = env.openDbi({
-					name: 'data',
-					create: true,
-					keyIsBuffer: true,
+				db.drop({
+					justFreePages: true,
+					txn: this.writeTxn,
 				})
 			} catch(error) {
 				handleError(error, this, null, () => this.clear())

@@ -8,7 +8,167 @@ import { CurrentRequestContext } from '../RequestContext'
 
 let pipeServerStarted
 const classMap = new Map<string, any>()
+const streamByPid = new Map<number, any>()
+const waitingRequests = new Map<number, { resolve: Function, reject: Function}>()
+const whenConnected = new Map<number, Promise<any>>()
+let nextRequestId = 1
 
+function startPipeClient(processId) {
+	if (whenConnected.get(processId)) {
+		return whenConnected.get(processId)
+	}
+	let promise = new Promise((resolve, reject) => {
+		const socket = net.createConnection(path.join('\\\\?\\pipe', 'cobase-' + processId))
+		socket.on('error', reject).on('connect', resolve)
+		let parsedStream = socket.pipe(createParseStream({
+			//encoding: 'utf16le',
+		})).on('error', console.error)
+		let serializingStream = createSerializeStream({
+			//encoding: 'utf16le'
+		})
+		serializingStream.pipe(socket)
+		serializingStream.write({ // first thing: identify ourselves
+			type: 'process-identification',
+			pid: process.pid,
+		})
+		streams.push(serializingStream)
+		socket.unref()
+		parsedStream.on('data', (message) => {
+			onMessage(message, serializingStream)
+		})
+		attachClasses(serializingStream)
+	})
+	whenConnected.set(processId, promise)
+	return promise
+}
+
+
+function startPipeServer() {
+	if (pipeServerStarted)
+		return
+	pipeServerStarted = true
+	console.log('starting pipe server on ', process.pid)
+	net.createServer((socket) => {
+		console.log('pipe server got client ', process.pid)
+		socket.pipe(createParseStream({
+			//encoding: 'utf16le',
+		})).on('data', (message) => {
+			onMessage(message, serializingStream)
+		})
+		let serializingStream = createSerializeStream({
+			encoding: 'utf16le',
+		})
+		serializingStream.pipe(socket)
+		streams.push(serializingStream)
+		attachClasses(serializingStream)
+	}).on('error', (err) => {
+	  // handle errors here
+	  throw err;
+	}).listen(path.join('\\\\?\\pipe', 'cobase-' + process.pid))
+}
+startPipeServer() // Maybe start it in the next event turn so you can turn it off in single process environment?
+let streams = []
+
+function attachClasses(stream) {
+	for (const [className, Class] of classMap) {
+		attachClass(stream, Class, className)
+	}
+}
+function attachClass(stream, Class, className) {
+	Class.notifies({
+		updated(event, by) {
+			// TODO: debounce
+			//console.log('sending update event', className, process.pid)
+			let id = by && by.id
+			if (id && by === event.source) {
+				stream.write({
+					instanceId: id,
+					method: 'updated',
+					className,
+					type: event.type,
+					triggers: event.triggers,
+				})
+			}
+		}
+	})
+	Class.sendBroadcast = notification => {
+		for (const stream of streams) {
+			notification.className = className
+			stream.write(notification)
+		}
+	}
+	Class.sendRequestToProcess = (pid, message) => {
+		const requestId = message.requestId = nextRequestId++
+		streamByPid.get(pid).write(message)
+		return new Promise((resolve, reject) => waitingRequests.set(requestId, { resolve, reject }))
+	}
+	// declare this class listens on this stream
+	stream.write({
+		className,
+		type: 'process-identification',
+		pid: process.pid
+	})
+}
+
+function onMessage(message, stream) {
+	try {
+		const { requestId, responseId, className, instanceId } = message
+		if (responseId) {
+			const resolver = waitingRequests.get(responseId)
+			waitingRequests.delete(responseId)
+			return resolver.resolve(message)
+		}
+		let target = classMap.get(className)
+		if (target) {
+			if (instanceId) {
+				//console.log('<<<', message.type, message.className, message.instanceId)
+				if (!target.instancesById) {
+					console.log('Process proxy didnt have instancesById', ProcessProxy.name)
+					target.initialize()
+				}
+				target = target.instancesById.get(instanceId)
+				if (!target) {
+					return
+				}
+			}
+			if (requestId) {
+				when(target.receiveRequest(message), (result) => {
+					result.responseId = requestId
+					stream.write(result)
+				})
+			} else {
+				if (message.type) {
+					const event = new UpdateEvent()
+					event.sourceProcess = stream.pid
+					event.source = { id: instanceId, remote: true }
+					Object.assign(event, message)
+					target.updated(event)
+				} else {
+					target.update(message)
+				}
+			}
+		} else if (message.type === 'process-identification') {
+			streamByPid.set(stream.pid = message.pid, stream)
+		} else {
+			console.warn('Unknown message received', message)
+		}
+	} catch(error) {
+		console.error(error)
+	}
+}
+
+
+export function registerClass(Class) {
+	classMap.set(Class.name, Class)
+	for (const stream of streams)
+		attachClass(stream, Class, Class.name)
+}
+
+export function addProcess(pid) {
+	return startPipeClient(pid)
+}
+
+/*
 // every child process should be ready to join the network
 process.on('message', (data) => {
 	if (data.enterNetwork) {
@@ -23,211 +183,4 @@ process.on('message', (data) => {
 		startPipeClient(data.connectToProcess)
 	}
 })
-
-function startPipeClient(processId) {
-	const socket = net.createConnection(path.join('\\\\?\\pipe', 'cobase-' + processId))
-	let parsedStream = socket.pipe(createParseStream({
-		//encoding: 'utf16le',
-	})).on('error', (err) => {
-	  // handle errors here
-	  throw err;
-	})
-	let serializingStream = createSerializeStream({
-		//encoding: 'utf16le'
-	})
-	serializingStream.pipe(socket)
-	socket.unref()
-	parsedStream.on('data', (message) => {
-		try {
-			const className = message.className
-			const Class = classMap.get(className)
-			if (Class && message.instanceId) {
-				//console.log('<<<', message.type, message.className, message.instanceId)
-				if (!Class.instancesById) {
-					console.log('Process proxy didnt have instancesById', ProcessProxy.name)
-					Class.initialize()
-				}
-				const instance = Class.instancesById.get(message.instanceId)
-				if (instance) { // don't create an instance just to notify it
-					const event = new UpdateEvent()
-					event.source = { id: message.instanceId, remote: true }
-					Object.assign(event, message)
-					instance.updated(event)
-				}
-			} else {
-				if (message.type) {
-					const event = new UpdateEvent()
-					event.source = { id: message.instanceId, remote: true }
-					Object.assign(event, message)
-					Class.updated(event)
-				} else {
-					Class.update(message)
-				}
-				//console.warn('No listener found for ' + className)
-			}
-		} catch(error) {
-			console.error(error)
-		}
-	})
-	const send = (data) => serializingStream.write(data)
-}
-
-
-function startPipeServer() {
-	if (pipeServerStarted)
-		return
-	pipeServerStarted = true
-	console.log('starting pipe server on ', process.pid)
-	net.createServer((socket) => {
-		console.log('pipe server got client ', process.pid)
-		socket.pipe(createParseStream({
-			//encoding: 'utf16le',
-		})).on('data', (message) => {
-			//console.log('   >>>', message.method || message.type, message.className, message.instanceId)
-			let Class = classMap.get(message.className)
-			if (Class) {
-				Class.updated(message)
-			} else {
-				const errorMessage = 'No class ' + message.className + ' registered to receive messages, ensure ' + message.className + '.start() is called first'
-				throw new Error(errorMessage)
-			}
-		})
-		let serializingStream = createSerializeStream({
-			encoding: 'utf16le',
-		})
-		serializingStream.pipe(socket)
-		streams.push(serializingStream)
-		startClassNotification(serializingStream)
-
-	}).on('error', (err) => {
-	  // handle errors here
-	  throw err;
-	}).listen(path.join('\\\\?\\pipe', 'cobase-' + process.pid))
-}
-let streams = []
-
-function startClassNotification(stream) {
-	//console.log('startClassNotification', process.pid, Array.from(classMap.keys()))
-	for (const [className, Class] of classMap) {
-		Class.notifies({
-			updated(event, by) {
-				// TODO: debounce
-				//console.log('sending update event', className, process.pid)
-				let id = by && by.id
-				if (id && by === event.source) {
-					stream.write({
-						instanceId: id,
-						method: 'updated',
-						className: className,
-						type: event.type,
-						triggers: event.triggers,
-					})
-				}
-			}
-		})
-		Class.sendBroadcast = notification => {
-			for (const stream of streams) {
-				notification.className = className
-				stream.write(notification)
-			}
-		}
-	}
-}
-
-const allProcesses = []
-export function registerProcesses(processes, options) {
-	// TODO: Options to allow self id, single child process id, no self, etc.
-	// TODO: Return a promise for when the network is all connected and ready
-	allProcesses.push(...processes)
-	for (const childProcess of processes) {
-		if (childProcess == process) {
-			startPipeServer()
-			continue
-		}
-		try {
-			childProcess.send({
-				enterNetwork: true
-			})
-		} catch(error) {
-			console.error(error)
-		}
-		let responseListener = childProcess.on('message', (data) => {
-			if (data.enteredNetwork) {
-				// turn off responseListener and resolve promise
-				for (const otherChildProcess of allProcesses) {
-					if (otherChildProcess !== childProcess) {
-						if (otherChildProcess.connected) {
-							otherChildProcess.send({
-								connectToProcess: childProcess.pid
-							})
-						} else {
-							allProcesses.splice(allProcesses.indexOf(otherChildProcess), 1)
-						}
-					}
-				}
-				startPipeClient(childProcess.pid)
-			}
-		})
-	}
-}
-
-export function registerClass(Class) {
-	classMap.set(Class.name, Class)
-}
-
-
-export function createProcess(moduleId) {
-	let childProcess
-	const startProcess = () => {
-		childProcess = fork(moduleId, [], {
-			env: process.env,
-			execArgv:['--stack-trace-limit=100'],
-			stdio: [0, 1, 2, 'ipc'],
-		})
-
-		childProcess.unref()
-		process.stdout.unref()
-		process.stdin.unref()
-		process.stderr.unref()
-		childProcess.channel.unref()
-		process.on('exit', () => childProcess.kill())
-		console.log('created child process with module', moduleId)
-
-	    childProcess.on('exit', (exitCode) => {
-	      clearInterval(monitorInterval)
-	      //if (exitCode || waitingForPong) {
-	        console.error(process.pid + ' exit code: ' + exitCode)
-	      //}
-	      startProcess()
-	    })
-	    let waitingForPong
-
-	    childProcess.on('message', message => {
-	      if (message.pong)
-	        waitingForPong = false
-	    })
-
-	    const monitorInterval = setInterval(() => {
-	      if (waitingForPong) {
-	        console.error('No ping response received, restarting updating process')
-	        childProcess.kill()
-	      } else {
-	        childProcess.send({ ping: true })
-	        waitingForPong = true
-	      }
-	    }, 500000000).unref()
-	}
-	startProcess()
-
-	let processReady = new Promise((resolve, reject) => {
-		childProcess.on('exit', (code, signal) => {
-			console.log('Child process', process.pid, 'died', code, signal)
-			setTimeout(startProcess, 1000)
-		})
-		childProcess.on('error', (error) => console.log('Child process error', error.toString()))
-		childProcess.on('message', message => {
-			console.log('got IPC message from child', process.pid)
-		})
-	})
-	return childProcess
-}
+*/
