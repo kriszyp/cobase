@@ -6,6 +6,7 @@ import { createSerializeStream, createParseStream } from 'dpack'
 import { spawn, UpdateEvent, currentContext } from 'alkali'
 import { CurrentRequestContext } from '../RequestContext'
 
+const PIPE_BASE_PATH = /^win/i.test(process.platform) ? '\\\\?\\pipe' : '/tmp'
 let pipeServerStarted
 const classMap = new Map<string, any>()
 const streamByPid = new Map<number, any>()
@@ -18,7 +19,7 @@ function startPipeClient(processId) {
 		return whenConnected.get(processId)
 	}
 	let promise = new Promise((resolve, reject) => {
-		const socket = net.createConnection(path.join('\\\\?\\pipe', 'cobase-' + processId))
+		const socket = net.createConnection(path.join(PIPE_BASE_PATH, 'cobase-' + processId))
 		socket.on('error', reject).on('connect', resolve)
 		let parsedStream = socket.pipe(createParseStream({
 			//encoding: 'utf16le',
@@ -66,7 +67,7 @@ function startPipeServer() {
 	}).on('error', (err) => {
 	  // handle errors here
 	  throw err;
-	}).listen(path.join('\\\\?\\pipe', 'cobase-' + process.pid))
+	}).listen(path.join(PIPE_BASE_PATH, 'cobase-' + process.pid))
 }
 startPipeServer() // Maybe start it in the next event turn so you can turn it off in single process environment?
 let streams = []
