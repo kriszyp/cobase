@@ -34,12 +34,10 @@ interface IndexEntryUpdate {
 }
 export const Index = ({ Source }) => {
 	Source.updateWithPrevious = true
-	let operations: OperationsArray = []
 	let lastIndexedVersion = 0
 	let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
 	const sourceVersions = {}
 	const processingSourceVersions = new Map<String, number>()
-	const tentativeEntityOperations = new Map<number, {}>()
 	const waitingForEntityToBeIndexedInpendingProcess = []
 	let pendingProcesses = new Map<number, number>()
 	function addUpdatedIndexEntry(key, sources, triggers) {
@@ -73,6 +71,7 @@ export const Index = ({ Source }) => {
 
 		static *indexEntry(id, indexRequest: IndexRequest) {
 			let { previousState, deleted, sources, triggers, version, hasConcurrency } = indexRequest
+			let operations: OperationsArray = []
 			try {
 				let toRemove = new Map()
 				// TODO: handle delta, for optimized index updaes
@@ -105,7 +104,6 @@ export const Index = ({ Source }) => {
 				}
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 				let entries
-				const operations = []
 				if (!deleted) {
 					let attempts = 0
 					let data
@@ -176,8 +174,10 @@ export const Index = ({ Source }) => {
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
-			this.db.batch(operations)
-			this.sendUpdates()
+			if (operations.length > 0) {
+				this.db.batch(operations)
+				this.sendUpdates()
+			}
 			this.queue.delete(id)
 			if (indexRequest.resolveOnCompletion) {
 				for (const resolve of indexRequest.resolveOnCompletion) {
@@ -224,11 +224,11 @@ export const Index = ({ Source }) => {
 								// check to see if the version could be in conflict
 								let pendingProcessVersion = pendingProcesses.get(pid)
 								if (pendingProcessVersion > indexRequest.previousVersion && pendingProcessVersion < indexRequest.version) {
-									pendingRequests.push(indexRequest.pendingProcesses.map(pendingProcess => this.sendRequestToIndex(pendingProcess, indexRequest)))
+									pendingRequests.push(indexRequest.pendingProcesses.map(pendingProcess => this.sendRequestToIndex(pendingProcess, id, indexRequest)))
 								}
 							}
 							if (pendingRequests.length > 0) {
-								indexingInProgress.push(Promise.all(indexRequest.pendingProcesses.map(pendingProcess => this.sendRequestToIndex(pendingProcess, indexRequest))).then(results => {
+								indexingInProgress.push(Promise.all(pendingRequests).then(results => {
 									if (results.some(({ processedRemotely }) => processedRemotely)) {
 										this.queue.delete(id)
 									} else {
@@ -511,12 +511,34 @@ export const Index = ({ Source }) => {
 				return pendingProcesses
 			})
 		}
-		static sendRequestToIndex(pid, indexRequest) {
-			return this.sendRequestToProcess(pid, {
-				id: indexRequest.id,
-				version: indexRequest.version,
-				previousVersion: indexRequest.previousVersion,
-			})
+		static sendRequestToIndex(pid, id, indexRequest) {
+			try {
+				return this.sendRequestToProcess(pid, {
+					id,
+					version: indexRequest.version,
+					previousVersion: indexRequest.previousVersion,
+				}).catch(error => {
+					console.warn(error)
+					return { processedRemotely: false }
+				})
+			} catch(error) {
+				if (error.message.startsWith('No socket')) {
+					// clean up if the process/socket is dead
+					console.info('Cleaning up socket to old process', pid)
+					pendingProcesses.delete(pid)
+					const db = this.db
+					db.transaction(() => {
+						const indexingState = parse(db.get(INDEXING_STATE)) || {}
+						if (indexingState && indexingState.processes && indexingState.processes.has(pid)) {
+							indexingState.processes.delete(pid)
+							db.put(INDEXING_STATE, serialize(indexingState))
+						}
+					})
+					// TODO: resumeIndex?
+					return { processedRemotely: false }
+				}
+				throw error
+			}
 		}
 		static receiveRequest({ id, version, previousVersion }) {
 			const updateInQueue = this.queue.get(id)

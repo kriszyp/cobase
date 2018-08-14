@@ -136,6 +136,29 @@ export class Reduced extends Cached {
 			for (let source of event.sources) {
 				this.invalidateEntry(source.id, event.version)
 			}
+		} else  {
+			// delete the entire tree
+			let level = 1
+			let hasEntries
+			do {
+				const indexBufferKey = toBufferKey(this.id)
+				const Class = this.constructor
+				const db = Class.db
+				const iterator = db.iterable({
+					start: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, Buffer.from([1])]),
+					end: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, Buffer.from([255])]),
+					reverse: false,
+				})
+				let next
+				hasEntries = false
+				while(!(next = iterator.next()).done) {
+					db.remove(next.key)
+					hasEntries = true
+				}
+				level++
+			}
+			while (hasEntries)
+
 		}
 		if (!this.rootLevel)
 			this.rootLevel = 1

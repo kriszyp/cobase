@@ -159,6 +159,7 @@ export function open(name): Database {
 				let currentKey = options.start || (options.reverse ? Buffer.from([255, 255]) : Buffer.from([0]))
 				let endKey = options.end || (options.reverse ? Buffer.from([0]) : Buffer.from([255, 255]))
 				const reverse = options.reverse
+				let count = 0
 				const goToDirection = reverse ? 'goToPrev' : 'goToNext'
 				const getNextBlock = () => {
 					array = []
@@ -185,6 +186,10 @@ export function open(name): Database {
 						let i = 0
 						while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) <= 0 : currentKey.compare(endKey) >= 0)) && i++ < 100) {
 							array.push(currentKey, uncompressSync(cursor.getCurrentBinaryUnsafe()))
+							if (count++ >= options.limit) {
+								finished = true
+								break
+							}
 							currentKey = cursor[goToDirection]()
 						}
 						cursor.close()

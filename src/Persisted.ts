@@ -154,8 +154,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		if (!previousValues.has(this))
 			previousValues.set(this, when(this.loadLocalData(), (entry) => {
-				if (!entry.data && entry.version) {
-					event.noPreviousValue = true // need to communicate this cross-process
+				if (!entry.data && entry.version && this.version != entry.Version) {
+					//event.noPreviousValue = true // need to communicate this cross-process
 				}
 				return entry
 			}))
@@ -379,10 +379,15 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (this.doesInitialization === false) {
 			return
 		}
-		db.startTransaction()
-		function whenFinished() {
+		(global.openTransactions || (global.openTransactions = {}))[this.name] = true
+		console.info('(attempting to) starting initializing transaction for', this.name, process.pid)
+
+		//db.startTransaction()
+		const whenFinished = () => {
 			try {
-				db.commitTransaction()
+				delete global.openTransactions[this.name]
+				console.info('finished initializing transaction for', this.name, process.pid)
+				//db.commitTransaction()
 			} catch (error) {
 				console.warn(error.toString())
 			}
@@ -437,6 +442,18 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	get whenUpdateProcessed() {
 		return this._whenUpdateProcessed
+	}
+
+	valueOf() {
+		let context = currentContext
+		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
+			context.ifModifiedSince = undefined
+		}
+		const whenUpdateProcessed = this._whenUpdateProcessed
+		if (whenUpdateProcessed) {
+			return whenUpdateProcessed.then(() => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
+		}
+		return when(this.constructor.whenUpdatedInContext(context), () => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
 	}
 
 	gotValue(value) {
@@ -873,18 +890,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				this.currentWriteBatch = null
 			}, 20)
 		}
-	}
-
-	valueOf() {
-		let context = currentContext
-		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
-			context.ifModifiedSince = undefined
-		}
-		const whenUpdateProcessed = this._whenUpdateProcessed
-		if (whenUpdateProcessed) {
-			return whenUpdateProcessed.then(() => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
-		}
-		return when(this.constructor.whenUpdatedInContext(context), () => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
 	}
 
 	/*gotValue(value) {

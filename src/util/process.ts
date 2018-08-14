@@ -36,6 +36,7 @@ function startPipeClient(processId) {
 		parsedStream.on('data', (message) => {
 			onMessage(message, serializingStream)
 		})
+		socket.on('close', () => onCloseSocket(serializingStream))
 		attachClasses(serializingStream)
 	})
 	whenConnected.set(processId, promise)
@@ -61,6 +62,7 @@ function startPipeServer() {
 		serializingStream.pipe(socket)
 		streams.push(serializingStream)
 		attachClasses(serializingStream)
+		socket.on('close', () => onCloseSocket(serializingStream))
 	}).on('error', (err) => {
 	  // handle errors here
 	  throw err;
@@ -68,6 +70,7 @@ function startPipeServer() {
 }
 startPipeServer() // Maybe start it in the next event turn so you can turn it off in single process environment?
 let streams = []
+const updaters = []
 
 function attachClasses(stream) {
 	for (const [className, Class] of classMap) {
@@ -75,7 +78,7 @@ function attachClasses(stream) {
 	}
 }
 function attachClass(stream, Class, className) {
-	Class.notifies({
+	const updater = {
 		updated(event, by) {
 			// TODO: debounce
 			//console.log('sending update event', className, process.pid)
@@ -89,8 +92,12 @@ function attachClass(stream, Class, className) {
 					triggers: event.triggers,
 				})
 			}
-		}
-	})
+		},
+		stream,
+		Class
+	}
+	Class.notifies(updater)
+	updaters.push(updater)
 	Class.sendBroadcast = notification => {
 		for (const stream of streams) {
 			notification.className = className
@@ -99,7 +106,12 @@ function attachClass(stream, Class, className) {
 	}
 	Class.sendRequestToProcess = (pid, message) => {
 		const requestId = message.requestId = nextRequestId++
-		streamByPid.get(pid).write(message)
+		const stream = streamByPid.get(pid)
+		if (!stream) {
+			// TODO: If it is undefined wait for a connection
+			throw new Error('No socket to process ' + pid)
+		}
+		stream.write(message)
 		return new Promise((resolve, reject) => waitingRequests.set(requestId, { resolve, reject }))
 	}
 	// declare this class listens on this stream
@@ -166,6 +178,22 @@ export function registerClass(Class) {
 
 export function addProcess(pid) {
 	return startPipeClient(pid)
+}
+
+function onCloseSocket(stream) {
+	const pid = stream.pid
+	let index = streams.indexOf(stream)
+	if (index > -1)
+		streams.splice(index, 1)
+	for (let updater of updaters) {
+		if (updater.stream === stream) {
+			updater.Class.stopNotifies(updater)
+			index = updaters.indexOf(updater)
+			if (index > -1)
+				updaters.splice(index, 1)
+		}
+	}
+	streamByPid.set(pid, null) // set it to null, so we now it once existed and is dead
 }
 
 /*
