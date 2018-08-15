@@ -441,7 +441,7 @@ export const Index = ({ Source }) => {
 				// Go through the expected source versions and see if we are behind and awaiting processing on any sources
 				for (const sourceName in updateContext.expectedVersions) {
 					// if the expected version is behind, wait for processing to finish
-					if (updateContext.expectedVersions[sourceName] > sourceVersions[sourceName])
+					if (updateContext.expectedVersions[sourceName] > sourceVersions[sourceName] && this.queue.size > 0)
 						return this.requestProcessing(0) // up the priority
 				}
 			})

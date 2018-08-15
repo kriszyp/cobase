@@ -152,7 +152,7 @@ export class Reduced extends Cached {
 				let next
 				hasEntries = false
 				while(!(next = iterator.next()).done) {
-					db.remove(next.key)
+					db.remove(next.value.key)
 					hasEntries = true
 				}
 				level++
