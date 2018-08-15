@@ -78,13 +78,6 @@ export function open(name): Database {
 				this.writeTxn = null
 			}
 		},
-		startTransaction() {
-			this.writeTxn = env.beginTxn()
-		},
-		commitTransaction() {
-			this.writeTxn.commit()
-			this.writeTxn = null
-		},
 		getSync(id, asBuffer) {
 			return this.get(id, asBuffer)
 		},
