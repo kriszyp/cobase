@@ -22,7 +22,9 @@ function startPipeClient(processId) {
 		socket.on('error', reject).on('connect', resolve)
 		let parsedStream = socket.pipe(createParseStream({
 			//encoding: 'utf16le',
-		})).on('error', console.error)
+		})).on('error', (error) => {
+			console.error('Error in pipe client socket', error)
+		})
 		let serializingStream = createSerializeStream({
 			//encoding: 'utf16le'
 		})
@@ -84,6 +86,9 @@ function attachClass(stream, Class, className) {
 			//console.log('sending update event', className, process.pid)
 			let id = by && by.id
 			if (id && by === event.source) {
+				if (!className){
+					debugger
+				}
 				stream.write({
 					instanceId: id,
 					method: 'updated',
@@ -162,10 +167,10 @@ function onMessage(message, stream) {
 		} else if (message.type === 'process-identification') {
 			streamByPid.set(stream.pid = message.pid, stream)
 		} else {
-			console.warn('Unknown message received', message)
+			//console.warn('Unknown message received', message)
 		}
 	} catch(error) {
-		console.error(error)
+		console.error('Handling message error', error)
 	}
 }
 

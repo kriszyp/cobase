@@ -299,9 +299,8 @@ export const Index = ({ Source }) => {
 				if (indexingState.processes.size == 0) {
 					indexingState.version = lastIndexedVersion
 				}
+				console.log('finished indexing with', indexingState.processes.size, 'remaining processes, and version', indexingState.version)
 
-				if (!serialize(indexingState).toString().match(/Map/))
-					debugger
 				db.put(INDEXING_STATE, serialize(indexingState))
 				this.isRegisteredAsIndexing = false // no longer indexing
 			})
@@ -309,7 +308,9 @@ export const Index = ({ Source }) => {
 
 		static *resumeIndex() {
 			// TODO: if it is over half the index, just rebuild
-			lastIndexedVersion = +this.db.getSync(LAST_INDEXED_VERSION_KEY) || 0
+			const db: Database = this.db
+			const indexingState = parse(db.get(INDEXING_STATE)) || {}
+			lastIndexedVersion = indexingState.version || 0
 			sourceVersions[Source.name] = lastIndexedVersion
 			const idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
 			let min = Infinity
@@ -321,7 +322,6 @@ export const Index = ({ Source }) => {
 			//console.log('getInstanceIdsAndVersionsSince for index', this.name, idsAndVersionsToReindex.length, min, max)
 			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 
-			const db: Database = this.db
 			if (lastIndexedVersion == 0 || idsAndVersionsToReindex.isFullReset) {
 				yield this.db.clear()
 				this.updateDBVersion()
@@ -431,7 +431,7 @@ export const Index = ({ Source }) => {
 		static resetAll() {
 			// rebuild index
 			console.log('Index', this.name, 'resetAll')
-			return Promise.resolve(spawn(this.rebuildIndex())).then(() => spawn(this.resumeIndex()))
+			return Promise.resolve(spawn(this.rebuildIndex()))
 		}
 
 		static whenUpdatedInContext(context) {
@@ -478,10 +478,11 @@ export const Index = ({ Source }) => {
 				this.updatingProcessModule = this.Sources[0].updatingProcessModule
 			}*/
 			allIndices.push(this)
-			return when(super.initialize(module), () => {
-				if (this.doesInitialization !== false) {
-					return spawn(this.resumeIndex())
-				}
+			super.initialize(module)
+		}
+		static initializeData() {
+			return when(super.initializeData(), () => {
+				return spawn(this.resumeIndex())
 			})
 		}
 		static isRegisteredAsIndexing = false // has a lock as the the current indexing process

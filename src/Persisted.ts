@@ -354,51 +354,66 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			Source.notifies(this)
 		}
 		this.instancesById.name = this.name
+		let doesInitialization = true
+		const processKey = Buffer.from([1, 5, process.pid >> 8, process.pid & 0xff])
+		let initializingProcess
 		db.transaction(() => {
-			this.otherProcesses = parse(db.get(REGISTERED_PROCESSES)) || []
-			db.put(REGISTERED_PROCESSES, serialize(this.otherProcesses.concat(process.pid)))
+			initializingProcess = db.get(Buffer.from([1, 6]))
+			initializingProcess = initializingProcess && +initializingProcess.toString()
+			this.otherProcesses = Array.from(db.iterable({
+				start: Buffer.from([1, 5]),
+				end: Buffer.from([1, 6]),
+			}).map(({key, value}) => (key[2] << 8) + key[3]))
+			db.put(processKey, Buffer.from([])) // register process, in ready state
+			if (!initializingProcess) {
+				db.put(Buffer.from([1, 6]), Buffer.from(process.pid.toString()))
+			}
 		})
 		registerClass(this)
+		const doDataInitialization = () => {
+			const whenFinished = () => {
+				try {
+					delete global.openTransactions[this.name]
+					db.remove(Buffer.from([1, 6]))
+				} catch (error) {
+					console.warn(error.toString())
+				}
+			}
+			try {
+				return when(this.initializeData(), whenFinished, whenFinished)
+			} catch (error) {
+				whenFinished()
+				throw error
+			}
+		}
 		for (const pid of this.otherProcesses) {
 			addProcess(pid).catch(() => {
 				let index = this.otherProcesses.indexOf(pid)
 				if (index > -1)
 					this.otherProcesses.splice(index, 1)
-				db.transaction(() => {
-					const allProcesses = parse(db.get(REGISTERED_PROCESSES)) || []
-					index = allProcesses.indexOf(pid)
-					if (index > -1) {
-						allProcesses.splice(index, 1)
-						db.put(REGISTERED_PROCESSES, serialize(allProcesses))
-					}
-				})
+				if (initializingProcess == pid) {
+					db.transaction(() => {
+						// make sure it is still the initializing process
+						initializingProcess = db.get(Buffer.from([1, 6]))
+						initializingProcess = initializingProcess && +initializingProcess.toString()
+						if (initializingProcess == pid) {
+							// take over the initialization process
+							console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
+							db.put(Buffer.from([1, 6]), Buffer.from(process.pid.toString()))
+							doDataInitialization()
+						}
+					})
+				}
 			})
 		}
 		// make sure these are inherited
 		this.currentWriteBatch = null
-		if (this.doesInitialization === false) {
+		if (initializingProcess) {
+			//console.log('skipping data initialization for', this.name, 'handled in', initializingProcess)
 			return
 		}
 		(global.openTransactions || (global.openTransactions = {}))[this.name] = true
-		console.info('(attempting to) starting initializing transaction for', this.name, process.pid)
-
-		//db.startTransaction()
-		const whenFinished = () => {
-			try {
-				delete global.openTransactions[this.name]
-				console.info('finished initializing transaction for', this.name, process.pid)
-				//db.commitTransaction()
-			} catch (error) {
-				console.warn(error.toString())
-			}
-		}
-		try {
-			return when(this.initializeData(), whenFinished, whenFinished)
-		} catch (error) {
-			whenFinished()
-			throw error
-		}
-
+		return doDataInitialization()
 	}
 	static initializeData() {
 		const db = this.db
@@ -748,14 +763,17 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			console.log('Scanning for updates from', sinceVersion, this.lastVersion, isFullReset, this.name)
 			const parser = createParser()
 			return db.iterable({
-				start: Buffer.from([2])
+				start: Buffer.from([10])
 			}).map(({ key, value }) => {
-				parser.setSource(value.slice(0,24).toString(), 0)  // the lazy version only reads the first fews bits to get the version
-				const version = parser.readOpen()
-				return version > sinceVersion ? {
-					id: fromBufferKey(key),
-					version
-				} : null
+				try {
+					const { version } = this.prototype.parseEntryValue(value)
+					return version > sinceVersion ? {
+						id: fromBufferKey(key),
+						version
+					} : null
+				} catch (error) {
+					console.error('Error reading data from table scan', this.name, fromBufferKey(key), error)
+				}
 			}).filter(idAndVersion => {
 				return idAndVersion
 			}).asArray.then(idsAndVersions => {
@@ -866,27 +884,34 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	static dbPut(key, value, version, checkVersion) {
-
 		if (typeof value != 'object' && value) {
 			value = Buffer.from(value.toString())
 		}
+		const db = this.db
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
-		this.db.transaction(() => {
+		const processKey = Buffer.from([1, 5, process.pid >> 8, process.pid & 0xff])
+		if (!this.isWriting) {
+			db.put(processKey, Buffer.from(this.lastVersion.toString()))
+			this.isWriting = true
+		}
+		db.transaction(() => {
 			const keyAsBuffer = toBufferKey(key)
 			if (checkVersion) {
-				if (!checkVersion(this.db.get(keyAsBuffer)))
+				if (!checkVersion(db.get(keyAsBuffer)))
 					return // don't write if the check version doesn't match.
 			}
 			if (value) {
-				this.db.put(keyAsBuffer, value)
+				db.put(keyAsBuffer, value)
 			} else {
-				this.db.remove(keyAsBuffer)
+				db.remove(keyAsBuffer)
 			}
 		})
 		let currentWriteBatch = this.currentWriteBatch
 		if (!currentWriteBatch) {
 			this.currentWriteBatch = setTimeout(() => {
-				this.db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
+				db.put(processKey, Buffer.from([]))
+				this.isWriting = false
+				db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
 				this.currentWriteBatch = null
 			}, 20)
 		}

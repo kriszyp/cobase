@@ -148,7 +148,7 @@ export class Reduced extends Cached {
 					start: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, Buffer.from([1])]),
 					end: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, Buffer.from([255])]),
 					reverse: false,
-				})
+				})[Symbol.iterator]()
 				let next
 				hasEntries = false
 				while(!(next = iterator.next()).done) {
