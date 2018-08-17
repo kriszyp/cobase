@@ -21,7 +21,7 @@ function genericErrorHandler(err) {
 	}
 }
 let env
-export function open(name): Database {
+export function open(name, options): Database {
 	let location = './' + name
 	try {
 		fs.statSync(location)
@@ -32,15 +32,15 @@ export function open(name): Database {
 		fs.removeSync(location + '/LOCK') // clean up any old locks
 	} catch(e) {}
 	const env = new Env()
-	env.open({
+	env.open(Object.assign({
 		path: location,
 		maxDbs: 1,
 		noMetaSync: true,
-		mapSize: 1024*1024*1024, // it can be as high 16TB
+		mapSize: 16*1024*1024, // it can be as high 16TB
 		noSync: true,
 		useWritemap: true,
 		mapAsync: true,
-	})
+	}, options))
 	let db
 	function openDB() {
 		try {
@@ -302,7 +302,7 @@ export function open(name): Database {
 			if (txn)
 				txn.abort()
 		} catch(error) {
-			console.warn('txn already aborted')
+		//	console.warn('txn already aborted')
 		}
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
 			if (db && db.readTxn) {
@@ -310,7 +310,7 @@ export function open(name): Database {
 				db.readTxn = null // needs to be closed and recreated during resize
 			}
 			const newSize = env.info().mapSize * 4
-			console.info('Resizing database', name, 'to', newSize)
+			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)
 			return retry()
 		}

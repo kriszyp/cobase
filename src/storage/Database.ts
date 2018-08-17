@@ -13,11 +13,10 @@ export interface Database {
 	clear(): Promise<void>
 }
 export interface IterableOptions {
-	gt?: any
-	gte?: any
-	lt?: any
-	lte?: any
+	start: Buffer,
+	end: Buffer,
 	values?: boolean
+	reverse?: boolean
 	valueAsBuffer?: boolean
 	limit?: number
 }
