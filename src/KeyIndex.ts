@@ -224,7 +224,7 @@ export const Index = ({ Source }) => {
 								// check to see if the version could be in conflict
 								let pendingProcessVersion = pendingProcesses.get(pid)
 								if (pendingProcessVersion > indexRequest.previousVersion && pendingProcessVersion < indexRequest.version) {
-									pendingRequests.push(indexRequest.pendingProcesses.map(pendingProcess => this.sendRequestToIndex(pendingProcess, id, indexRequest)))
+									pendingRequests.push(this.sendRequestToIndex(pid, id, indexRequest))
 								}
 							}
 							if (pendingRequests.length > 0) {
@@ -611,9 +611,10 @@ export const Index = ({ Source }) => {
 					this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				}
 				if (pendingProcesses) {
+					indexRequest.pendingProcesses = []
 					for (const [pid, version] of pendingProcesses) {
 						if (version < event.version && version > (event.previousVersion || 0))
-							(indexRequest.pendingProcesses || (indexRequest.pendingProcesses = [])).push(pid)
+							indexRequest.pendingProcesses.push(pid)
 					}
 				}
 				if (!indexRequest.version) {
