@@ -11,6 +11,8 @@ const classMap = new Map<string, any>()
 const streamByPid = new Map<number, any>()
 const waitingRequests = new Map<number, { resolve: Function, reject: Function}>()
 const whenConnected = new Map<number, Promise<any>>()
+
+const getPipePath = (processId) => path.join(path.sep == '/' ? '/tmp' : '\\\\?\\pipe', 'cobase-' + process.pid)
 let nextRequestId = 1
 
 function startPipeClient(processId) {
@@ -18,7 +20,7 @@ function startPipeClient(processId) {
 		return whenConnected.get(processId)
 	}
 	let promise = new Promise((resolve, reject) => {
-		const socket = net.createConnection(path.join('\\\\?\\pipe', 'cobase-' + processId))
+		const socket = net.createConnection(getPipePath(processId))
 		socket.on('error', reject).on('connect', resolve)
 		let parsedStream = socket.pipe(createParseStream({
 			//encoding: 'utf16le',
@@ -68,7 +70,7 @@ function startPipeServer() {
 	}).on('error', (err) => {
 	  // handle errors here
 	  throw err;
-	}).listen(path.join('\\\\?\\pipe', 'cobase-' + process.pid))
+	}).listen(getPipePath(process.pid))
 }
 startPipeServer() // Maybe start it in the next event turn so you can turn it off in single process environment?
 let streams = []
