@@ -309,6 +309,10 @@ export function open(name, options): Database {
 				db.readTxn.abort()
 				db.readTxn = null // needs to be closed and recreated during resize
 			}
+			if (db && db.writeTxn) {
+				db.writeTxn.abort()
+				db.writeTxn = null // needs to be closed and recreated during resize
+			}
 			const newSize = env.info().mapSize * 4
 			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)

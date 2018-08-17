@@ -20,6 +20,7 @@ function startPipeClient(processId) {
 		return whenConnected.get(processId)
 	}
 	let promise = new Promise((resolve, reject) => {
+		console.log('connecting to pipe', getPipePath(processId), 'from', process.pid)
 		const socket = net.createConnection(getPipePath(processId))
 		socket.on('error', reject).on('connect', resolve)
 		let parsedStream = socket.pipe(createParseStream({
