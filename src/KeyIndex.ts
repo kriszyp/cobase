@@ -341,10 +341,10 @@ export const Index = ({ Source }) => {
 			for (let { id, version } of idsAndVersionsToReindex) {
 				if (!version)
 					console.log('resuming without version',this.name, id)
-				this.queue.set(id, {
-					version,
-					triggers: new Set([INITIALIZATION_SOURCE])
-				})
+				const event = new ReplacedEvent()
+				event.version = version
+				event.triggers = new Set([INITIALIZATION_SOURCE])
+				this.updated(event, id)
 			}
 			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}
@@ -441,7 +441,7 @@ export const Index = ({ Source }) => {
 				// Go through the expected source versions and see if we are behind and awaiting processing on any sources
 				for (const sourceName in updateContext.expectedVersions) {
 					// if the expected version is behind, wait for processing to finish
-					if (updateContext.expectedVersions[sourceName] > sourceVersions[sourceName] && this.queue.size > 0)
+					if (updateContext.expectedVersions[sourceName] > (sourceVersions[sourceName] || 0) && this.queue.size > 0)
 						return this.requestProcessing(0) // up the priority
 				}
 			})
@@ -581,7 +581,7 @@ export const Index = ({ Source }) => {
 
 			this.updateVersion()
 			let previousEntry = event.previousValues && event.previousValues.get(by)
-			let id = by && by.constructor == this.Sources[0] && by.id // if we are getting an update from a source instance
+			let id = by && (typeof by === 'object' ? (by.constructor == this.Sources[0] && by.id) : by) // if we are getting an update from a source instance
 			if (id && !this.gettingAllIds) {
 				this.checkAndUpdateProcessMap()
 				let whenPermittedBypendingProcesses
@@ -604,7 +604,7 @@ export const Index = ({ Source }) => {
 				} else {
 					this.queue.set(id, indexRequest = {
 						previousState: previousEntry && previousEntry.data,
-						previousVersion: previousEntry ? previousEntry.version : 0,
+						previousVersion: previousEntry ? previousEntry.version : -1,
 						version: event.version,
 						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
 					})
@@ -613,7 +613,7 @@ export const Index = ({ Source }) => {
 				if (pendingProcesses) {
 					indexRequest.pendingProcesses = []
 					for (const [pid, version] of pendingProcesses) {
-						if (version < event.version && version > (event.previousVersion || 0))
+						if (version < event.version && version > (event.previousVersion || -1))
 							indexRequest.pendingProcesses.push(pid)
 					}
 				}

@@ -12,7 +12,7 @@ const streamByPid = new Map<number, any>()
 const waitingRequests = new Map<number, { resolve: Function, reject: Function}>()
 const whenConnected = new Map<number, Promise<any>>()
 
-const getPipePath = (processId) => path.join(path.sep == '/' ? '/tmp' : '\\\\?\\pipe', 'cobase-' + process.pid)
+const getPipePath = (processId) => path.join(path.sep == '/' ? '/tmp' : '\\\\?\\pipe', 'cobase-' + processId)
 let nextRequestId = 1
 
 function startPipeClient(processId) {
@@ -53,7 +53,7 @@ function startPipeServer() {
 	if (pipeServerStarted)
 		return
 	pipeServerStarted = true
-	console.log('starting pipe server on ', process.pid)
+	console.log('starting local server on ', getPipePath(process.pid))
 	net.createServer((socket) => {
 		console.log('pipe server got client ', process.pid)
 		socket.pipe(createParseStream({
@@ -143,7 +143,7 @@ function onMessage(message, stream) {
 			if (instanceId) {
 				//console.log('<<<', message.type, message.className, message.instanceId)
 				if (!target.instancesById) {
-					console.log('Process proxy didnt have instancesById', ProcessProxy.name)
+					console.log('Process proxy didnt have instancesById', target.name)
 					target.initialize()
 				}
 				target = target.instancesById.get(instanceId)

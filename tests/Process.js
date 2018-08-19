@@ -3,7 +3,7 @@ const { TestProcess, TestProcessByName } = require('./model/TestProcess')
 const { removeSync } = require('fs-extra')
 const { fork } = require('child_process')
 let childProcess
-suite('Process', function() {
+suite.only('Process', function() {
 	this.timeout(2000000)
 	Persisted.dbFolder = 'tests/db'
 //	Persistable.dbFolder = 'tests/db'

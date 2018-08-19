@@ -68,13 +68,20 @@ export function open(name, options): Database {
 			}
 			let txn = this.writeTxn = env.beginTxn()
 			let result
+			let committed
 			try {
 				result = execute()
 				txn.commit()
+				committed = true
 				return result
 			} catch(error) {
 				handleError(error, this, txn, () => this.transaction(execute))
 			} finally {
+				if (!committed) {
+					try {
+						txn.abort()
+					} catch(error) {}
+				}
 				this.writeTxn = null
 			}
 		},
@@ -135,6 +142,7 @@ export function open(name, options): Database {
 				return true // object found and deleted
 			} catch(error) {
 				if (error.message.startsWith('MDB_NOTFOUND')) {
+					txn.abort()
 					return false // calling remove on non-existent property is fine, but we will indicate its lack of existence with the return value
 				}
 				handleError(error, this, txn, () => this.remove(id))
@@ -306,11 +314,15 @@ export function open(name, options): Database {
 		}
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
 			if (db && db.readTxn) {
-				db.readTxn.abort()
+				try {
+					db.readTxn.abort()
+				} catch(error) {}
 				db.readTxn = null // needs to be closed and recreated during resize
 			}
 			if (db && db.writeTxn) {
-				db.writeTxn.abort()
+				try {
+					db.writeTxn.abort()
+				} catch(error) {}
 				db.writeTxn = null // needs to be closed and recreated during resize
 			}
 			const newSize = env.info().mapSize * 4

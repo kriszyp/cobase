@@ -389,8 +389,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		for (const pid of this.otherProcesses) {
 			addProcess(pid).catch(() => {
 				let index = this.otherProcesses.indexOf(pid)
-				if (index > -1)
+				if (index > -1) {
 					this.otherProcesses.splice(index, 1)
+					db.remove(Buffer.from([1, 5, pid >> 8, pid & 0xff]))
+				}
 				if (initializingProcess == pid) {
 					db.transaction(() => {
 						// make sure it is still the initializing process
@@ -491,7 +493,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event.type === 'added') {
 			// if we are being notified of ourself being created, ignore it
 			this.constructor.instanceSetUpdated(event)
-			if (this.readyState) {
+			if (this.readyState === 'loading-local-data') {
 				return event
 			}
 			if (this.cachedVersion > -1) {
