@@ -114,6 +114,8 @@ function attachClass(stream, Class, className) {
 	}
 	Class.sendRequestToProcess = (pid, message) => {
 		const requestId = message.requestId = nextRequestId++
+		message.className = Class.name
+		console.log('sending request to process', pid, requestId)
 		const stream = streamByPid.get(pid)
 		if (!stream) {
 			// TODO: If it is undefined wait for a connection
@@ -133,6 +135,7 @@ function attachClass(stream, Class, className) {
 function onMessage(message, stream) {
 	try {
 		const { requestId, responseId, className, instanceId } = message
+
 		if (responseId) {
 			const resolver = waitingRequests.get(responseId)
 			waitingRequests.delete(responseId)

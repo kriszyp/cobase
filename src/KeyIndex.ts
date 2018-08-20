@@ -1,6 +1,6 @@
 import { spawn, currentContext, VArray, ReplacedEvent, UpdateEvent } from 'alkali'
 import { serialize, parse } from 'dpack'
-import { Persistable } from './Persisted'
+import { Persistable, INVALIDATED_ENTRY } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
@@ -27,6 +27,7 @@ export interface IndexRequest {
 	sources?: Set<any>
 	version: number
 	triggers?: Set<any>
+	resolveOnCompletion?: Function[]
 }
 interface IndexEntryUpdate {
 	sources: Set<any>
@@ -38,7 +39,6 @@ export const Index = ({ Source }) => {
 	let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
 	const sourceVersions = {}
 	const processingSourceVersions = new Map<String, number>()
-	const waitingForEntityToBeIndexedInpendingProcess = []
 	let pendingProcesses = new Map<number, number>()
 	function addUpdatedIndexEntry(key, sources, triggers) {
 		let entry = updatedIndexEntries.get(key)
@@ -70,7 +70,7 @@ export const Index = ({ Source }) => {
 		static indexingProcess: Promise<any>
 
 		static *indexEntry(id, indexRequest: IndexRequest) {
-			let { previousState, deleted, sources, triggers, version, hasConcurrency } = indexRequest
+			let { previousState, deleted, sources, triggers, version } = indexRequest
 			let operations: OperationsArray = []
 			try {
 				let toRemove = new Map()
@@ -79,6 +79,16 @@ export const Index = ({ Source }) => {
 				let previousEntries
 				let entity = Source.for(id)
 				try {
+					if (previousState === INVALIDATED_ENTRY) {
+						console.warn('Indexing with previously invalidated state, breaking out', id, this.name)
+						this.queue.delete(id)
+						if (indexRequest.resolveOnCompletion) {
+							for (const resolve of indexRequest.resolveOnCompletion) {
+								resolve()
+							}
+						}
+						return
+					}
 					if (previousState && previousState.then) {
 						previousState = yield previousState
 					}
@@ -223,7 +233,7 @@ export const Index = ({ Source }) => {
 							for (const pid of indexRequest.pendingProcesses) {
 								// check to see if the version could be in conflict
 								let pendingProcessVersion = pendingProcesses.get(pid)
-								if (pendingProcessVersion > indexRequest.previousVersion && pendingProcessVersion < indexRequest.version) {
+								if (pendingProcessVersion < indexRequest.version) {
 									pendingRequests.push(this.sendRequestToIndex(pid, id, indexRequest))
 								}
 							}
@@ -233,7 +243,7 @@ export const Index = ({ Source }) => {
 										this.queue.delete(id)
 									} else {
 										sinceLastStateUpdate++
-										return this.indexEntry(id, indexRequest)
+										return spawn(this.indexEntry(id, indexRequest))
 									}
 								}))
 							} else { // no other processes that are processing a version that could be conflicting
@@ -302,7 +312,6 @@ export const Index = ({ Source }) => {
 				console.log('finished indexing with', indexingState.processes.size, 'remaining processes, and version', indexingState.version)
 
 				db.put(INDEXING_STATE, serialize(indexingState))
-				this.isRegisteredAsIndexing = false // no longer indexing
 			})
 		}
 
@@ -485,7 +494,6 @@ export const Index = ({ Source }) => {
 				return spawn(this.resumeIndex())
 			})
 		}
-		static isRegisteredAsIndexing = false // has a lock as the the current indexing process
 		static isConcurrentlyIndexing = false // are we concurrently processing, writing update version as we get them into the version map
 		static whenAllConcurrentlyIndexing?: Promise<any> // promise if we are waiting for the initial indexing process to join the concurrent indexing mode
 		static checkAndUpdateProcessMap() {
@@ -499,6 +507,7 @@ export const Index = ({ Source }) => {
 				} else if (indexingState.processes.size) {
 					pendingProcesses = indexingState.processes
 				}
+				lastIndexedVersion = Math.max(lastIndexedVersion, indexingState.version || 0)
 				indexingState.processes.set(process.pid, lastIndexedVersion)
 
 				// otherwise this should be added to our queue, and processed when it is our turn
@@ -508,7 +517,6 @@ export const Index = ({ Source }) => {
 				if (pendingProcesses) {
 					pendingProcesses.delete(process.pid)
 				}
-				this.isRegisteredAsIndexing = true
 				return pendingProcesses
 			})
 		}
@@ -584,17 +592,10 @@ export const Index = ({ Source }) => {
 			let id = by && (typeof by === 'object' ? (by.constructor == this.Sources[0] && by.id) : by) // if we are getting an update from a source instance
 			if (id && !this.gettingAllIds) {
 				this.checkAndUpdateProcessMap()
-				let whenPermittedBypendingProcesses
-
-				if (event.noPreviousValue) {
-					// this should mean that the entity was also updated in another process, and we don't have the previous state, so we need to let that process index it
-					waitingForEntityToBeIndexedInpendingProcess.push(id)
-					return true
-				}
 				// queue up processing the event
 				let indexRequest = this.queue.get(id)
 				if (indexRequest) {
-					// put it at that end so version numbers are in order
+					// put it at that end so version numbers are in order, but don't alter the previous state or version, that is still what we will be diffing from
 					this.queue.delete(id)
 					this.queue.set(id, indexRequest)
 					indexRequest.version = event.version
@@ -613,7 +614,7 @@ export const Index = ({ Source }) => {
 				if (pendingProcesses) {
 					indexRequest.pendingProcesses = []
 					for (const [pid, version] of pendingProcesses) {
-						if (version < event.version && version > (event.previousVersion || -1))
+						if (event.version > version)
 							indexRequest.pendingProcesses.push(pid)
 					}
 				}

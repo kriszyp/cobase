@@ -66,10 +66,11 @@ export function open(name, options): Database {
 				// already nested in a transaction, just execute and return
 				return execute()
 			}
-			let txn = this.writeTxn = env.beginTxn()
+			let txn
 			let result
 			let committed
 			try {
+				txn = this.writeTxn = env.beginTxn()
 				result = execute()
 				txn.commit()
 				committed = true
@@ -133,8 +134,9 @@ export function open(name, options): Database {
 			}
 		},
 		remove(id) {
-			let txn = this.writeTxn || env.beginTxn()
+			let txn
 			try {
+				txn = this.writeTxn || env.beginTxn()
 				this.writes++
 				txn.del(db, id)
 				if (!this.writeTxn)

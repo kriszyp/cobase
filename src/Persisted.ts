@@ -7,7 +7,7 @@ import ExpirationStrategy from './ExpirationStrategy'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
 import Index from './KeyIndex'
-import { AccessError } from './util/errors'
+import { AccessError, ConcurrentModificationError } from './util/errors'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
@@ -20,6 +20,7 @@ const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
 const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // table metadata 2
 const REGISTERED_PROCESSES = Buffer.from([1, 4]) // table metadata 4
 const INITIALIZATION_SOURCE = 'is-initializing'
+export const INVALIDATED_ENTRY = { state: 'invalidated'}
 let globalDoesInitialization
 
 global.cache = expirationStrategy // help with debugging
@@ -153,12 +154,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			return previousValues.set(this, this._cachedValue)
 		}
 		if (!previousValues.has(this))
-			previousValues.set(this, when(this.loadLocalData(), (entry) => {
-				if (!entry.data && entry.version && this.version != entry.Version) {
-					//event.noPreviousValue = true // need to communicate this cross-process
-				}
-				return entry
-			}))
+			previousValues.set(this, this.loadLocalData())
 	}
 
 	static index(propertyName: string, indexBy?: (value, sourceKey) => any) {
@@ -500,6 +496,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				return event
 			}
 		}
+		this._initUpdate(event)
 
 		if (Class.updateWithPrevious) {
 			if (true/* isMultiProcess */) {
@@ -512,6 +509,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.resetCache(event)
 		if (event.type == 'deleted') {
 			this.readyState = 'no-local-data'
+			this._cachedValue = undefined
+			this._cachedVersion = undefined
 			this.constructor.instanceSetUpdated(event)
 		}
 		if (by === this) // skip reset
@@ -691,6 +690,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				// stored as an invalidated version
 				return {
 					version,
+					data: INVALIDATED_ENTRY,
 					buffer,
 				}
 			}
@@ -708,17 +708,17 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				isSync = true
 			else
 				this.promise = null
-			if (data) {
+			if (data === INVALIDATED_ENTRY) {
+				this.version = Math.max(version, this.version || 0)
+				this.readyState = 'invalidated'
+			} else if (version) {
 				this.readyState = 'up-to-date'
 				this.version = Math.max(version, this.version || 0)
 				this[versionProperty] = version
 				this._cachedValue = data
 				expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
-			} else if (version) {
-				this.version = Math.max(version, this.version || 0)
-				this.readyState = 'invalidated'
 			} else {
-				this.updateVersion()
+				this._initUpdate({})
 				this.readyState = 'no-local-data'
 			}
 			return entry
@@ -861,7 +861,13 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				Class.dbPut(this.id, data, version, (oldEntry) => {
 					// the check version  so it will only write if the version matches (in case another process modified it) or it is new entry
 					const { data, version: oldVersion } = this.parseEntryValue(oldEntry)
-					return data || !oldVersion || version == oldVersion // ok
+					if (data !== INVALIDATED_ENTRY || version == oldVersion || newToCache) {
+						return true // ok
+					} else {
+						const error = new ConcurrentModificationError('Previous version ' + oldVersion + ' does not match db version ' + version)
+						error.expectedVersion = version
+						throw error
+					}
 				})
 				if (newToCache) {
 					// fire an updated, if it is a new object
@@ -880,7 +886,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	serializeEntryValue(version, object) {
 		const serializer = createSerializer()
 		serializer.serialize(version)
-		if (object)
+		if (object !== INVALIDATED_ENTRY)
 			serializer.serialize(object)
 		return serializer.getSerialized()
 	}
@@ -998,7 +1004,28 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}
 			return this.cachedValue
 		}
-		return super.getValue()
+		try {
+			return super.getValue()
+		} catch (error) {
+			if (error instanceof ConcurrentModificationError) {
+				return new Promise((resolve, reject) => {
+					const notifyOnUpdate = (event) => {
+						if (event.version >= error.expectedVersion) {
+							this.stopNotifies(notifyOnUpdate)
+							clearTimeout(timeout)
+							setTimeout(() => resolve(this.valueOf()))
+						}
+					}
+					let timeout = setTimeout(() => {
+						this.stopNotifies(notifyOnUpdate)
+						clearTimeout(timeout)
+						setTimeout(() => resolve(this.valueOf()))
+					})
+					this.notifies(notifyOnUpdate)
+				})
+			}
+			throw error
+		}
 	}
 
 	is(value, event) {
@@ -1050,7 +1077,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				// completely empty entry for deleted items
 				Class.dbPut(this.id)
 			} else {
-				Class.dbPut(this.id, this.serializeEntryValue(version), version)
+				Class.dbPut(this.id, this.serializeEntryValue(version, INVALIDATED_ENTRY), version)
 			}
 //			}
 		}

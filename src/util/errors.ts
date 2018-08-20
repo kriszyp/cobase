@@ -14,3 +14,6 @@ export class AccessError extends ExtendableError {
 		return true
 	}
 }
+
+export class ConcurrentModificationError extends ExtendableError {
+}
