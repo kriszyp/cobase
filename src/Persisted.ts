@@ -681,9 +681,18 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			parser.setSource(buffer.slice(0,24).toString(), 0)  // the lazy version only reads the first fews bits to get the version
 			const version = parser.readOpen()
 			if (parser.hasMoreData()) {
+				const valueBuffer = buffer.slice(parser.getOffset())
+				if (valueBuffer.length === 1) {
+					// probably undefined, but either way, might as well do the parsing immediately
+					return {
+						version,
+						data: parser.readOpen(),
+						buffer,
+					}
+				}
 				return {
 					version,
-					data: parseLazy(buffer.slice(parser.getOffset()), parser),
+					data: parseLazy(valueBuffer, parser),
 					buffer,
 				}
 			} else {
@@ -708,7 +717,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				isSync = true
 			else
 				this.promise = null
-			if (data === INVALIDATED_ENTRY) {
+			if (data === INVALIDATED_ENTRY || !data) {
 				this.version = Math.max(version, this.version || 0)
 				this.readyState = 'invalidated'
 			} else if (version) {
@@ -864,9 +873,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					if (data !== INVALIDATED_ENTRY || version == oldVersion || newToCache) {
 						return true // ok
 					} else {
-						const error = new ConcurrentModificationError('Previous version ' + oldVersion + ' does not match db version ' + version)
-						error.expectedVersion = version
-						throw error
+						/*
+						let event = new ReplacedEvent() //IncomingEvent()
+						event.triggers = [ INITIALIZATION_SOURCE ]
+						event.source = this
+						event.version = version
+						Class.updated(event, this)*/
 					}
 				})
 				if (newToCache) {
@@ -1004,28 +1016,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}
 			return this.cachedValue
 		}
-		try {
-			return super.getValue()
-		} catch (error) {
-			if (error instanceof ConcurrentModificationError) {
-				return new Promise((resolve, reject) => {
-					const notifyOnUpdate = (event) => {
-						if (event.version >= error.expectedVersion) {
-							this.stopNotifies(notifyOnUpdate)
-							clearTimeout(timeout)
-							setTimeout(() => resolve(this.valueOf()))
-						}
-					}
-					let timeout = setTimeout(() => {
-						this.stopNotifies(notifyOnUpdate)
-						clearTimeout(timeout)
-						setTimeout(() => resolve(this.valueOf()))
-					})
-					this.notifies(notifyOnUpdate)
-				})
-			}
-			throw error
-		}
+		return super.getValue()
 	}
 
 	is(value, event) {
@@ -1059,7 +1050,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					continue
 				}
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
-				this.dbPut(id, this.prototype.serializeEntryValue(version), version)
+				this.dbPut(id, this.prototype.serializeEntryValue(version, INVALIDATED_ENTRY), version)
 			}
 			console.info('Done reseting', this.name)
 		}.bind(this)))

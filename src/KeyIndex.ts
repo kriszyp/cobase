@@ -80,14 +80,13 @@ export const Index = ({ Source }) => {
 				let entity = Source.for(id)
 				try {
 					if (previousState === INVALIDATED_ENTRY) {
-						console.warn('Indexing with previously invalidated state, breaking out', id, this.name)
-						this.queue.delete(id)
-						if (indexRequest.resolveOnCompletion) {
-							for (const resolve of indexRequest.resolveOnCompletion) {
-								resolve()
-							}
+						console.warn('Indexing with previously invalidated state, re-retrieving previous state', id, this.name)
+						const previousEntity = entity.loadLocalData()
+						previousState = previousEntity.data
+						if (previousState === INVALIDATED_ENTRY) {
+							previousState = undefined
 						}
-						return
+						indexRequest.previousVersion = previousEntity.version
 					}
 					if (previousState && previousState.then) {
 						previousState = yield previousState
@@ -309,8 +308,6 @@ export const Index = ({ Source }) => {
 				if (indexingState.processes.size == 0) {
 					indexingState.version = lastIndexedVersion
 				}
-				console.log('finished indexing with', indexingState.processes.size, 'remaining processes, and version', indexingState.version)
-
 				db.put(INDEXING_STATE, serialize(indexingState))
 			})
 		}
@@ -558,7 +555,7 @@ export const Index = ({ Source }) => {
 						// TODO: Update our entity?
 					}
 					return new Promise(resolve =>
-						(updateInQueue.resolveOnCompletion || (updateInQueue.resolveOnCompletion = [])).push([resolve]))
+						(updateInQueue.resolveOnCompletion || (updateInQueue.resolveOnCompletion = [])).push(resolve))
 						.then(() => ({ remotelyIndexed: true })) // reply when we have finished indexing this
 				}
 			}
