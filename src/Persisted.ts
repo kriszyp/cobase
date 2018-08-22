@@ -340,7 +340,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	static initialize() {
 		this.instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
-		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name)
+		const options = {}
+		if (this.mapSize) {
+			options.mapSize = this.mapSize
+		}
+		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name, options)
 		clearTimeout(this._registerTimeout)
 		if (global[this.name]) {
 			throw new Error(this.name + ' already registered')
@@ -717,20 +721,19 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				isSync = true
 			else
 				this.promise = null
-			if (data === INVALIDATED_ENTRY || !data) {
-				this.version = Math.max(version, this.version || 0)
-				this.readyState = 'invalidated'
-			} else if (version) {
+			if (data && data !== INVALIDATED_ENTRY) {
 				this.readyState = 'up-to-date'
 				this.version = Math.max(version, this.version || 0)
 				this[versionProperty] = version
 				this._cachedValue = data
 				expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
+			} else if (version) {
+				this.version = Math.max(version, this.version || 0)
+				this.readyState = 'invalidated'
 			} else {
-				this._initUpdate({})
+				this.updateVersion()
 				this.readyState = 'no-local-data'
-			}
-			return entry
+			}			return entry
 		})
 		if (isSync)
 			return promise
