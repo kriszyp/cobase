@@ -80,10 +80,16 @@ export const Index = ({ Source }) => {
 				let entity = Source.for(id)
 				try {
 					if (previousState === INVALIDATED_ENTRY) {
+						// this is one of the trickiest conditions in multi-process indexing. This generally means that there was an update
+						// event that occurred on entity that was already updated in another process, but that other process had not resolved
+						// the update yet. After we send the indexing request to the other processes, if any concurrently indexing process
+						// responds, it should mean that it has finished resolving and we can make another attempat at retrieving the previous state
+						// so we can properly sequence the indexing operations
 						console.warn('Indexing with previously invalidated state, re-retrieving previous state', id, this.name)
 						const previousEntity = entity.loadLocalData()
 						previousState = previousEntity.data
 						if (previousState === INVALIDATED_ENTRY) {
+							// TODO: if it is still invalidated, that may mean that another process snuck in another update. we may want to try requesting previous state again.
 							previousState = undefined
 						}
 						indexRequest.previousVersion = previousEntity.version
@@ -572,10 +578,6 @@ export const Index = ({ Source }) => {
 					processingSourceVersions[sourceName] = event.sourceVersions[sourceName]
 				}
 				return event
-			}
-			if (event.type === 'process-identification') {
-				this.otherProcesses.push(event.pid)
-				return // shouldn't propagate
 			}
 			if (this.otherProcesses && this.otherProcesses.includes(event.sourceProcess)) {
 				// just skip these

@@ -276,11 +276,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return source
 	}
 
-	get allowDirectJSON() {
-		return true
-	}
-
-
 	static updatesRecorded(event) {
 		return (event && event.updatesInProgress) ? Promise.all(event.updatesInProgress) : Promise.resolve()
 	}
@@ -387,7 +382,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 		for (const pid of this.otherProcesses) {
-			addProcess(pid).catch(() => {
+			addProcess(pid, this).catch(() => {
 				let index = this.otherProcesses.indexOf(pid)
 				if (index > -1) {
 					this.otherProcesses.splice(index, 1)
@@ -551,10 +546,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event && !event.version) {
 			event.version = getNextVersion()
 		}
-		if (event.type === 'process-identification') {
-			this.otherProcesses.push(event.pid)
-			return // shouldn't propagate
-		}
 		let instance
 		for (let Source of this.Sources || []) {
 			if (by && by.constructor === Source) {
@@ -673,7 +664,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this.asDPack ? this.asDPack.length * this.dPackMultiplier : 100
 	}
 
-	loadLocalData(now, asBuffer) {
+	loadLocalData() {
 		let Class = this.constructor
 		let db = Class.db
 		return this.parseEntryValue(Class.db.get(toBufferKey(this.id)))
@@ -715,7 +706,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	loadLatestLocalData() {
 		this.readyState = 'loading-local-data'
 		let isSync
-		let promise = when(this.loadLocalData(false, this.allowDirectJSON), (entry) => {
+		let promise = when(this.loadLocalData(), (entry) => {
 			const { version, data, buffer } = entry
 			if (isSync === undefined)
 				isSync = true
@@ -870,8 +861,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				let db = Class.db
 				let version = this[versionProperty]
 				data = this.serializeEntryValue(version, value)
-				Class.dbPut(this.id, data, version, (oldEntry) => {
-					// the check version  so it will only write if the version matches (in case another process modified it) or it is new entry
+				Class.dbPut(this.id, data, version/*, (oldEntry) => {
+					// the check version so it will only write if the version matches (in case another process modified it) or it is new entry
 					const { data, version: oldVersion } = this.parseEntryValue(oldEntry)
 					if (data !== INVALIDATED_ENTRY || version == oldVersion || newToCache) {
 						return true // ok
@@ -881,9 +872,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 						event.triggers = [ INITIALIZATION_SOURCE ]
 						event.source = this
 						event.version = version
-						Class.updated(event, this)*/
+						Class.updated(event, this)
 					}
-				})
+				}*/)
 				if (newToCache) {
 					// fire an updated, if it is a new object
 					let event = new AddedEvent()
