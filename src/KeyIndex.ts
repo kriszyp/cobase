@@ -525,6 +525,9 @@ export const Index = ({ Source }) => {
 		}
 		static sendRequestToIndex(pid, id, indexRequest) {
 			try {
+				if (!this.sendRequestToProcess) {
+					return { processedRemotely: false }
+				}
 				return this.sendRequestToProcess(pid, {
 					id,
 					version: indexRequest.version,

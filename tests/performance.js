@@ -2,6 +2,7 @@ const { removeSync } = require('fs-extra')
 const { open: openLevel } = require('../dist/storage/level')
 const { open: openLmdb } = require('../dist/storage/lmdb')
 const { deflateSync, inflateSync } = require('zlib')
+const { deflateSync, inflateSync } = require('snappy')
 suite('performance', () => {
 	removeSync('tests/db')
 

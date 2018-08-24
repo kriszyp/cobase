@@ -95,14 +95,12 @@ export function open(name, options): Database {
 				const writeTxn = this.writeTxn
 				if (writeTxn) {
 					txn = writeTxn
-				} else if ((txn = this.readTxn))
-					txn.renew()
-				else
-					txn = this.readTxn = env.beginTxn(READING_TNX)
+				} else
+					txn = env.beginTxn(READING_TNX)
 				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
 				result = result && uncompressSync(result)
 				if (!writeTxn) {
-					txn.reset()
+					txn.abort()
 				}
 				this.bytesRead += result && result.length || 1
 				this.reads++
@@ -130,6 +128,8 @@ export function open(name, options): Database {
 				if (!this.writeTxn)
 					txn.commit()
 			} catch(error) {
+				if (this.writeTxn)
+					throw error // if we are in a transaction, the whole transaction probably needs to restart
 				handleError(error, this, txn, () => this.put(id, value))
 			}
 		},
@@ -147,6 +147,8 @@ export function open(name, options): Database {
 					txn.abort()
 					return false // calling remove on non-existent property is fine, but we will indicate its lack of existence with the return value
 				}
+				if (this.writeTxn)
+					throw error // if we are in a transaction, the whole transaction probably needs to restart
 				handleError(error, this, txn, () => this.remove(id))
 			}
 		},
@@ -166,10 +168,10 @@ export function open(name, options): Database {
 				const goToDirection = reverse ? 'goToPrev' : 'goToNext'
 				const getNextBlock = () => {
 					array = []
-					let txn
+					let txn, cursor
 					try {
 						txn = env.beginTxn(READING_TNX)
-						let cursor = new Cursor(txn, db, AS_BINARY)
+						cursor = new Cursor(txn, db, AS_BINARY)
 						if (reverse) {
 							// for reverse retrieval, goToRange is backwards because it positions at the key equal or *greater than* the provided key
 							let nextKey = cursor.goToRange(currentKey)
@@ -198,6 +200,11 @@ export function open(name, options): Database {
 						cursor.close()
 						txn.commit()
 					} catch(error) {
+						if (cursor) {
+							try {
+								cursor.close()
+							} catch(error) { }
+						}
 						handleError(error, this, txn, getNextBlock)
 					}
 				}
@@ -287,6 +294,8 @@ export function open(name, options): Database {
 				if (!this.writeTxn)
 					txn.commit()
 			} catch(error) {
+				if (this.writeTxn)
+					throw error // if we are in a transaction, the whole transaction probably needs to restart
 				handleError(error, this, txn, () => this.batch(operations))
 			}
 		},
