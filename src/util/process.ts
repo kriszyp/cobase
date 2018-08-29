@@ -80,6 +80,7 @@ function attachClasses(stream) {
 	}
 }
 function attachClass(stream, Class, processId) {
+	stream.pid = processId
 	const className = Class.name
 	let streams = streamsByClass.get(className)
 	if (!streams) {

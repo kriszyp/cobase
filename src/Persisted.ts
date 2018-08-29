@@ -18,7 +18,7 @@ const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
 const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // table metadata 2
-const REGISTERED_PROCESSES = Buffer.from([1, 4]) // table metadata 4
+const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
 const INITIALIZATION_SOURCE = 'is-initializing'
 export const INVALIDATED_ENTRY = { state: 'invalidated'}
 let globalDoesInitialization
@@ -309,16 +309,33 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this._ready
 	}
 
+	static clearAllData() {
+		let db = this.db
+		db.transaction(() => {
+			// we need to preserve the persistent metadata when we clear the db
+			const allMeta = Array.from(db.iterable({
+				start: Buffer.from([1, 0]),
+				end: Buffer.from([1, 5]),
+			}))
+			db.clear()
+			// restore the metadata
+			for (const { key, value } of allMeta) {
+				db.put(key, value)
+			}
+		})
+		console.info('Cleared the database', this.name, 'rebuilding')
+	}
+
 	static register(sourceCode?: { id?: string, version?: number }) {
 		// check the transform hash
 		if (sourceCode) {
 			let moduleFilename = sourceCode.id || sourceCode
 			if (sourceCode.version) {
 				// manually provide hash
-				this.transformVersion = sourceCode.version
+				this.version = sourceCode.version
 			} else if (typeof moduleFilename == 'string') {
 				// create a hash from the module source
-				this.transformVersion = fs.statSync(moduleFilename).mtime.getTime()
+				this.version = fs.statSync(moduleFilename).mtime.getTime()
 				let hmac = crypto.createHmac('sha256', 'cobase')
 				hmac.update(fs.readFileSync(moduleFilename, { encoding: 'utf8' }))
 			this.transformHash = hmac.digest('hex')
@@ -350,32 +367,51 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		this.instancesById.name = this.name
 		let doesInitialization = true
-		const processKey = Buffer.from([1, 5, process.pid >> 8, process.pid & 0xff])
+		const processKey = Buffer.from([1, 3, process.pid >> 8, process.pid & 0xff])
 		let initializingProcess
 		db.transaction(() => {
-			initializingProcess = db.get(Buffer.from([1, 6]))
+			initializingProcess = db.get(INITIALIZING_PROCESS_KEY)
 			initializingProcess = initializingProcess && +initializingProcess.toString()
 			this.otherProcesses = Array.from(db.iterable({
-				start: Buffer.from([1, 5]),
-				end: Buffer.from([1, 6]),
-			}).map(({key, value}) => (key[2] << 8) + key[3]))
+				start: Buffer.from([1, 3]),
+				end: INITIALIZING_PROCESS_KEY,
+			}).map(({key, value}) => (key[2] << 8) + key[3])).filter(pid => !isNaN(pid))
 			db.put(processKey, Buffer.from([])) // register process, in ready state
-			if (!initializingProcess) {
-				db.put(Buffer.from([1, 6]), Buffer.from(process.pid.toString()))
+			if (!initializingProcess || !this.otherProcesses.includes(initializingProcess)) {
+				initializingProcess = null
+				db.put(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
 			}
 		})
+		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
+		let stateDPack = db.getSync(DB_VERSION_KEY)
+		let didReset
+		let state = stateDPack && parse(stateDPack)
+		if (this.name.match(/Scope/))
+			console.log('DB starting state', this.name, state)
+		if (state) {
+			this.dbVersion = state.dbVersion
+			this.startVersion = state.startVersion
+		}
 		registerClass(this)
 		const doDataInitialization = () => {
 			const whenFinished = () => {
 				try {
+					if (this.name.match(/Scope/))
+						console.log('finished initialization for', this.name)
 					delete global.openTransactions[this.name]
-					db.remove(Buffer.from([1, 6]))
+					db.remove(INITIALIZING_PROCESS_KEY)
 				} catch (error) {
 					console.warn(error.toString())
 				}
 			}
 			try {
-				return when(this.initializeData(), whenFinished, whenFinished)
+				return when(this.initializeData(), () => {
+					this.updateDBVersion()
+					whenFinished()
+				}, (error) => {
+					console.error(error)
+					whenFinished()
+				})
 			} catch (error) {
 				whenFinished()
 				throw error
@@ -386,27 +422,30 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				let index = this.otherProcesses.indexOf(pid)
 				if (index > -1) {
 					this.otherProcesses.splice(index, 1)
-					db.remove(Buffer.from([1, 5, pid >> 8, pid & 0xff]))
+					db.remove(Buffer.from([1, 3, pid >> 8, pid & 0xff]))
 				}
 				if (initializingProcess == pid) {
+					let doInit
 					db.transaction(() => {
 						// make sure it is still the initializing process
-						initializingProcess = db.get(Buffer.from([1, 6]))
+						initializingProcess = db.get(Buffer.from([1, 4]))
 						initializingProcess = initializingProcess && +initializingProcess.toString()
 						if (initializingProcess == pid) {
 							// take over the initialization process
 							console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
-							db.put(Buffer.from([1, 6]), Buffer.from(process.pid.toString()))
-							doDataInitialization()
+							db.put(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
+							doInit = true
 						}
 					})
+					if (doInit) {
+						doDataInitialization()
+					}
 				}
 			})
 		}
 		// make sure these are inherited
 		this.currentWriteBatch = null
 		if (initializingProcess) {
-			//console.log('skipping data initialization for', this.name, 'handled in', initializingProcess)
 			return
 		}
 		(global.openTransactions || (global.openTransactions = {}))[this.name] = true
@@ -414,29 +453,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	static initializeData() {
 		const db = this.db
-		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
-		let stateDPack = db.getSync(DB_VERSION_KEY)
-		let didReset
-		//console.log('DB starting state', this.name, stateDPack)
-		let state = stateDPack && parse(stateDPack)
-		if (state && (state.dbVersion || state.transformHash) == this.transformVersion) {
-			this.startVersion = this.version = state.startVersion
+		if (this.dbVersion == this.version) {
+			// update to date
 		} else {
-			console.log('transform/database version mismatch, reseting db table', this.name, state && state.dbVersion, this.transformVersion)
-			this.startVersion = this.version = getNextVersion()
-			const clearDb = !!state // if there was previous state, clear out all entries
-			this.didReset = when(this.resetAll(clearDb), () => this.updateDBVersion())
-		}
-		return this.didReset
-	}
-
-	static findUntrackedInstances() {
-		for (let instance of this.instancesById.values()) {
-			if (instance._cachedValue && instance._cachedValue !== undefined) {
-				if (!expirationStrategy.cache.indexOf(instance)) {
-					console.log(instance.id, 'is untracked')
-				}
-			}
+			console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
+			this.startVersion = getNextVersion()
+			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
+			return when(this.resetAll(clearDb), () => clearDb)
 		}
 	}
 
@@ -564,7 +587,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let version = this.startVersion
 		this.db.put(DB_VERSION_KEY, serialize({
 			startVersion: version,
-			dbVersion: this.transformVersion
+			dbVersion: this.version
 		}))
 		return version
 	}
@@ -762,10 +785,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			let db = this.db
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			let isFullReset = this.startVersion > sinceVersion
+			if (this.name === 'Scope')
+				console.log('Scanning for updates from', sinceVersion, this.startVersion, this.lastVersion, isFullReset, this.name)
 			if (this.lastVersion && this.lastVersion <= sinceVersion && !isFullReset) {
 				return []
 			}
-			console.log('Scanning for updates from', sinceVersion, this.lastVersion, isFullReset, this.name)
 			const parser = createParser()
 			return db.iterable({
 				start: Buffer.from([10])
@@ -903,7 +927,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		const db = this.db
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
-		const processKey = Buffer.from([1, 5, process.pid >> 8, process.pid & 0xff])
+		const processKey = Buffer.from([1, 3, process.pid >> 8, process.pid & 0xff])
 		if (!this.isWriting) {
 			db.put(processKey, Buffer.from(this.lastVersion.toString()))
 			this.isWriting = true
@@ -1027,15 +1051,12 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static resetAll(clearDb) {
-		console.log('reset all for ', this.name)
+		console.log('reseting', this.name)
 		return Promise.resolve(spawn(function*() {
 			let version = this.startVersion = getNextVersion()
 			let allIds = yield this.fetchAllIds ? this.fetchAllIds() : []
 			if (clearDb) {
-				console.info('Closing the database to clear', this.name)
-				let db = this.db
-				yield db.clear()
-				console.info('Cleared the database', this.name, 'rebuilding')
+				this.clearAllData()
 			}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them
 			for (let id of allIds) {
 				if (this.instancesById.get(id)) {
@@ -1046,7 +1067,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
 				this.dbPut(id, this.prototype.serializeEntryValue(version, INVALIDATED_ENTRY), version)
 			}
-			console.info('Done reseting', this.name)
+			console.info('Cleared', this.name)
 		}.bind(this)))
 	}
 
@@ -1056,7 +1077,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		let version = this.version
 		const Class = this.constructor
 		if (this.shouldPersist !== false &&
-			!(event && event.sourceProcess && Class.otherProcesses.includes(event.sourceProcess))) { // if it came from another process we can count on it to have written the update
+			!(event && event.sourceProcess && // if it came from another process we can count on it to have written the update, check to make sure it is running against this table
+				(Class.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
+					Class.otherProcesses.some(otherProcessId => otherProcessId < process.pid) // otherwise, defer to the lowest number process to handle it
+				))) {
 			// storing as a version alone to indicate invalidation
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
@@ -1116,20 +1140,15 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static initializeData() {
-		const registered = super.initializeData()
-		if (this.doesInitialization === false) {
-			// we don't reset from this process if there is an updating process
-			return registered
-		}
-		return when(registered, () => {
+		const initialized = super.initializeData()
+		return when(initialized, () => {
 			let receivedPendingVersion = []
+			let isFullReset
+			let clearDb
 			for (let Source of this.Sources || []) {
 				let lastVersion = this.lastVersion
+
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(ids => {
-					if (ids.isFullReset) {
-						return when(this.resetAll(lastVersion > 0), // clear the old db if there are any entries
-							() => this.updateDBVersion())
-					}
 					//console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
@@ -1143,10 +1162,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
 			}
-			if (receivedPendingVersion.length > 0)
+			if (receivedPendingVersion.length > 0) {
 				return Promise.all(receivedPendingVersion)
+			}
 		})
-		return registered
 	}
 
 	static get whenProcessingComplete() {

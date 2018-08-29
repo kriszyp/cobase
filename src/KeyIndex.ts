@@ -12,8 +12,7 @@ const expirationStrategy = ExpirationStrategy.defaultInstance
 const DEFAULT_INDEXING_CONCURRENCY = 15
 const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
 const SEPARATOR_NEXT_BYTE = Buffer.from([31])
-const LAST_INDEXED_VERSION_KEY = Buffer.from([1, 2])
-const INDEXING_STATE = Buffer.from([1, 3])
+const INDEXING_STATE = Buffer.from([1, 5]) // a metadata key in the range the should be cleared on database clear
 const EMPTY_BUFFER = Buffer.from([])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 120
@@ -201,13 +200,12 @@ export const Index = ({ Source }) => {
 			}
 		}
 
-		static *rebuildIndex() {
+		static rebuildIndex() {
 			this.rebuilt = true
 			// restart from scratch
 			console.info('rebuilding index', this.name, 'Source version', Source.startVersion, 'index version')
 			// first cancel any existing indexing
-			yield this.db.clear()
-			yield this.db.put(LAST_INDEXED_VERSION_KEY, Buffer.from('0')) // indicates indexing has started
+			this.clearAllData()
 		}
 
 		static queue = new Map<any, IndexRequest>()
@@ -244,7 +242,7 @@ export const Index = ({ Source }) => {
 							}
 							if (pendingRequests.length > 0) {
 								indexingInProgress.push(Promise.all(pendingRequests).then(results => {
-									if (results.some(({ processedRemotely }) => processedRemotely)) {
+									if (results.some(({ indexed }) => indexed)) {
 										this.queue.delete(id)
 									} else {
 										sinceLastStateUpdate++
@@ -308,13 +306,12 @@ export const Index = ({ Source }) => {
 			const db = this.db
 			return db.transaction(() => {
 				const indexingState = parse(db.get(INDEXING_STATE)) || {}
-				if (!indexingState.processes)
-					indexingState.processes = new Map()
 				indexingState.processes.delete(process.pid)
-				if (indexingState.processes.size == 0) {
-					indexingState.version = lastIndexedVersion
-				}
+				//if (indexingState.processes.size == 0) {
+					indexingState.version = Math.max(lastIndexedVersion, indexingState.version || 0)
+				//}
 				db.put(INDEXING_STATE, serialize(indexingState))
+				console.log('saved final indexing state', indexingState, this.name)
 			})
 		}
 
@@ -331,11 +328,10 @@ export const Index = ({ Source }) => {
 				min = Math.min(version, min)
 				max = Math.max(version, max)
 			}
-			//console.log('getInstanceIdsAndVersionsSince for index', this.name, idsAndVersionsToReindex.length, min, max)
 			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 
 			if (lastIndexedVersion == 0 || idsAndVersionsToReindex.isFullReset) {
-				yield this.db.clear()
+				this.clearAllData()
 				this.updateDBVersion()
 			} else if (idsAndVersionsToReindex.length > 0) {
 				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
@@ -376,6 +372,8 @@ export const Index = ({ Source }) => {
 				indexingState.processes = new Map()
 			}
 			indexingState.processes.set(process.pid, indexedProgress)
+			indexingState.version = indexedProgress
+			this.db.put(INDEXING_STATE, serialize(indexingState))
 		}
 
 		static sendUpdates() {
@@ -443,7 +441,7 @@ export const Index = ({ Source }) => {
 		static resetAll() {
 			// rebuild index
 			console.log('Index', this.name, 'resetAll')
-			return Promise.resolve(spawn(this.rebuildIndex()))
+			return this.rebuildIndex()
 		}
 
 		static whenUpdatedInContext(context) {
@@ -476,7 +474,7 @@ export const Index = ({ Source }) => {
 			const context = currentContext
 			return when(this.constructor.whenUpdatedInContext(context), () => {
 				if (context)
-						context.setVersion(this.constructor.version)
+						context.setVersion(lastIndexedVersion)
 				return when(super.getValue(), (value) => {
 					expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
 					return value
@@ -526,7 +524,7 @@ export const Index = ({ Source }) => {
 		static sendRequestToIndex(pid, id, indexRequest) {
 			try {
 				if (!this.sendRequestToProcess) {
-					return { processedRemotely: false }
+					return { indexed: false }
 				}
 				return this.sendRequestToProcess(pid, {
 					id,
@@ -534,7 +532,7 @@ export const Index = ({ Source }) => {
 					previousVersion: indexRequest.previousVersion,
 				}).catch(error => {
 					console.warn(error)
-					return { processedRemotely: false }
+					return { indexed: false }
 				})
 			} catch(error) {
 				if (error.message.startsWith('No socket')) {
@@ -550,7 +548,7 @@ export const Index = ({ Source }) => {
 						}
 					})
 					// TODO: resumeIndex?
-					return { processedRemotely: false }
+					return { indexed: false }
 				}
 				throw error
 			}
@@ -565,11 +563,11 @@ export const Index = ({ Source }) => {
 					}
 					return new Promise(resolve =>
 						(updateInQueue.resolveOnCompletion || (updateInQueue.resolveOnCompletion = [])).push(resolve))
-						.then(() => ({ remotelyIndexed: true })) // reply when we have finished indexing this
+						.then(() => ({ indexed: true }) // reply when we have finished indexing this
 				}
 			}
 			return {
-				remotelyIndexed: false
+				indexed: false
 			}
 			// else return/reply that the indexing can go ahead, no conflicts here
 		}
@@ -582,14 +580,14 @@ export const Index = ({ Source }) => {
 				}
 				return event
 			}
-			if (this.otherProcesses && this.otherProcesses.includes(event.sourceProcess)) {
+			if (this.otherProcesses && event.sourceProcess && (this.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
+					this.otherProcesses.some(otherProcessId => otherProcessId < process.pid))) { // otherwise, defer to the lowest number process to handle it
 				// just skip these
 				return event
 			}
 			let context = currentContext
 			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
 
-			this.updateVersion()
 			let previousEntry = event.previousValues && event.previousValues.get(by)
 			let id = by && (typeof by === 'object' ? (by.constructor == this.Sources[0] && by.id) : by) // if we are getting an update from a source instance
 			if (id && !this.gettingAllIds) {
@@ -687,7 +685,7 @@ export const Index = ({ Source }) => {
 						event.sourceVersions[this.name] = lastIndexedVersion
 						super.updated(event, this)
 					})
-				this.whenProcessingComplete.version = this.version
+				this.whenProcessingComplete.version = lastIndexedVersion
 				this.whenFullyReadable = this.whenCommitted =
 					this.whenProcessingComplete.then(() => this)
 			}
