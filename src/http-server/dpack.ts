@@ -7,6 +7,7 @@ export const dpackMediaType = {
 			return content.length > 0 ? parse(content) : undefined // tolerate empty requests
 		} catch(error) {
 			console.error('Parse error', error.toString(), 'content-length', connection.request.headers['content-length'], 'content.length', content.length, 'content', content)
+			throw error
 		}
 	},
 	serialize(data, connection, parameters) {

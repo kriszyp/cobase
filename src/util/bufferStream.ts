@@ -1,18 +1,20 @@
 export let maxRequestBody = 10000000 // default to 10MB
 export function bufferStream(stream) {
 	return new Promise((resolve, reject) => {
-		var content = ''
+		var chunks = []
+		var length = 0
 		stream.on('data', (data) => {
-			content += data
-			if (content.length > maxRequestBody) {
+			chunks.push(data)
+			length += data.length
+			if (length > maxRequestBody) {
 				stream.connection.destroy()
-				const error = new Error('Request Entityt Too Large')
+				const error = new Error('Request Entity Too Large')
 				error.status = 413
 				reject(error)
 			}
 		})
 		stream.on('end', () => {
-			resolve(content)
+			resolve(Buffer.concat(chunks, length))
 		})
 	})
 }
