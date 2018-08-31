@@ -329,7 +329,9 @@ export const Index = ({ Source }) => {
 				max = Math.max(version, max)
 			}
 			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
-
+			if (this.name =='TermMasterByEnum') {
+				console.log('resumeIndex with', idsAndVersionsToReindex.length, 'to index')
+			}
 			if (lastIndexedVersion == 0 || idsAndVersionsToReindex.isFullReset) {
 				this.clearAllData()
 				this.updateDBVersion()
@@ -469,13 +471,13 @@ export const Index = ({ Source }) => {
 			this.cachedVersion = -1
 		}
 
-		getValue() {
+		valueOf() {
 			// First: ensure that all the source instances are up-to-date
 			const context = currentContext
 			return when(this.constructor.whenUpdatedInContext(context), () => {
 				if (context)
 						context.setVersion(lastIndexedVersion)
-				return when(super.getValue(), (value) => {
+				return when(super.valueOf(true), (value) => {
 					expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
 					return value
 				})
@@ -563,7 +565,7 @@ export const Index = ({ Source }) => {
 					}
 					return new Promise(resolve =>
 						(updateInQueue.resolveOnCompletion || (updateInQueue.resolveOnCompletion = [])).push(resolve))
-						.then(() => ({ indexed: true }) // reply when we have finished indexing this
+						.then(() => ({ indexed: true })) // reply when we have finished indexing this
 				}
 			}
 			return {

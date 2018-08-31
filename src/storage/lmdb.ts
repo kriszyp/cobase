@@ -144,7 +144,8 @@ export function open(name, options): Database {
 				return true // object found and deleted
 			} catch(error) {
 				if (error.message.startsWith('MDB_NOTFOUND')) {
-					txn.abort()
+					if (!this.writeTxn)
+						txn.abort()
 					return false // calling remove on non-existent property is fine, but we will indicate its lack of existence with the return value
 				}
 				if (this.writeTxn)
@@ -323,18 +324,20 @@ export function open(name, options): Database {
 		} catch(error) {
 		//	console.warn('txn already aborted')
 		}
+		try {
+			if (db.writeTxn)
+				db.writeTxn.abort()
+		} catch(error) {
+		//	console.warn('txn already aborted')
+		}
+		if (db.writeTxn)
+			db.writeTxn = null
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
 			if (db && db.readTxn) {
 				try {
 					db.readTxn.abort()
 				} catch(error) {}
 				db.readTxn = null // needs to be closed and recreated during resize
-			}
-			if (db && db.writeTxn) {
-				try {
-					db.writeTxn.abort()
-				} catch(error) {}
-				db.writeTxn = null // needs to be closed and recreated during resize
 			}
 			const newSize = env.info().mapSize * 4
 			console.log('Resizing database', name, 'to', newSize)
