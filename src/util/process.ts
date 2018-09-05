@@ -99,13 +99,16 @@ function attachClass(stream, Class, processId) {
 			let id = by && by.id
 			if (id && by === event.source) {
 				try {
-					stream.write({
+					const eventToSerialize = Object.assign({}, event, {
 						instanceId: id,
 						method: 'updated',
 						className,
 						type: event.type,
-						triggers: event.triggers,
 					})
+					delete eventToSerialize.visited
+					delete eventToSerialize.source
+					delete eventToSerialize.previousValues
+					stream.write(eventToSerialize)
 				} catch(error) {
 					// TODO: Not sure how we get in this state
 					console.warn(error)
