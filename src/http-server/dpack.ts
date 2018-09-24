@@ -13,8 +13,7 @@ export const dpackMediaType = {
 	serialize(data, connection, parameters) {
 		connection.response.headers['Transfer-Encoding'] = 'chunked'
 		var stream = createSerializeStream()
-		stream.write(data)
-		stream.end()
+		stream.end(data)
 		return stream
 	}
 }

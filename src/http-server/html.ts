@@ -17,8 +17,7 @@ export const htmlMediaType = {
 				push.call(stream, null)
 			}
 		}
-		stream.write(data)
-		stream.end()
+		stream.end(data)
 		return stream
 	}
 }

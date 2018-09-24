@@ -304,7 +304,7 @@ export function open(name, options): Database {
 			db.close()
 		},
 		clear() {
-			console.log('clearing db', name)
+			//console.log('clearing db', name)
 			try {
 				db.drop({
 					justFreePages: true,

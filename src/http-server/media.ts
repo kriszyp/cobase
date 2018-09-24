@@ -83,7 +83,11 @@ function serializer(returnValue, connection) {
 	} else {
 		responseHeaders['content-type'] = bestType
 	}
-	connection.response.body = connection.response.content = bestSerializer.serialize(returnValue, connection, bestParameters)
+	try {
+		connection.response.body = connection.response.content = bestSerializer.serialize(returnValue, connection, bestParameters)
+	} catch (error) {
+		connection.response.body = connection.response.content = 'Error serializing: ' + error.toString()
+	}
 }
 
 mediaTypes.set('text/dpack', dpackMediaType)

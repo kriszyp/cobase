@@ -697,14 +697,14 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (buffer) {
 			const parser = createParser()
 			parser.setSource(buffer.slice(0,24).toString(), 0)  // the lazy version only reads the first fews bits to get the version
-			const version = parser.readOpen()
+			const version = parser.read()
 			if (parser.hasMoreData()) {
 				const valueBuffer = buffer.slice(parser.getOffset())
 				if (valueBuffer.length === 1) {
 					// probably undefined, but either way, might as well do the parsing immediately
 					return {
 						version,
-						data: parser.readOpen(),
+						data: parser.read(),
 						buffer,
 					}
 				}
@@ -1248,6 +1248,55 @@ const checkInputTransform = {
 		}
 		return instance.transform.apply(instance, args)
 	}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 }
 secureAccess.checkPermissions = () => true
 import { Reduced } from './Reduced'

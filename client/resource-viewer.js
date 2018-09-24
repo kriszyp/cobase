@@ -11,12 +11,12 @@
 	}
 	document.getElementById('details').append(renderExpandedObject(dpack.parse(text)))
 })*/
-var data = ''
-window.nextData = function(nextData) {
-	data += nextData
+var source = ''
+window.nextData = function(nextChunk) {
+	source += nextChunk
 }
 window.finished = function() {
-	document.getElementById('details').append(renderExpandedObject(dpack.parse(data)))
+	document.getElementById('details').append(renderExpandedObject(window.data = dpack.parse(source)))
 }
 HTMLElement.prototype.append = alkali.append
 

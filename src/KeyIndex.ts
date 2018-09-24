@@ -308,10 +308,11 @@ export const Index = ({ Source }) => {
 				const indexingState = parse(db.get(INDEXING_STATE)) || {}
 				indexingState.processes.delete(process.pid)
 				//if (indexingState.processes.size == 0) {
-					indexingState.version = Math.max(lastIndexedVersion, indexingState.version || 0)
+					indexingState.version = Math.max(lastIndexedVersion, indexingState.version || 1)
 				//}
 				db.put(INDEXING_STATE, serialize(indexingState))
-				console.log('saved final indexing state', indexingState, this.name)
+				this.isRegisteredAsVersion = 0
+				//console.log('saved final indexing state', indexingState, this.name)
 			})
 		}
 
@@ -319,7 +320,7 @@ export const Index = ({ Source }) => {
 			// TODO: if it is over half the index, just rebuild
 			const db: Database = this.db
 			const indexingState = parse(db.get(INDEXING_STATE)) || {}
-			lastIndexedVersion = indexingState.version || 0
+			lastIndexedVersion = indexingState.version || 1
 			sourceVersions[Source.name] = lastIndexedVersion
 			const idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
 			let min = Infinity
@@ -332,7 +333,7 @@ export const Index = ({ Source }) => {
 			if (this.name =='TermMasterByEnum') {
 				console.log('resumeIndex with', idsAndVersionsToReindex.length, 'to index')
 			}
-			if (lastIndexedVersion == 0 || idsAndVersionsToReindex.isFullReset) {
+			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
 				this.clearAllData()
 				this.updateDBVersion()
 			} else if (idsAndVersionsToReindex.length > 0) {
@@ -497,9 +498,12 @@ export const Index = ({ Source }) => {
 				return spawn(this.resumeIndex())
 			})
 		}
-		static isConcurrentlyIndexing = false // are we concurrently processing, writing update version as we get them into the version map
+		static isRegisteredAsVersion = 0 // have we registered our process, and at what version
 		static whenAllConcurrentlyIndexing?: Promise<any> // promise if we are waiting for the initial indexing process to join the concurrent indexing mode
 		static checkAndUpdateProcessMap() {
+			if (this.isRegisteredAsVersion === lastIndexedVersion) {
+				return
+			}
 			const db = this.db
 			return db.transaction(() => {
 				const indexingState = parse(db.get(INDEXING_STATE)) || {}
@@ -511,6 +515,7 @@ export const Index = ({ Source }) => {
 					pendingProcesses = indexingState.processes
 				}
 				lastIndexedVersion = Math.max(lastIndexedVersion, indexingState.version || 0)
+				this.isRegisteredAsVersion = lastIndexedVersion
 				indexingState.processes.set(process.pid, lastIndexedVersion)
 
 				// otherwise this should be added to our queue, and processed when it is our turn
@@ -523,19 +528,25 @@ export const Index = ({ Source }) => {
 				return pendingProcesses
 			})
 		}
+		static pendingRequests = new Map()
 		static sendRequestToIndex(pid, id, indexRequest) {
 			try {
 				if (!this.sendRequestToProcess) {
 					return { indexed: false }
 				}
-				return this.sendRequestToProcess(pid, {
+				const request = {
 					id,
 					version: indexRequest.version,
 					previousVersion: indexRequest.previousVersion,
-				}).catch(error => {
+				}
+				this.pendingRequests.set(id + '-' + pid, {
+					pid,
+					request
+				})
+				return withTimeout(this.sendRequestToProcess(pid, request), 5000).catch(error => {
 					console.warn(error)
 					return { indexed: false }
-				})
+				}).finally(() => this.pendingRequests.delete(id + '-' + pid))
 			} catch(error) {
 				if (error.message.startsWith('No socket')) {
 					// clean up if the process/socket is dead
@@ -726,11 +737,15 @@ Index.getCurrentStatus = () => {
 	return allIndices.map(Index => ({
 		name: Index.name,
 		queued: Index.queue.size,
-		state: Index.state
+		state: Index.state,
+		pendingRequests: Array.from(Index.pendingRequests),
 	}))
 }
 const allIndices = []
 export default Index
+
+const withTimeout = (promise, ms) => Promise.race([promise, new Promise((resolve, reject) =>
+	setTimeout(() => reject(new Error('Timeout waiting for indexing synchronization')), ms))])
 
 let currentlyProcessing = new Set()
 
