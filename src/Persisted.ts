@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { createSerializer, serialize, parse, parseLazy, createParser } from 'dpack'
+import { createSerializer, serialize, parse, parseLazy, createParser, asBlock } from 'dpack'
 import * as lmdb from './storage/lmdb'
 import when from './util/when'
 import WeakValueMap from './util/WeakValueMap'
@@ -884,6 +884,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (this.shouldPersist !== false) {
 				let db = Class.db
 				let version = this[versionProperty]
+				this._cachedValue = value = asBlock(value)
 				data = this.serializeEntryValue(version, value)
 				Class.dbPut(this.id, data, version/*, (oldEntry) => {
 					// the check version so it will only write if the version matches (in case another process modified it) or it is new entry
@@ -983,7 +984,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	getValue() {
 		if (!this.readyState)
 			this.loadLatestLocalData()
-		return super.getValue()
+		return when(super.getValue(), (value) => this._cachedValue || value) // we use the cached value, since it should be a dpack block
 	}
 	patch(properties) {
 		return this.then((value) =>
@@ -1016,10 +1017,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static Sources: any[]
 	static fetchAllIds: () => {}[]
 
-	computeValue() {
-		return when(this.getValue(), () => null) // compute the value, but don't return anything, useful for the interprocess communication
-	}
-
 	getValue() {
 		let context = currentContext
 		if (!this.readyState)
@@ -1034,7 +1031,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}
 			return this.cachedValue
 		}
-		return super.getValue()
+		return when(super.getValue(), (value) => this._cachedValue || value) // we use the cached value, since it should be a dpack block
 	}
 
 	is(value, event) {

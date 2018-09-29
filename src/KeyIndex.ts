@@ -236,7 +236,7 @@ export const Index = ({ Source }) => {
 							for (const pid of indexRequest.pendingProcesses) {
 								// check to see if the version could be in conflict
 								let pendingProcessVersion = pendingProcesses.get(pid)
-								if (pendingProcessVersion < indexRequest.version) {
+								if (pendingProcessVersion < indexRequest.previousVersion) {
 									pendingRequests.push(this.sendRequestToIndex(pid, id, indexRequest))
 								}
 							}
