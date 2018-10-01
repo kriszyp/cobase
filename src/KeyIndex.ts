@@ -544,7 +544,7 @@ export const Index = ({ Source }) => {
 					request
 				})
 				return withTimeout(this.sendRequestToProcess(pid, request), 5000).catch(error => {
-					console.warn(error)
+					console.warn('Error on waiting for indexed', this.name, 'from process', pid, 'index request', request, error)
 					return { indexed: false }
 				}).finally(() => this.pendingRequests.delete(id + '-' + pid))
 			} catch(error) {

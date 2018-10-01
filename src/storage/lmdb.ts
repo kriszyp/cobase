@@ -56,6 +56,7 @@ export function open(name, options): Database {
 	openDB()
 	const cobaseDb = {
 		db,
+		env,
 		name,
 		bytesRead: 0,
 		bytesWritten: 0,
