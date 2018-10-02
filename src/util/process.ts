@@ -107,7 +107,10 @@ function attachClass(stream, Class, processId) {
 					})
 					delete eventToSerialize.visited
 					delete eventToSerialize.source
+					delete eventToSerialize.sources
 					delete eventToSerialize.previousValues
+					delete eventToSerialize.target
+					delete eventToSerialize.oldValue
 					stream.write(eventToSerialize)
 				} catch(error) {
 					// TODO: Not sure how we get in this state

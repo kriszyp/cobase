@@ -535,7 +535,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this._cachedVersion = undefined
 			this.constructor.instanceSetUpdated(event)
 		}
-		if (by === this) // skip reset
+		if (by === this || event.type === 'discovered') // skip reset
 			Variable.prototype.updated.apply(this, arguments)
 		else
 			super.updated(event, by)
@@ -747,7 +747,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			} else {
 				this.updateVersion()
 				this.readyState = 'no-local-data'
-			}			return entry
+			}
+			return entry
 		})
 		if (isSync)
 			return promise
@@ -902,7 +903,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				}*/)
 				if (newToCache) {
 					// fire an updated, if it is a new object
-					let event = new AddedEvent()
+					let event = new DiscoveredEvent()
 					event.triggers = [ INITIALIZATION_SOURCE ]
 					event.source = this
 					event.version = version
@@ -1237,6 +1238,11 @@ export function secureAccess<T>(Class: T): T & Secured {
 	return Class
 }
 
+class DiscoveredEvent extends AddedEvent {
+	type
+}
+DiscoveredEvent.prototype.type = 'discovered'
+
 const checkInputTransform = {
 	apply(instance, args) {
 		// if the main input is undefined, treat as deleted object and pass on the undefined without running the transform
@@ -1245,55 +1251,6 @@ const checkInputTransform = {
 		}
 		return instance.transform.apply(instance, args)
 	}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 secureAccess.checkPermissions = () => true
 import { Reduced } from './Reduced'
