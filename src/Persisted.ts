@@ -520,25 +520,26 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		this._initUpdate(event)
 
-		if (Class.updateWithPrevious) {
-			if (true/* isMultiProcess */) {
-				this.constructor.db.transaction(() => {
-					this.assignPreviousValue(event)
-					this.resetCache(event)
-				})
-			}
-		} else
-			this.resetCache(event)
-		if (event.type == 'deleted') {
-			this.readyState = 'no-local-data'
-			this._cachedValue = undefined
-			this._cachedVersion = undefined
-			this.constructor.instanceSetUpdated(event)
-		}
-		if (by === this || event.type === 'discovered') // skip reset
+		if (event.type === 'discovered') // skip reset
 			Variable.prototype.updated.apply(this, arguments)
-		else
+		else {
+			if (Class.updateWithPrevious) {
+				if (true/* isMultiProcess */) {
+					this.constructor.db.transaction(() => {
+						this.assignPreviousValue(event)
+						this.resetCache(event)
+					})
+				}
+			} else
+				this.resetCache(event)
+			if (event.type == 'deleted') {
+				this.readyState = 'no-local-data'
+				this._cachedValue = undefined
+				this._cachedVersion = undefined
+				this.constructor.instanceSetUpdated(event)
+			}
 			super.updated(event, by)
+		}
 		// notify class listeners too
 		for (let listener of this.constructor.listeners || []) {
 			listener.updated(event, this)
@@ -574,7 +575,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (by && by.constructor === Source) {
 				instance = this.for(by.id)
 				instance.updated(event, by)
-				return event
+				return event // we don't need to do do the static listeners here, as the instance listener will handle that
 			}
 		}
 		for (let listener of this.listeners || []) {

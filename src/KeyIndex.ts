@@ -84,12 +84,22 @@ export const Index = ({ Source }) => {
 						// the update yet. After we send the indexing request to the other processes, if any concurrently indexing process
 						// responds, it should mean that it has finished resolving and we can make another attempat at retrieving the previous state
 						// so we can properly sequence the indexing operations
-						console.warn('Indexing with previously invalidated state, re-retrieving previous state', id, this.name)
 						const previousEntity = entity.loadLocalData()
 						previousState = previousEntity.data
 						if (previousState === INVALIDATED_ENTRY) {
 							// TODO: if it is still invalidated, that may mean that another process snuck in another update. we may want to try requesting previous state again.
+							// But generally this is because an previous indexing process died, leaving invalidated entries in place.
 							previousState = undefined
+							console.warn('Indexing with previously invalidated state, re-retrieval failed', {
+								id, 
+								name: this.name,
+								sourece: Source.name,
+								previousVersion: indexRequest.previousVersion,
+								updatedPreviousVersion: previousEntity.version,
+								version: indexRequest.version,
+								now: Date.now(),
+							})
+
 						}
 						indexRequest.previousVersion = previousEntity.version
 					}
@@ -225,6 +235,7 @@ export const Index = ({ Source }) => {
 					console.log('Indexing', initialQueueSize, Source.name, 'for', this.name)
 				}
 				let indexingInProgress = []
+				let actionsInProgress = []
 				let sinceLastStateUpdate = 0
 				do {
 					if (this.nice > 0)
@@ -241,12 +252,12 @@ export const Index = ({ Source }) => {
 								}
 							}
 							if (pendingRequests.length > 0) {
-								indexingInProgress.push(Promise.all(pendingRequests).then(results => {
+								actionsInProgress.push(Promise.all(pendingRequests).then(results => {
 									if (results.some(({ indexed }) => indexed)) {
 										this.queue.delete(id)
 									} else {
 										sinceLastStateUpdate++
-										return spawn(this.indexEntry(id, indexRequest))
+										return indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
 									}
 								}))
 							} else { // no other processes that are processing a version that could be conflicting
@@ -261,10 +272,11 @@ export const Index = ({ Source }) => {
 						if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * cpuAdjustment) {
 							// we have process enough, commit our changes so far
 							this.onBeforeCommit && this.onBeforeCommit(id)
-							yield Promise.all(indexingInProgress)
-							let processedEntries = indexingInProgress.length
-							sinceLastStateUpdate = 0
+							let indexingStarted = indexingInProgress
 							indexingInProgress = []
+							sinceLastStateUpdate = 0
+							yield Promise.all(indexingStarted)
+							let processedEntries = indexingStarted.length
 							this.saveLatestVersion()
 							cpuUsage = process.cpuUsage()
 							let lastCpuUsage = cpuTotalUsage
@@ -285,7 +297,8 @@ export const Index = ({ Source }) => {
 							return
 						}
 					}
-					yield Promise.all(indexingInProgress)
+					yield Promise.all(actionsInProgress) // wait for any outstanding requests
+					yield Promise.all(indexingInProgress) // then wait for all indexing to finish everything
 					this.saveLatestVersion()
 				} while (queue.size > 0)
 				this.finishAsIndexer()
@@ -538,13 +551,14 @@ export const Index = ({ Source }) => {
 					id,
 					version: indexRequest.version,
 					previousVersion: indexRequest.previousVersion,
+					hasPreviousState: indexRequest.previousState !== INVALIDATED_ENTRY,
 				}
 				this.pendingRequests.set(id + '-' + pid, {
 					pid,
 					request
 				})
-				return withTimeout(this.sendRequestToProcess(pid, request), 5000).catch(error => {
-					console.warn('Error on waiting for indexed', this.name, 'from process', pid, 'index request', request, error)
+				return withTimeout(this.sendRequestToProcess(pid, request), 5000000).catch(error => {
+					console.warn('Error on waiting for indexed', this.name, 'from process', pid, 'index request', request, error.toString())
 					return { indexed: false }
 				}).finally(() => this.pendingRequests.delete(id + '-' + pid))
 			} catch(error) {
@@ -566,10 +580,10 @@ export const Index = ({ Source }) => {
 				throw error
 			}
 		}
-		static receiveRequest({ id, version, previousVersion }) {
-			const updateInQueue = this.queue.get(id)
+		static receiveRequest({ id, version, previousVersion, hasPreviousState }) {
+			const updateInQueue = this.queue.get(id);
 			if (updateInQueue) {
-				if (updateInQueue.previousVersion < previousVersion) {
+				if ((updateInQueue.previousVersion || 0) < previousVersion || !hasPreviousState) {
 					// we have an earlier starting point, keep ours
 					if (updateInQueue.version < version) {
 						// TODO: Update our entity?
@@ -620,6 +634,7 @@ export const Index = ({ Source }) => {
 						previousState: previousEntry && previousEntry.data,
 						previousVersion: previousEntry ? previousEntry.version : -1,
 						version: event.version,
+						now: Date.now(),
 						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
 					})
 					this.requestProcessing(DEFAULT_INDEXING_DELAY)
