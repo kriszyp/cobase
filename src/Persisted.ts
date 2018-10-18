@@ -886,7 +886,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (this.shouldPersist !== false) {
 				let db = Class.db
 				let version = this[versionProperty]
-				this._cachedValue = value = asBlock(value)
+				this._cachedValue = value = (value && typeof value === 'object') ? asBlock(value) : value
 				data = this.serializeEntryValue(version, value)
 				Class.dbPut(this.id, data, version/*, (oldEntry) => {
 					// the check version so it will only write if the version matches (in case another process modified it) or it is new entry
