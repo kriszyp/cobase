@@ -57,12 +57,12 @@ export default class ArrayLikeIterable {
 	filter(func) {
 		return this.map(element => func(element) ? element : SKIP)
 	}
-	_asArray: []
+	_asArray: any[] | Promise<{}>
 	toJSON() {
 		if (this._asArray && this._asArray.forEach) {
 			return this._asArray
 		}
-		throw new Error('Can not serialize async iteratables with first calling resolveJSON')
+		throw new Error('Can not serialize async iteratables without first calling resolveJSON')
 		//return Array.from(this)
 	}
 	get asArray() {

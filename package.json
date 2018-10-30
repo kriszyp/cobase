@@ -2,7 +2,7 @@
   "name": "cobase",
   "author": "Kris Zyp",
   "version": "0.3.27",
-  "description": "Compositional data stores of reactive JavaScript transform, index, reduce, and join functions, built on NodeJS, Alkali, and LevelDB",
+  "description": "Compositional data stores of reactive JavaScript transform, index, reduce, and join functions, built on NodeJS, Alkali, and LMDB",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -41,6 +41,7 @@ suite.only('Process', function() {
 			return sendMessage('change10').then(() => delay(10)).then(() =>
 				Promise.all([
 					TestProcessByName.for('change a').then(value => {
+						debugger
 						assert.equal(value.length, 0)
 					}),
 					TestProcessByName.for('change b').then(value => {

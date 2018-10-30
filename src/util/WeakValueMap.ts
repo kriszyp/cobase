@@ -31,7 +31,7 @@ try {
 } catch (error) {
 	console.warn('No weak value map available, this can be used for development, but weak value maps should be enabled for production use', error.toString())
 	WeakValueMap = Map
-	Map.getStatus = function() {
+	WeakValueMap.getStatus = function() {
 		return 'WeakValueMap failed to load'
 	}
 }
