@@ -57,7 +57,7 @@ export default class ArrayLikeIterable {
 	filter(func) {
 		return this.map(element => func(element) ? element : SKIP)
 	}
-	_asArray: Promise<{}[]>
+	_asArray: []
 	toJSON() {
 		if (this._asArray && this._asArray.forEach) {
 			return this._asArray

@@ -91,7 +91,7 @@ export const Index = ({ Source }) => {
 							// But generally this is because an previous indexing process died, leaving invalidated entries in place.
 							previousState = undefined
 							console.warn('Indexing with previously invalidated state, re-retrieval failed', {
-								id, 
+								id,
 								name: this.name,
 								sourece: Source.name,
 								previousVersion: indexRequest.previousVersion,

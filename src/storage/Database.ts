@@ -4,13 +4,14 @@ export interface Database {
 	getSync(id, asBuffer?): any
 	get(id): Promise<any>
 	putSync(id, value): void
-	put(id, value): Promise<void>
+	put(id, value): void
 	removeSync(id): void
-	remove(id): Promise<void>
+	remove(id): void
 	iterable(options: IterableOptions): ArrayLikeIterable
-	batch(operations: OperationsArray): Promise<void>
-	close(): Promise<void>
-	clear(): Promise<void>
+	batch(operations: OperationsArray): void
+	close(): void
+	clear(): void
+	transaction(executor: () => void): void
 }
 export interface IterableOptions {
 	start: Buffer,

@@ -396,9 +396,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		const doDataInitialization = () => {
 			const whenFinished = () => {
 				try {
-					if (this.name.match(/Scope/))
-						console.log('finished initialization for', this.name)
-					delete global.openTransactions[this.name]
 					db.remove(INITIALIZING_PROCESS_KEY)
 				} catch (error) {
 					console.warn(error.toString())
@@ -448,7 +445,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (initializingProcess) {
 			return
 		}
-		(global.openTransactions || (global.openTransactions = {}))[this.name] = true
 		return doDataInitialization()
 	}
 	static initializeData() {
@@ -507,10 +503,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			event.triggers = [ context.connectionId ]
 		}
 
-		let Class = this.constructor
+		let Class = this.constructor as PersistedType
 		if (event.type === 'added') {
 			// if we are being notified of ourself being created, ignore it
-			this.constructor.instanceSetUpdated(event)
+			Class.instanceSetUpdated(event)
 			if (this.readyState === 'loading-local-data') {
 				return event
 			}
@@ -536,18 +532,18 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				this.readyState = 'no-local-data'
 				this._cachedValue = undefined
 				this._cachedVersion = undefined
-				this.constructor.instanceSetUpdated(event)
+				Class.instanceSetUpdated(event)
 			}
 			super.updated(event, by)
 		}
 		// notify class listeners too
-		for (let listener of this.constructor.listeners || []) {
+		for (let listener of Class.listeners || []) {
 			listener.updated(event, this)
 		}
 		if (!context || !context.expectedVersions) {
 			context = DEFAULT_CONTEXT
 		}
-		context.expectedVersions[this.constructor.name] = event.version
+		context.expectedVersions[Class.name] = event.version
 		const whenUpdateProcessed = event.whenUpdateProcessed
 		if (whenUpdateProcessed) {
 			this.whenUpdateProcessed = whenUpdateProcessed
@@ -689,7 +685,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	loadLocalData() {
-		let Class = this.constructor
+		let Class = this.constructor as PersistedType
 		let db = Class.db
 		return this.parseEntryValue(Class.db.get(toBufferKey(this.id)))
 	}
@@ -882,7 +878,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			let data = ''
 			let result
 
-			let Class = this.constructor
+			let Class = this.constructor as PersistedType
 			if (this.shouldPersist !== false) {
 				let db = Class.db
 				let version = this[versionProperty]
@@ -924,7 +920,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return serializer.getSerialized()
 	}
 
-	static dbPut(key, value, version, checkVersion) {
+	static dbPut(key, value?, version?, checkVersion?) {
 		if (typeof value != 'object' && value) {
 			value = Buffer.from(value.toString())
 		}
@@ -1010,6 +1006,15 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 
 export default Persisted
 export const Persistable = MakePersisted(Transform)
+interface PersistedType extends Function {
+	dbPut(id, value?, version?): void
+	otherProcesses: any[]
+	instanceSetUpdated(event): any
+	updated(event, by): any
+	db: any
+	updateWithPrevious: boolean
+	listeners: Function[]
+}
 
 export class Cached extends KeyValued(MakePersisted(Transform), {
 	valueProperty: 'cachedValue',
@@ -1074,7 +1079,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		this._cachedValue = undefined
 		this.cachedVersion = undefined
 		let version = this.version
-		const Class = this.constructor
+		const Class = this.constructor as PersistedType
 		if (this.shouldPersist !== false &&
 			!(event && event.sourceProcess && // if it came from another process we can count on it to have written the update, check to make sure it is running against this table
 				(Class.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
@@ -1095,6 +1100,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return checkInputTransform
 	}
 
+	static _version: number
 	static get version() {
 		if (this.Sources) {
 			return Math.max(this._version || 1, ...(this.Sources.map(Source => Source.version)))
@@ -1105,8 +1111,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static set version(version) {
 		this._version = version
 	}
+	static returnsAsyncIterables: boolean
 
-	static from(...Sources: Array<Function | {notifies: () => any, for: (id: any) => any}>) {
+	static from(...Sources: Array<Function & {notifies: () => any, for: (id: any) => any, returnsAsyncIterables: boolean}>) {
 		if (!Sources[0]) {
 			throw new Error('No source provided')
 		}
