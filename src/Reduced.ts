@@ -174,8 +174,8 @@ export class Reduced extends Cached {
 				if (data) {
 					const parser = createParser()
 					parser.setSource(data.slice(0, 28).toString(), 0)  // the lazy version only reads the first fews bits to get the version
-					const version = parser.readOpen()
-					level = parser.hasMoreData() && parser.readOpen()
+					const version = parser.read()
+					level = parser.hasMoreData() && parser.read()
 				} else {
 					return // no entry, no levels
 				}
@@ -199,8 +199,8 @@ export class Reduced extends Cached {
 		if (buffer) {
 			const parser = createParser()
 			parser.setSource(buffer.slice(0, 28).toString(), 0)  // the lazy version only reads the first fews bits to get the version
-			const version = parser.readOpen()
-			this.rootLevel = parser.hasMoreData() && parser.readOpen()
+			const version = parser.read()
+			this.rootLevel = parser.hasMoreData() && parser.read()
 			if (parser.hasMoreData()) {
 				return {
 					version,

@@ -3,7 +3,7 @@ const { TestProcess, TestProcessByName } = require('./model/TestProcess')
 const { removeSync } = require('fs-extra')
 const { fork } = require('child_process')
 let childProcess
-suite.only('Process', function() {
+suite('Process', function() {
 	this.timeout(2000000)
 	Persisted.dbFolder = 'tests/db'
 //	Persistable.dbFolder = 'tests/db'
@@ -34,14 +34,13 @@ suite.only('Process', function() {
 			})
 		})
 	})
-	test.only('run-in-process with index', () => {
+	test('run-in-process with index', () => {
 		return sendMessage('put10').then(() => {
 			console.log('got response for index of ten')
 			TestProcess.for(10).put({ name: 'change a' })
 			return sendMessage('change10').then(() => delay(10)).then(() =>
 				Promise.all([
 					TestProcessByName.for('change a').then(value => {
-						debugger
 						assert.equal(value.length, 0)
 					}),
 					TestProcessByName.for('change b').then(value => {

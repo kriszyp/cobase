@@ -559,6 +559,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	resetCache(event) {
+		this._cachedValue = undefined
+		this.readyState = null
 	}
 
 	static updated(event, by?) {

@@ -200,6 +200,8 @@ export const Index = ({ Source }) => {
 			}
 			if (operations.length > 0) {
 				this.db.batch(operations)
+			}
+			if (updatedIndexEntries.size > 0) { // note that it is possible for zero index changes to occur, but the data to still change, when using references
 				this.sendUpdates()
 			}
 			this.queue.delete(id)
