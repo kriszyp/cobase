@@ -394,9 +394,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		registerClass(this)
 		const doDataInitialization = () => {
+			//console.log('start data initialization', this.name)
+			this.lastVersion = Math.max(this.lastVersion, +db.getSync(LAST_VERSION_IN_DB_KEY) || 0) // re-retrieve this, it could have changed since we got a lock
 			const whenFinished = () => {
 				try {
 					db.remove(INITIALIZING_PROCESS_KEY)
+					//console.log('finished data initialization', this.name)
 				} catch (error) {
 					console.warn(error.toString())
 				}
@@ -588,6 +591,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			startVersion: version,
 			dbVersion: this.version
 		}))
+		this.db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
 		return version
 	}
 
@@ -1073,7 +1077,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
 				this.dbPut(id, this.prototype.serializeEntryValue(version, INVALIDATED_ENTRY), version)
 			}
-			console.info('Cleared', this.name)
+			console.info('Finished reseting', this.name)
 		}.bind(this)))
 	}
 

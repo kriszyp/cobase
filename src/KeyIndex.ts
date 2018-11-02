@@ -93,10 +93,11 @@ export const Index = ({ Source }) => {
 							console.warn('Indexing with previously invalidated state, re-retrieval failed', {
 								id,
 								name: this.name,
-								sourece: Source.name,
+								source: Source.name,
 								previousVersion: indexRequest.previousVersion,
 								updatedPreviousVersion: previousEntity.version,
 								version: indexRequest.version,
+
 								now: Date.now(),
 							})
 
@@ -349,6 +350,7 @@ export const Index = ({ Source }) => {
 				console.log('resumeIndex with', idsAndVersionsToReindex.length, 'to index')
 			}
 			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
+				console.log('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
 				this.clearAllData()
 				this.updateDBVersion()
 			} else if (idsAndVersionsToReindex.length > 0) {
@@ -632,6 +634,9 @@ export const Index = ({ Source }) => {
 						for (let trigger of event.triggers)
 							indexRequest.triggers.add(trigger)
 				} else {
+					if (previousEntry && global.workerType === 'http') {
+						debugger
+					}
 					this.queue.set(id, indexRequest = {
 						previousState: previousEntry && previousEntry.data,
 						previousVersion: previousEntry ? previousEntry.version : -1,
