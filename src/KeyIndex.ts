@@ -15,7 +15,7 @@ const SEPARATOR_NEXT_BYTE = Buffer.from([31])
 const INDEXING_STATE = Buffer.from([1, 5]) // a metadata key in the range the should be cleared on database clear
 const EMPTY_BUFFER = Buffer.from([])
 const INDEXING_MODE = { indexing: true }
-const DEFAULT_INDEXING_DELAY = 120
+const DEFAULT_INDEXING_DELAY = 60
 const INITIALIZATION_SOURCE = 'is-initializing'
 
 export interface IndexRequest {
@@ -221,6 +221,11 @@ export const Index = ({ Source }) => {
 			this.clearAllData()
 		}
 
+		static reset() {
+			this.rebuildIndex()
+			return spawn(this.resumeIndex())
+		}
+
 		static queue = new Map<any, IndexRequest>()
 		static *processQueue() {
 			this.state = 'processing'
@@ -229,7 +234,7 @@ export const Index = ({ Source }) => {
 			}
 			let cpuUsage = process.cpuUsage()
 			let cpuTotalUsage = cpuUsage.user + cpuUsage.system
-			let cpuAdjustment = 2
+			let speedAdjustment = 2
 			try {
 				let queue = this.queue
 				let initialQueueSize = queue.size
@@ -272,7 +277,7 @@ export const Index = ({ Source }) => {
 							indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
 						}
 
-						if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * cpuAdjustment) {
+						if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * speedAdjustment) {
 							// we have process enough, commit our changes so far
 							this.onBeforeCommit && this.onBeforeCommit(id)
 							let indexingStarted = indexingInProgress
@@ -284,7 +289,8 @@ export const Index = ({ Source }) => {
 							cpuUsage = process.cpuUsage()
 							let lastCpuUsage = cpuTotalUsage
 							cpuTotalUsage = cpuUsage.user + cpuUsage.system
-							cpuAdjustment = (cpuAdjustment + 40000 / (cpuTotalUsage - lastCpuUsage + 10000)) / 2
+							// calculate an indexing adjustment based on cpu usage and queue size (which we don't want to get too big)
+							speedAdjustment = (speedAdjustment + 40000 / (cpuTotalUsage - lastCpuUsage + 10000) + queue.size / 1000) / 2
 							/* Can be used to measure performance
 							let [seconds, billionths] = process.hrtime(lastStart)
 							lastStart = process.hrtime()
