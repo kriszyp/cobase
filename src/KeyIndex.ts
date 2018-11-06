@@ -263,6 +263,7 @@ export const Index = ({ Source }) => {
 								actionsInProgress.push(Promise.all(pendingRequests).then(results => {
 									if (results.some(({ indexed }) => indexed)) {
 										this.queue.delete(id)
+										lastIndexedVersion = Math.max(indexRequest.version, lastIndexedVersion)
 									} else {
 										sinceLastStateUpdate++
 										return indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
@@ -353,7 +354,7 @@ export const Index = ({ Source }) => {
 			}
 			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 			if (this.name =='TermMasterByEnum') {
-				console.log('resumeIndex with', idsAndVersionsToReindex.length, 'to index')
+				console.log('resumeIndex', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
 			}
 			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
 				console.log('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
@@ -500,7 +501,7 @@ export const Index = ({ Source }) => {
 			const context = currentContext
 			return when(this.constructor.whenUpdatedInContext(context), () => {
 				if (context)
-						context.setVersion(lastIndexedVersion)
+					context.setVersion(lastIndexedVersion)
 				return when(super.valueOf(true), (value) => {
 					expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
 					return value
@@ -521,7 +522,7 @@ export const Index = ({ Source }) => {
 				return spawn(this.resumeIndex())
 			})
 		}
-		static isRegisteredAsVersion = 0 // have we registered our process, and at what version
+		static isRegisteredAsVersion = -1 // have we registered our process, and at what version
 		static whenAllConcurrentlyIndexing?: Promise<any> // promise if we are waiting for the initial indexing process to join the concurrent indexing mode
 		static checkAndUpdateProcessMap() {
 			if (this.isRegisteredAsVersion === lastIndexedVersion) {
