@@ -301,7 +301,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (!this.hasOwnProperty('_ready')) {
 			let resolver
 			this._ready = new Promise(resolve => resolver = resolve)
-			resolver(this.initialize())
+			const initializeReturn = this.initialize()
+			resolver(initializeReturn)
 			this._ready.then(() => {
 				this.initialized = true
 			})
@@ -366,7 +367,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			Source.notifies(this)
 		}
 		this.instancesById.name = this.name
-		let doesInitialization = true
+		let doesInitialization = Persisted.doesInitialization
 		const processKey = Buffer.from([1, 3, process.pid >> 8, process.pid & 0xff])
 		let initializingProcess
 		db.transaction(() => {
@@ -377,10 +378,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				end: INITIALIZING_PROCESS_KEY,
 			}).map(({key, value}) => (key[2] << 8) + key[3])).filter(pid => !isNaN(pid))
 			db.put(processKey, Buffer.from([])) // register process, in ready state
-			if (!initializingProcess || !this.otherProcesses.includes(initializingProcess)) {
+			/*if (!initializingProcess || !this.otherProcesses.includes(initializingProcess)) {
 				initializingProcess = null
 				db.put(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
-			}
+			}*/
 		})
 		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 		let stateDPack = db.getSync(DB_VERSION_KEY)
@@ -406,6 +407,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 			try {
 				return when(this.initializeData(), () => {
+					console.log('Finished initializeData', this.name)
 					this.updateDBVersion()
 					whenFinished()
 				}, (error) => {
@@ -423,7 +425,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				if (index > -1) {
 					this.otherProcesses.splice(index, 1)
 					db.remove(Buffer.from([1, 3, pid >> 8, pid & 0xff]))
-				}
+				}/*
 				if (initializingProcess == pid) {
 					let doInit
 					db.transaction(() => {
@@ -440,12 +442,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					if (doInit) {
 						doDataInitialization()
 					}
-				}
+				}*/
 			})
 		}
 		// make sure these are inherited
 		this.currentWriteBatch = null
-		if (initializingProcess) {
+		if (/*initializingProcess || */!Persisted.doesInitialization) {
 			return
 		}
 		return doDataInitialization()
@@ -785,7 +787,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	* Iterate through all instances to find instances since the given version
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
+		console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => {
+			console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let db = this.db
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			let isFullReset = this.startVersion > sinceVersion

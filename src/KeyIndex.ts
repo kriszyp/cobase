@@ -1,4 +1,4 @@
-import { spawn, currentContext, VArray, ReplacedEvent, UpdateEvent } from 'alkali'
+import { spawn, currentContext, VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
 import { serialize, parse } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
@@ -344,8 +344,16 @@ export const Index = ({ Source }) => {
 			const db: Database = this.db
 			const indexingState = parse(db.get(INDEXING_STATE)) || {}
 			lastIndexedVersion = indexingState.version || 1
+			//console.log('resumeIndex', this.name, 'starting from', lastIndexedVersion)
 			sourceVersions[Source.name] = lastIndexedVersion
-			const idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
+			this.loadingUpdates = true
+			this.queue.clear()
+			let idsAndVersionsToReindex
+			try {
+				idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
+			} finally {
+				this.loadingUpdates = false
+			}
 			let min = Infinity
 			let max = 0
 			for (let { id, version } of idsAndVersionsToReindex) {
@@ -353,9 +361,6 @@ export const Index = ({ Source }) => {
 				max = Math.max(version, max)
 			}
 			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
-			if (this.name =='TermMasterByEnum') {
-				console.log('resumeIndex', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
-			}
 			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
 				console.log('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
 				this.clearAllData()
@@ -487,7 +492,19 @@ export const Index = ({ Source }) => {
 		// static returnsAsyncIterables = true // maybe at some point default this to on
 
 		static getInstanceIdsAndVersionsSince(version) {
-			// no version tracking with indices
+			// There is no version tracking with indices
+			// however, if the request is for everything, we can fulfill that by just returning
+			// all of our ids, once we are ready
+			//console.log('getInstanceIdsAndVersionsSince', this.name, version)
+			if (version <= 1) {
+				return this.ready.then(() => {
+					//console.log('getInstanceIdsAndVersionsSince',this.name, 'ready and getting ids since', version)
+					return when(this.getInstanceIds(), ids => ids.map(id => ({
+						id,
+						version: getNextVersion()
+					})))
+				})
+			} // else return nothing
 			return Promise.resolve([])
 		}
 
@@ -515,7 +532,7 @@ export const Index = ({ Source }) => {
 				this.updatingProcessModule = this.Sources[0].updatingProcessModule
 			}*/
 			allIndices.push(this)
-			super.initialize(module)
+			return super.initialize(module)
 		}
 		static initializeData() {
 			return when(super.initializeData(), () => {
@@ -555,6 +572,7 @@ export const Index = ({ Source }) => {
 		static pendingRequests = new Map()
 		static sendRequestToIndex(pid, id, indexRequest) {
 			try {
+				//console.log('sendRequestToIndex', id, this.name, 'version', indexRequest.version, 'previousVersion', indexRequest.previousVersion)
 				if (!this.sendRequestToProcess) {
 					return { indexed: false }
 				}
@@ -571,7 +589,10 @@ export const Index = ({ Source }) => {
 				return withTimeout(this.sendRequestToProcess(pid, request), 5000000).catch(error => {
 					console.warn('Error on waiting for indexed', this.name, 'from process', pid, 'index request', request, error.toString())
 					return { indexed: false }
-				}).finally(() => this.pendingRequests.delete(id + '-' + pid))
+				}).finally((indexed) => {
+					this.pendingRequests.delete(id + '-' + pid)
+					//console.log('sendRequestToIndex finished', id, this.name, indexed)
+				})
 			} catch(error) {
 				if (error.message.startsWith('No socket')) {
 					// clean up if the process/socket is dead
@@ -599,11 +620,14 @@ export const Index = ({ Source }) => {
 					if (updateInQueue.version < version) {
 						// TODO: Update our entity?
 					}
+					//console.log('receiveRequest', id, this.name, 'version', version, 'previousVersion', previousVersion, 'will handle')
 					return new Promise(resolve =>
 						(updateInQueue.resolveOnCompletion || (updateInQueue.resolveOnCompletion = [])).push(resolve))
 						.then(() => ({ indexed: true })) // reply when we have finished indexing this
 				}
 			}
+			//console.log('receiveRequest', id, this.name, 'version', version, 'previousVersion', previousVersion, 'but not handling')
+
 			return {
 				indexed: false
 			}
@@ -618,16 +642,21 @@ export const Index = ({ Source }) => {
 				}
 				return event
 			}
-			if (this.otherProcesses && event.sourceProcess && (this.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
-					this.otherProcesses.some(otherProcessId => otherProcessId < process.pid))) { // otherwise, defer to the lowest number process to handle it
-				// just skip these
-				return event
+			if (this.loadingUpdates) {
+				return // ignore events while we are waiting for the upstream source to initialize data
 			}
 			let context = currentContext
 			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
 
 			let previousEntry = event.previousValues && event.previousValues.get(by)
 			let id = by && (typeof by === 'object' ? (by.constructor == this.Sources[0] && by.id) : by) // if we are getting an update from a source instance
+			if (this.otherProcesses && event.sourceProcess && 
+				!(id && this.queue.has(id)) && // if it is in our queue, we need to update the version number in our queue
+				(this.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
+					this.otherProcesses.some(otherProcessId => otherProcessId < process.pid))) { // otherwise, defer to the lowest number process to handle it
+				// we can skip these (unless they are in are queue, then we need to update)
+				return event
+			}
 			if (id && !this.gettingAllIds) {
 				this.checkAndUpdateProcessMap()
 				// queue up processing the event
@@ -735,7 +764,7 @@ export const Index = ({ Source }) => {
 		}
 
 
-		static getInstanceIds(range: IterableOptions) {
+		static getInstanceIds(range?: IterableOptions) {
 			let db = this.db
 			let options: IterableOptions = {
 				start: Buffer.from([2]),
