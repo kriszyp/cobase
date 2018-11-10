@@ -17,7 +17,7 @@ const EMPTY_BUFFER = Buffer.from([])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 60
 const INITIALIZATION_SOURCE = 'is-initializing'
-
+const INITIALIZATION_SOURCE_SET = new Set([INITIALIZATION_SOURCE])
 export interface IndexRequest {
 	previousState?: any
 	previousVersion?: number
@@ -32,6 +32,20 @@ interface IndexEntryUpdate {
 	sources: Set<any>
 	triggers?: Set<any>
 }
+
+class InitializingIndexRequest implements IndexRequest {
+	version: number
+	constructor(version) {
+		this.version = version
+	}
+	get triggers() {
+		return INITIALIZATION_SOURCE_SET
+	}
+	get previousVersion() {
+		return -1
+	}
+}
+
 export const Index = ({ Source }) => {
 	Source.updateWithPrevious = true
 	let lastIndexedVersion = 0
@@ -360,13 +374,14 @@ export const Index = ({ Source }) => {
 				min = Math.min(version, min)
 				max = Math.max(version, max)
 			}
-			const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
 				console.log('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
 				this.clearAllData()
 				this.updateDBVersion()
 			} else if (idsAndVersionsToReindex.length > 0) {
 				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
+				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
+				// clear out all the items that we are indexing, since we don't have their previous state
 				yield db.iterable({
 					start: Buffer.from([2])
 				}).map(({ key, value }) => {
@@ -378,13 +393,12 @@ export const Index = ({ Source }) => {
 			} else {
 				return
 			}
+			this.checkAndUpdateProcessMap()
+
 			for (let { id, version } of idsAndVersionsToReindex) {
 				if (!version)
 					console.log('resuming without version',this.name, id)
-				const event = new ReplacedEvent()
-				event.version = version
-				event.triggers = new Set([INITIALIZATION_SOURCE])
-				this.updated(event, id)
+				this.queue.set(id, new InitializingIndexRequest(version))
 			}
 			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}

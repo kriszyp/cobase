@@ -378,10 +378,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				end: INITIALIZING_PROCESS_KEY,
 			}).map(({key, value}) => (key[2] << 8) + key[3])).filter(pid => !isNaN(pid))
 			db.put(processKey, Buffer.from([])) // register process, in ready state
-			/*if (!initializingProcess || !this.otherProcesses.includes(initializingProcess)) {
+			if (!initializingProcess || !this.otherProcesses.includes(initializingProcess)) {
 				initializingProcess = null
 				db.put(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
-			}*/
+			}
 		})
 		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 		let stateDPack = db.getSync(DB_VERSION_KEY)
@@ -407,7 +407,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 			try {
 				return when(this.initializeData(), () => {
-					console.log('Finished initializeData', this.name)
+					//console.log('Finished initializeData', this.name)
 					this.updateDBVersion()
 					whenFinished()
 				}, (error) => {
@@ -419,13 +419,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				throw error
 			}
 		}
+		let whenEachProcess = []
 		for (const pid of this.otherProcesses) {
-			addProcess(pid, this).catch(() => {
+			whenEachProcess.push(addProcess(pid, this).catch(() => {
 				let index = this.otherProcesses.indexOf(pid)
 				if (index > -1) {
 					this.otherProcesses.splice(index, 1)
 					db.remove(Buffer.from([1, 3, pid >> 8, pid & 0xff]))
-				}/*
+				}
 				if (initializingProcess == pid) {
 					let doInit
 					db.transaction(() => {
@@ -440,15 +441,15 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						}
 					})
 					if (doInit) {
-						doDataInitialization()
+						return doDataInitialization()
 					}
-				}*/
-			})
+				}
+			}))
 		}
 		// make sure these are inherited
 		this.currentWriteBatch = null
-		if (/*initializingProcess || */!Persisted.doesInitialization) {
-			return
+		if (initializingProcess/* || !Persisted.doesInitialization*/) {
+			return whenEachProcess.length > 0 && Promise.all(whenEachProcess)
 		}
 		return doDataInitialization()
 	}
@@ -787,9 +788,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	* Iterate through all instances to find instances since the given version
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
-		console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
+		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => {
-			console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
+			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let db = this.db
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			let isFullReset = this.startVersion > sinceVersion
