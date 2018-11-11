@@ -305,14 +305,14 @@ export const Index = ({ Source }) => {
 							let lastCpuUsage = cpuTotalUsage
 							cpuTotalUsage = cpuUsage.user + cpuUsage.system
 							// calculate an indexing adjustment based on cpu usage and queue size (which we don't want to get too big)
-							speedAdjustment = (speedAdjustment + 40000 / (cpuTotalUsage - lastCpuUsage + 10000) + queue.size / 1000) / 2
+							speedAdjustment = (speedAdjustment + 40000 / (cpuTotalUsage - lastCpuUsage + 10000)) / 2
 							/* Can be used to measure performance
 							let [seconds, billionths] = process.hrtime(lastStart)
 							lastStart = process.hrtime()
 							if (Math.random() > 0.95)
 								console.log('processed', processedEntries, 'for', this.name, 'in', seconds + billionths/1000000000, 'secs, waiting', this.nice/ 1000) */
 							if (this.nice > 0)
-								yield this.delay(this.nice) // short delay for other processing to occur
+								yield this.delay(Math.round(this.nice * 1000 / (queue.size + 1000))) // short delay for other processing to occur
 						}
 
 						if (this.cancelIndexing) {
