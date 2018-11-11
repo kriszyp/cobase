@@ -360,14 +360,10 @@ export const Index = ({ Source }) => {
 			lastIndexedVersion = indexingState.version || 1
 			//console.log('resumeIndex', this.name, 'starting from', lastIndexedVersion)
 			sourceVersions[Source.name] = lastIndexedVersion
-			this.loadingUpdates = true
+			this.initializing = false
 			this.queue.clear()
 			let idsAndVersionsToReindex
-			try {
-				idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
-			} finally {
-				this.loadingUpdates = false
-			}
+			idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
 			let min = Infinity
 			let max = 0
 			for (let { id, version } of idsAndVersionsToReindex) {
@@ -541,12 +537,15 @@ export const Index = ({ Source }) => {
 		}
 
 		static initialize(module) {
+			this.initializing = true
 			this.Sources[0].start()
 			/*if (this.Sources[0].updatingProcessModule && !this.updatingProcessModule) {
 				this.updatingProcessModule = this.Sources[0].updatingProcessModule
 			}*/
 			allIndices.push(this)
-			return super.initialize(module)
+			return when(super.initialize(module), () => {
+				this.initializing = false
+			})
 		}
 		static initializeData() {
 			return when(super.initializeData(), () => {
@@ -656,7 +655,7 @@ export const Index = ({ Source }) => {
 				}
 				return event
 			}
-			if (this.loadingUpdates) {
+			if (this.initializing) {
 				return // ignore events while we are waiting for the upstream source to initialize data
 			}
 			let context = currentContext
