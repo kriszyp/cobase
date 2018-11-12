@@ -280,12 +280,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return (event && event.updatesInProgress) ? Promise.all(event.updatesInProgress) : Promise.resolve()
 	}
 
-	static get whenFullyReadable() {
-		if (this.listeners)
-			return Promise.all(this.listeners.map(listener => listener.whenFullyReadable))
-		return Promise.resolve()
-	}
-
 	delete() {
 		return this.constructor.remove(this.id)
 	}

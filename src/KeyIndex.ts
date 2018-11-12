@@ -74,12 +74,6 @@ export const Index = ({ Source }) => {
 		static Sources = [Source]
 		static whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index
 		static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
-		static get whenFullyReadable(): Promise<any> {
-			return this._whenFullyReadable
-		} // promise for when the results of the current indexing task are fully readable (all downstream indices have updated based on the updates in this index)
-		static set whenFullyReadable(whenReadable) {
-			this._whenFullyReadable = whenReadable
-		}
 		static indexingProcess: Promise<any>
 
 		static *indexEntry(id, indexRequest: IndexRequest) {
@@ -719,9 +713,6 @@ export const Index = ({ Source }) => {
 					}
 					indexRequest.sources.add(event.source)
 				}
-
-				//registerProcessing(updateContext, this, this.whenFullyReadable)
-				//registerProcessing(event, this, this.whenFullyReadable)
 			}
 			if (event && event.type == 'reset') {
 				return super.updated(event, by)
@@ -770,8 +761,6 @@ export const Index = ({ Source }) => {
 						super.updated(event, this)
 					})
 				this.whenProcessingComplete.version = lastIndexedVersion
-				this.whenFullyReadable = this.whenCommitted =
-					this.whenProcessingComplete.then(() => this)
 			}
 			return this.whenProcessingComplete
 		}

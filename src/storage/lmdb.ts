@@ -62,6 +62,7 @@ export function open(name, options): Database {
 		bytesWritten: 0,
 		reads: 0,
 		writes: 0,
+		readTxn: env.beginTxn(READING_TNX),
 		transaction(execute) {
 			if (this.writeTxn) {
 				// already nested in a transaction, just execute and return
@@ -96,12 +97,14 @@ export function open(name, options): Database {
 				const writeTxn = this.writeTxn
 				if (writeTxn) {
 					txn = writeTxn
-				} else
-					txn = env.beginTxn(READING_TNX)
+				} else {
+					txn = this.readTxn
+					txn.renew()
+				}
 				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
 				result = result && uncompressSync(result)
 				if (!writeTxn) {
-					txn.abort()
+					txn.reset()
 				}
 				this.bytesRead += result && result.length || 1
 				this.reads++
@@ -157,9 +160,6 @@ export function open(name, options): Database {
 		removeSync(id) {
 			this.remove(id)
 		},
-		iterator(options) {
-			return db.iterator(options)
-		},
 		iterable(options) {
 			let iterable = new ArrayLikeIterable()
 			iterable[Symbol.iterator] = (async) => {
@@ -170,9 +170,9 @@ export function open(name, options): Database {
 				const goToDirection = reverse ? 'goToPrev' : 'goToNext'
 				const getNextBlock = () => {
 					array = []
-					let txn, cursor
+					let cursor, txn = cobaseDb.readTxn
 					try {
-						txn = env.beginTxn(READING_TNX)
+						txn.renew()
 						cursor = new Cursor(txn, db, AS_BINARY)
 						if (reverse) {
 							// for reverse retrieval, goToRange is backwards because it positions at the key equal or *greater than* the provided key
@@ -200,7 +200,7 @@ export function open(name, options): Database {
 							currentKey = cursor[goToDirection]()
 						}
 						cursor.close()
-						txn.commit()
+						txn.reset()
 					} catch(error) {
 						if (cursor) {
 							try {
@@ -316,11 +316,12 @@ export function open(name, options): Database {
 			}
 		}
 	}
+	cobaseDb.readTxn.reset()
 	allDbs.set(name, cobaseDb)
 	return cobaseDb
 	function handleError(error, db, txn, retry) {
 		try {
-			if (txn)
+			if (txn && txn !== db.readTxn)
 				txn.abort()
 		} catch(error) {
 		//	console.warn('txn already aborted')
@@ -338,11 +339,12 @@ export function open(name, options): Database {
 				try {
 					db.readTxn.abort()
 				} catch(error) {}
-				db.readTxn = null // needs to be closed and recreated during resize
 			}
 			const newSize = env.info().mapSize * 4
 			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)
+			db.readTxn = env.beginTxn(READING_TNX)
+			db.readTxn.reset()
 			return retry()
 		}
 		error.message = 'In database ' + name + ': ' + error.message
