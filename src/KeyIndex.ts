@@ -352,7 +352,7 @@ export const Index = ({ Source }) => {
 			const db: Database = this.db
 			const indexingState = parse(db.get(INDEXING_STATE)) || {}
 			lastIndexedVersion = indexingState.version || 1
-			//console.log('resumeIndex', this.name, 'starting from', lastIndexedVersion)
+			console.log('resumeIndex', this.name, 'starting from', lastIndexedVersion)
 			sourceVersions[Source.name] = lastIndexedVersion
 			this.initializing = false
 			this.queue.clear()

@@ -394,14 +394,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			const whenFinished = () => {
 				try {
 					db.remove(INITIALIZING_PROCESS_KEY)
-					//console.log('finished data initialization', this.name)
+					console.log('finished data initialization', this.name)
 				} catch (error) {
 					console.warn(error.toString())
 				}
 			}
 			try {
 				return when(this.initializeData(), () => {
-					//console.log('Finished initializeData', this.name)
+					console.log('Finished initializeData', this.name)
 					this.updateDBVersion()
 					whenFinished()
 				}, (error) => {
@@ -443,6 +443,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// make sure these are inherited
 		this.currentWriteBatch = null
 		if (initializingProcess/* || !Persisted.doesInitialization*/) {
+			// there is another process handling initialization
 			return whenEachProcess.length > 0 && Promise.all(whenEachProcess)
 		}
 		return doDataInitialization()
