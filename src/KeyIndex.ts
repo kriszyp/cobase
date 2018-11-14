@@ -496,20 +496,14 @@ export const Index = ({ Source }) => {
 		// static returnsAsyncIterables = true // maybe at some point default this to on
 
 		static getInstanceIdsAndVersionsSince(version) {
-			// There is no version tracking with indices
-			// however, if the request is for everything, we can fulfill that by just returning
-			// all of our ids, once we are ready
-			//console.log('getInstanceIdsAndVersionsSince', this.name, version)
-			if (version <= 1) {
-				return this.ready.then(() => {
-					//console.log('getInstanceIdsAndVersionsSince',this.name, 'ready and getting ids since', version)
-					return when(this.getInstanceIds(), ids => ids.map(id => ({
-						id,
-						version: getNextVersion()
-					})))
-				})
-			} // else return nothing
-			return Promise.resolve([])
+			// There is no version tracking with indices.
+			// however, indices always do send updates, and as long as we wait until we are ready and finished with initial indexing
+			// downstream tables should have received all the updates they need to proceed
+			console.log('getInstanceIdsAndVersionsSince from KeyIndex', this.name, version)
+			return this.ready.then(() => {
+				console.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
+				return []
+			})
 		}
 
 		clearCache() {

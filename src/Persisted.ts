@@ -298,6 +298,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			const initializeReturn = this.initialize()
 			resolver(initializeReturn)
 			this._ready.then(() => {
+				console.log(this.name, 'is ready and initialized')
 				this.initialized = true
 			})
 		}
@@ -371,7 +372,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				start: Buffer.from([1, 3]),
 				end: INITIALIZING_PROCESS_KEY,
 			}).map(({key, value}) => (key[2] << 24) + (key[3] << 16) + (key[4] << 8) + key[5])).filter(pid => !isNaN(pid))
-			console.log('this.otherProcesses', this.name, this.otherProcesses)
 			db.put(processKey, Buffer.from([])) // register process, in ready state
 			if (!initializingProcess || !this.otherProcesses.includes(initializingProcess)) {
 				initializingProcess = null
@@ -445,7 +445,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.currentWriteBatch = null
 		if (initializingProcess/* || !Persisted.doesInitialization*/) {
 			// there is another process handling initialization
-			return whenEachProcess.length > 0 && Promise.all(whenEachProcess)
+			return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), () => {
+				console.log('Connected to each process complete and finished initialization', this.name)
+			})
 		}
 		return doDataInitialization()
 	}
@@ -784,9 +786,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	* Iterate through all instances to find instances since the given version
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
-		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
+		console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => {
-			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
+			console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let db = this.db
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			let isFullReset = this.startVersion > sinceVersion
