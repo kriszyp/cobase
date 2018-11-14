@@ -362,7 +362,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization
-		const processKey = Buffer.from([1, 3, process.pid >> 8, process.pid & 0xff])
+		const processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
 		let initializingProcess
 		db.transaction(() => {
 			initializingProcess = db.get(INITIALIZING_PROCESS_KEY)
@@ -370,7 +370,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.otherProcesses = Array.from(db.iterable({
 				start: Buffer.from([1, 3]),
 				end: INITIALIZING_PROCESS_KEY,
-			}).map(({key, value}) => (key[2] << 8) + key[3])).filter(pid => !isNaN(pid))
+			}).map(({key, value}) => (key[2] << 24) + (key[3] << 16) + (key[4] << 8) + key[5])).filter(pid => !isNaN(pid))
+			console.log('this.otherProcesses', this.name, this.otherProcesses)
 			db.put(processKey, Buffer.from([])) // register process, in ready state
 			if (!initializingProcess || !this.otherProcesses.includes(initializingProcess)) {
 				initializingProcess = null
@@ -932,7 +933,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		const db = this.db
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
-		const processKey = Buffer.from([1, 3, process.pid >> 8, process.pid & 0xff])
+		const processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
 		if (!this.isWriting) {
 			db.put(processKey, Buffer.from(this.lastVersion.toString()))
 			this.isWriting = true
