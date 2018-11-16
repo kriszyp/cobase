@@ -351,10 +351,10 @@ export const Index = ({ Source }) => {
 			lastIndexedVersion = indexingState.version || 1
 			console.log('resumeIndex', this.name, 'starting from', lastIndexedVersion)
 			sourceVersions[Source.name] = lastIndexedVersion
-			this.initializing = false
 			this.queue.clear()
 			let idsAndVersionsToReindex
 			idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
+			this.initializing = false
 			let min = Infinity
 			let max = 0
 			for (let { id, version } of idsAndVersionsToReindex) {
@@ -386,12 +386,14 @@ export const Index = ({ Source }) => {
 			this.checkAndUpdateProcessMap()
 
 			console.log('Initializing queue', this.name)
+			this.state = 'initializing queue'
 			for (let { id, version } of idsAndVersionsToReindex) {
 				if (!version)
 					console.log('resuming without version',this.name, id)
 				this.queue.set(id, new InitializingIndexRequest(version))
 			}
 			console.log('Initialized queue, ready to index', this.name)
+			this.state = 'processing'
 			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}
 
