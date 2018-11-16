@@ -308,14 +308,10 @@ export const Index = ({ Source }) => {
 							if (this.nice > 0)
 								yield this.delay(Math.round(this.nice * 1000 / (queue.size + 1000))) // short delay for other processing to occur
 						}
-
-						if (this.cancelIndexing) {
-							console.info('Canceling current indexing process')
-							// if we suddenly need to rebuild...
-							return
-						}
 					}
+					this.state = 'waiting on other processes'
 					yield Promise.all(actionsInProgress) // wait for any outstanding requests
+					this.state = 'processing'
 					yield Promise.all(indexingInProgress) // then wait for all indexing to finish everything
 					this.saveLatestVersion()
 				} while (queue.size > 0)
@@ -349,6 +345,7 @@ export const Index = ({ Source }) => {
 
 		static *resumeIndex() {
 			// TODO: if it is over half the index, just rebuild
+			this.state = 'initializing'
 			const db: Database = this.db
 			const indexingState = parse(db.get(INDEXING_STATE)) || {}
 			lastIndexedVersion = indexingState.version || 1
@@ -366,9 +363,11 @@ export const Index = ({ Source }) => {
 			}
 			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
 				console.log('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
+				this.state = 'clearing'
 				this.clearAllData()
 				this.updateDBVersion()
 			} else if (idsAndVersionsToReindex.length > 0) {
+				this.state = 'resuming'
 				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
 				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 				// clear out all the items that we are indexing, since we don't have their previous state
@@ -381,15 +380,18 @@ export const Index = ({ Source }) => {
 					}
 				}).asArray
 			} else {
+				this.state = 'ready'
 				return
 			}
 			this.checkAndUpdateProcessMap()
 
+			console.log('Initializing queue', this.name)
 			for (let { id, version } of idsAndVersionsToReindex) {
 				if (!version)
 					console.log('resuming without version',this.name, id)
 				this.queue.set(id, new InitializingIndexRequest(version))
 			}
+			console.log('Initialized queue, ready to index', this.name)
 			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}
 

@@ -1168,11 +1168,16 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					let min = Infinity
 					let max = 0
 					for (let { id, version } of ids) {
-						min = Math.min(version, min)
-						max = Math.max(version, max)
-						let event = new ReplacedEvent()
-						event.triggers = [ INITIALIZATION_SOURCE ]
-						this.for(id).updated(event)
+						//min = Math.min(version, min)
+						//max = Math.max(version, max)
+						let inMemoryInstance = this.instancesById && this.instancesById.get(id)
+						if (inMemoryInstance) {
+							let event = new ReplacedEvent()
+							event.triggers = [ INITIALIZATION_SOURCE ]
+							inMemoryInstance.updated(event)
+						} else {
+							this.dbPut(id, this.prototype.serializeEntryValue(version, INVALIDATED_ENTRY), version)
+						}
 					}
 					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
