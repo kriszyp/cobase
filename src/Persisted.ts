@@ -300,6 +300,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this._ready.then(() => {
 				console.log(this.name, 'is ready and initialized')
 				this.initialized = true
+			}, (error) => {
+				console.error('Error initializing', this.name, error)
 			})
 		}
 		return this._ready
