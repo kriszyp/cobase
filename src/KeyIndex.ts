@@ -431,6 +431,7 @@ export const Index = ({ Source }) => {
 					console.error('Error sending index updates', error)
 				}
 			}
+			this.instanceIds.updated()
 		}
 
 		transform() {
@@ -591,7 +592,7 @@ export const Index = ({ Source }) => {
 					pid,
 					request
 				})
-				return withTimeout(this.sendRequestToProcess(pid, request), 5000000).catch(error => {
+				return withTimeout(this.sendRequestToProcess(pid, request), 60000).catch(error => {
 					console.warn('Error on waiting for indexed', this.name, 'from process', pid, 'index request', request, error.toString())
 					return { indexed: false }
 				}).finally((indexed) => {

@@ -410,8 +410,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					whenFinished()
 				})
 			} catch (error) {
+				console.error(error)
 				whenFinished()
-				throw error
 			}
 		}
 		let whenEachProcess = []
