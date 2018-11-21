@@ -271,7 +271,7 @@ ExpirationStrategy.cachedEntrySize = 40000 // use twice the default amount of ca
 The weak value map mechanism and LRU caching strategy are described in [more detail here](https://dev.doctorevidence.com/an-introduction-to-weak-value-maps-40e108b44e1c).
 
 ## Integration with an HTTP/Web Server
-Cobase provides utilities for efficient delivery of data in a web server. This mainly includes a middleware component (built on Mach) that can perform content negotiation and efficiently stream JSON with support for advanced optimizations including direct binary transfer from the DB to streams, and backpressure. The can be used by including the cobase's `media` export as middleware, and then downstream apps/middleware can access `connection.request.data` for the parsed request data, and the response data can be set on `connection.response.data`, and the middleware will serialize to the appropriate content type as specified by the client (defaulting to JSON).
+Cobase provides utilities for efficient delivery of data in a web server. This mainly includes a middleware component (built on Koa) that can perform content negotiation and efficiently stream JSON with support for advanced optimizations including direct binary transfer from the DB to streams, and backpressure. The can be used by including the cobase's `media` export as middleware, and then downstream apps/middleware can access `connection.request.data` for the parsed request data, and the response data can be set on `connection.response.data`, and the middleware will serialize to the appropriate content type as specified by the client (defaulting to JSON).
 
 Additional content/media handlers can be defined by using the exported `mediaTypes` `Map`, and setting a media handler with the content type as the key, and an object with `serialize` and/or `parse` methods as the value:
 ```
@@ -285,5 +285,5 @@ mediaTypes.set('text/html', {
 	}
 })
 
-machApp.use(media)
+koaApp.use(media)
 ```
