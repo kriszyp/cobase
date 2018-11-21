@@ -34,6 +34,9 @@ function startPipeClient(processId, Class) {
 			serializingStream.pipe(socket)
 			serializingStream.pid = processId
 			socket.on('error', reject).on('connect', () => resolve(serializingStream))
+			socket.on('close', (event) => {
+				serializingStream.emit('close', event)
+			})
 			socket.unref()
 			parsedStream.on('data', (message) => {
 				onMessage(message, serializingStream)
@@ -65,6 +68,9 @@ function startPipeServer() {
 		let serializingStream = createSerializeStream({
 			encoding: 'utf16le',
 		})
+		socket.on('close', (event) => {
+			serializingStream.emit('close', event)
+		})
 		serializingStream.pipe(socket)
 		serializingStream.isIncoming = true
 	}).on('error', (err) => {
@@ -89,7 +95,7 @@ function attachClass(stream, Class, processId) {
 	streams.push(stream)
 	streamByPidClass.set(processId + '-' + className, stream)
 	const otherProcesses = Class.otherProcesses || (Class.otherProcesses = [])
-	if (!otherProcesses.includes(processId)) {
+	if (!otherProcesses.includes(processId) && processId !== process.pid) {
 		otherProcesses.push(processId)
 	}
 	const updater = {
@@ -144,6 +150,9 @@ function attachClass(stream, Class, processId) {
 	stream.on('close', () => {
 		Class.stopNotifies(updater)
 		streams.splice(streams.indexOf(stream), 1)
+		let otherProcessIndex = otherProcesses.indexOf(processId)
+		if (otherProcessIndex > -1)
+			otherProcesses.splice(otherProcessIndex, 1)
 		streamByPidClass.delete(processId + '-' + className)
 	})
 }

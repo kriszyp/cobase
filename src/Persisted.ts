@@ -377,6 +377,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				initializingProcess = null
 				db.put(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
 			}
+			if (this.otherProcesses.includes(process.pid)) {
+				console.warn('otherProcesses includes self')
+				this.otherProcesses.splice(this.otherProcesses.indexOf(process.pid))
+			}
 		})
 		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 		let stateDPack = db.getSync(DB_VERSION_KEY)
