@@ -78,7 +78,6 @@ function startPipeServer() {
 	  throw err;
 	}).listen(getPipePath(process.pid))
 }
-startPipeServer() // Maybe start it in the next event turn so you can turn it off in single process environment?
 
 function attachClasses(stream) {
 	for (const [className, Class] of classMap) {
@@ -205,8 +204,8 @@ function onMessage(message, stream) {
 	}
 }
 
-
 export function registerClass(Class) {
+	startPipeServer() // Maybe start it in the next event turn so you can turn it off in single process environment?
 	classMap.set(Class.name, Class)
 }
 
