@@ -32,16 +32,16 @@ export function open(name, options): Database {
 	try {
 		fs.removeSync(location + '/LOCK') // clean up any old locks
 	} catch(e) {}
-	const env = new Env()
+	let env = new Env()
 	let db
 	console.warn('opening', name)
 	options = Object.assign({
 		path: location,
 		maxDbs: 1,
-		noMetaSync: true,
+		noMetaSync: true, // much better performance with this
 		mapSize: 16*1024*1024, // it can be as high 16TB
-		noSync: true,
-		useWritemap: true,
+		noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
+		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
 	}, options)
 	if (options && options.clearOnStart) {
 		console.info('Removing', location)
@@ -401,18 +401,15 @@ export function open(name, options): Database {
 		} else if (error.message.startsWith('MDB_PAGE_NOTFOUND') || error.message.startsWith('MDB_CURSOR_FULL') || error.message.startsWith('MDB_CORRUPTED') || error.message.startsWith('MDB_INVALID')) {
 			// the noSync setting means that we can have partial corruption and we need to be able to recover
 			if (db) {
-				console.warn('Corrupted database,', location, 'attempting to clear the db and restart', error)
-				db.clear()
-				db.readTxn = env.beginTxn(READING_TNX)
-				db.readTxn.reset()
-			} else {
-				try {
-					env.close()
-				} catch (error) {}
-				console.warn('Corrupted database,', location, 'attempting to delete the db file and restart', error)
-				fs.removeSync(location + '/data.mdb')
-				env.open(options)
+				db.close()
 			}
+			try {
+				env.close()
+			} catch (error) {}
+			console.warn('Corrupted database,', location, 'attempting to delete the db file and restart', error)
+			fs.removeSync(location + '/data.mdb')
+			env = new Env()
+			env.open(options)
 			return retry()
 		}
 		db.readTxn = env.beginTxn(READING_TNX)
