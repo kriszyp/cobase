@@ -3,6 +3,7 @@ import { Env, openDbi, Cursor } from 'node-lmdb'
 import { compressSync, uncompressSync } from 'snappy'
 import ArrayLikeIterable from '../util/ArrayLikeIterable'
 import { Database } from './Database'
+import when from '../util/when'
 
 const STARTING_ARRAY = [null]
 const AS_STRING = {
@@ -32,24 +33,31 @@ export function open(name, options): Database {
 		fs.removeSync(location + '/LOCK') // clean up any old locks
 	} catch(e) {}
 	const env = new Env()
-	env.open(Object.assign({
-		path: location,
-		maxDbs: 1,
-		noMetaSync: true,
-		mapSize: 16*1024*1024, // it can be as high 16TB
-		noSync: true,
-		useWritemap: true,
-		mapAsync: true,
-	}, options))
 	let db
+	console.warn('opening', name)
 	function openDB() {
 		try {
+			if (options && options.clearOnStart) {
+				console.info('Removing', location)
+				fs.removeSync(location + '/data.mdb')
+				console.info('Removed', location)
+			}
+			env.open(Object.assign({
+				path: location,
+				maxDbs: 1,
+				noMetaSync: true,
+				mapSize: 16*1024*1024, // it can be as high 16TB
+				noSync: true,
+			}, options))
 			db = env.openDbi({
 				name: 'data',
 				create: true,
 				keyIsBuffer: true,
 			})
 		} catch(error) {
+			try {
+				env.close()
+			} catch (error) {}
 			handleError(error, null, null, openDB)
 		}
 	}
@@ -63,7 +71,7 @@ export function open(name, options): Database {
 		reads: 0,
 		writes: 0,
 		readTxn: env.beginTxn(READING_TNX),
-		transaction(execute) {
+		transaction(execute, noSync) {
 			if (this.writeTxn) {
 				// already nested in a transaction, just execute and return
 				return execute()
@@ -75,6 +83,9 @@ export function open(name, options): Database {
 				txn = this.writeTxn = env.beginTxn()
 				result = execute()
 				txn.commit()
+				if (!noSync) {
+					this.scheduleSync()
+				}
 				committed = true
 				return result
 			} catch(error) {
@@ -293,8 +304,10 @@ export function open(name, options): Database {
 						}
 					}
 				}
-				if (!this.writeTxn)
+				if (!this.writeTxn) {
 					txn.commit()
+					return this.scheduleSync()
+				}
 			} catch(error) {
 				if (this.writeTxn)
 					throw error // if we are in a transaction, the whole transaction probably needs to restart
@@ -303,6 +316,32 @@ export function open(name, options): Database {
 		},
 		close() {
 			db.close()
+		},
+		scheduleSync() {
+			return this.pendingSync || (this.pendingSync = new Promise((resolve, reject) => {
+				when(this.currentSync, () => {
+					setTimeout(() => {
+						let currentSync = this.currentSync = this.pendingSync
+						this.pendingSync = null
+						this.sync((error) => {
+							if (error) {
+								console.error(error)
+							}
+							if (currentSync == this.currentSync) {
+								this.currentSync = null
+							}
+							resolve()
+						})
+					}, 15)
+				})
+			}))
+		},
+		sync(callback) {
+			return env.sync(callback || function(error) {
+				if (error) {
+					console.error(error)
+				}
+			})
 		},
 		clear() {
 			//console.log('clearing db', name)
@@ -321,32 +360,50 @@ export function open(name, options): Database {
 	return cobaseDb
 	function handleError(error, db, txn, retry) {
 		try {
-			if (txn && txn !== db.readTxn)
-				txn.abort()
+			if (db && db.readTxn)
+				db.readTxn.abort()
 		} catch(error) {
 		//	console.warn('txn already aborted')
 		}
 		try {
-			if (db.writeTxn)
+			if (db && db.writeTxn)
 				db.writeTxn.abort()
 		} catch(error) {
 		//	console.warn('txn already aborted')
 		}
-		if (db.writeTxn)
+		try {
+			if (txn && txn !== (db && db.readTxn) && txn !== (db && db.writeTxn))
+				txn.abort()
+		} catch(error) {
+		//	console.warn('txn already aborted')
+		}
+
+		if (db && db.writeTxn)
 			db.writeTxn = null
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
-			if (db && db.readTxn) {
-				try {
-					db.readTxn.abort()
-				} catch(error) {}
-			}
 			const newSize = env.info().mapSize * 4
 			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)
-			db.readTxn = env.beginTxn(READING_TNX)
-			db.readTxn.reset()
+			if (db) {
+				db.readTxn = env.beginTxn(READING_TNX)
+				db.readTxn.reset()
+			}
+			return retry()
+		} else if (error.message.startsWith('MDB_PAGE_NOTFOUND') || error.message.startsWith('MDB_CURSOR_FULL') || error.message.startsWith('MDB_CORRUPTED') || error.message.startsWith('MDB_INVALID')) {
+			// the noSync setting means that we can have partial corruption and we need to be able to recover
+			if (db) {
+				console.warn('Corrupted database,', location, 'attempting to clear the db and restart', error)
+				db.clear()
+				db.readTxn = env.beginTxn(READING_TNX)
+				db.readTxn.reset()
+			} else {
+				console.warn('Corrupted database,', location, 'attempting to delete the db files and restart', error)
+				fs.removeSync(location)
+			}
 			return retry()
 		}
+		db.readTxn = env.beginTxn(READING_TNX)
+		db.readTxn.reset()
 		error.message = 'In database ' + name + ': ' + error.message
 		throw error
 	}

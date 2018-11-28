@@ -352,7 +352,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
 		}
+		if (clearOnStart) {
+			console.info('Completely clearing', this.name)
+			options.clearOnStart = true
+		}
 		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name, options)
+
 		clearTimeout(this._registerTimeout)
 		if (global[this.name]) {
 			throw new Error(this.name + ' already registered')
@@ -532,10 +537,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					this.constructor.db.transaction(() => {
 						this.assignPreviousValue(event)
 						this.resetCache(event)
-					})
+					}, true)
 				}
 			} else
 				this.resetCache(event)
+			event.whenWritten = Class.whenWritten
 			if (event.type == 'deleted') {
 				this.readyState = 'no-local-data'
 				this._cachedValue = undefined
@@ -955,15 +961,26 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			} else {
 				db.remove(keyAsBuffer)
 			}
-		})
+		}, true)
 		let currentWriteBatch = this.currentWriteBatch
 		if (!currentWriteBatch) {
-			this.currentWriteBatch = setTimeout(() => {
-				db.put(processKey, Buffer.from([]))
-				this.isWriting = false
-				db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
-				this.currentWriteBatch = null
-			}, 20)
+			let whenWritten = this.whenWritten = new Promise((resolve, reject) => {
+				this.currentWriteBatch = setTimeout(() => {
+					db.put(processKey, Buffer.from([]))
+					this.isWriting = false
+					db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
+					this.currentWriteBatch = null
+					db.sync((error) => {
+						if (error)
+							reject(error)
+						else
+							resolve()
+						if (whenWritten = this.whenWritten) {
+							this.whenWritten = null
+						}
+					})
+				}, 10)
+			})
 		}
 	}
 
@@ -1281,9 +1298,11 @@ const checkInputTransform = {
 secureAccess.checkPermissions = () => true
 import { Reduced } from './Reduced'
 
+let clearOnStart
 export function configure(options) {
 	Persisted.dbFolder = options.dbFolder
 	Cached.dbFolder = options.cacheDbFolder || options.dbFolder
 	Persistable.dbFolder = options.cacheDbFolder || options.dbFolder
 	globalDoesInitialization = options.doesInitialization
+	clearOnStart = options.clearOnStart
 }
