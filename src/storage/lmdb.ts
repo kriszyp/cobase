@@ -35,30 +35,28 @@ export function open(name, options): Database {
 	const env = new Env()
 	let db
 	console.warn('opening', name)
+	options = Object.assign({
+		path: location,
+		maxDbs: 1,
+		noMetaSync: true,
+		mapSize: 16*1024*1024, // it can be as high 16TB
+		noSync: true,
+		useWritemap: true,
+	}, options)
+	if (options && options.clearOnStart) {
+		console.info('Removing', location)
+		fs.removeSync(location + '/data.mdb')
+		console.info('Removed', location)
+	}
+	env.open(options)
 	function openDB() {
 		try {
-			if (options && options.clearOnStart) {
-				console.info('Removing', location)
-				fs.removeSync(location + '/data.mdb')
-				console.info('Removed', location)
-			}
-			env.open(Object.assign({
-				path: location,
-				maxDbs: 1,
-				noMetaSync: true,
-				mapSize: 16*1024*1024, // it can be as high 16TB
-				noSync: true,
-				useWritemap: true,
-			}, options))
 			db = env.openDbi({
 				name: 'data',
 				create: true,
 				keyIsBuffer: true,
 			})
 		} catch(error) {
-			try {
-				env.close()
-			} catch (error) {}
 			handleError(error, null, null, openDB)
 		}
 	}
@@ -408,8 +406,12 @@ export function open(name, options): Database {
 				db.readTxn = env.beginTxn(READING_TNX)
 				db.readTxn.reset()
 			} else {
-				console.warn('Corrupted database,', location, 'attempting to delete the db files and restart', error)
-				fs.removeSync(location)
+				try {
+					env.close()
+				} catch (error) {}
+				console.warn('Corrupted database,', location, 'attempting to delete the db file and restart', error)
+				fs.removeSync(location + '/data.mdb')
+				env.open(options)
 			}
 			return retry()
 		}
