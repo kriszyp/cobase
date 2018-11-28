@@ -451,7 +451,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}))
 		}
 		// make sure these are inherited
-		this.currentWriteBatch = null
 		if (initializingProcess/* || !Persisted.doesInitialization*/) {
 			// there is another process handling initialization
 			return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), () => {
@@ -537,7 +536,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					this.constructor.db.transaction(() => {
 						this.assignPreviousValue(event)
 						this.resetCache(event)
-					}, true)
+					})
 				}
 			} else
 				this.resetCache(event)
@@ -950,7 +949,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			db.put(processKey, Buffer.from(this.lastVersion.toString()))
 			this.isWriting = true
 		}
-		db.transaction(() => {
+		let whenWritten = this.whenWritten = db.transaction(() => {
 			const keyAsBuffer = toBufferKey(key)
 			if (checkVersion) {
 				if (!checkVersion(db.get(keyAsBuffer)))
@@ -961,25 +960,16 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			} else {
 				db.remove(keyAsBuffer)
 			}
-		}, true)
-		let currentWriteBatch = this.currentWriteBatch
-		if (!currentWriteBatch) {
-			let whenWritten = this.whenWritten = new Promise((resolve, reject) => {
-				this.currentWriteBatch = setTimeout(() => {
-					db.put(processKey, Buffer.from([]))
-					this.isWriting = false
-					db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
-					this.currentWriteBatch = null
-					db.sync((error) => {
-						if (error)
-							reject(error)
-						else
-							resolve()
-						if (whenWritten = this.whenWritten) {
-							this.whenWritten = null
-						}
-					})
-				}, 10)
+		})
+		// whenWritten is a single promise per batch, so we can piggy-back off it that to batch version updates
+		if (!whenWritten.versionUpdate) {
+			whenWritten.versionUpdate = whenWritten.then(() => {
+				db.put(processKey, Buffer.from([]))
+				this.isWriting = false
+				db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
+				if (whenWritten === this.whenWritten) {
+					this.whenWritten = null
+				}
 			})
 		}
 	}

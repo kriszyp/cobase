@@ -48,6 +48,7 @@ export function open(name, options): Database {
 				noMetaSync: true,
 				mapSize: 16*1024*1024, // it can be as high 16TB
 				noSync: true,
+				useWritemap: true,
 			}, options))
 			db = env.openDbi({
 				name: 'data',
@@ -72,22 +73,28 @@ export function open(name, options): Database {
 		writes: 0,
 		readTxn: env.beginTxn(READING_TNX),
 		transaction(execute, noSync) {
+			let result
 			if (this.writeTxn) {
 				// already nested in a transaction, just execute and return
-				return execute()
+				result = execute()
+				if (noSync)
+					return result
+				else
+					return this.pendingSync
 			}
 			let txn
-			let result
 			let committed
 			try {
+				if (!noSync)
+					this.scheduleSync()
 				txn = this.writeTxn = env.beginTxn()
 				result = execute()
 				txn.commit()
-				if (!noSync) {
-					this.scheduleSync()
-				}
 				committed = true
-				return result
+				if (noSync)
+					return result
+				else
+					return this.pendingSync
 			} catch(error) {
 				handleError(error, this, txn, () => this.transaction(execute))
 			} finally {
@@ -140,8 +147,10 @@ export function open(name, options): Database {
 				this.writes++
 				txn = this.writeTxn || env.beginTxn()
 				txn.putBinary(db, id, compressedValue, AS_BINARY)
-				if (!this.writeTxn)
+				if (!this.writeTxn) {
 					txn.commit()
+					return this.scheduleSync()					
+				}
 			} catch(error) {
 				if (this.writeTxn)
 					throw error // if we are in a transaction, the whole transaction probably needs to restart
@@ -154,8 +163,10 @@ export function open(name, options): Database {
 				txn = this.writeTxn || env.beginTxn()
 				this.writes++
 				txn.del(db, id)
-				if (!this.writeTxn)
+				if (!this.writeTxn) {
 					txn.commit()
+					return this.scheduleSync()
+				}
 				return true // object found and deleted
 			} catch(error) {
 				if (error.message.startsWith('MDB_NOTFOUND')) {
