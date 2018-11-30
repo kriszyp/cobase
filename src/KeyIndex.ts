@@ -270,8 +270,14 @@ export const Index = ({ Source }) => {
 							if (pendingRequests.length > 0) {
 								actionsInProgress.push(Promise.all(pendingRequests).then(results => {
 									if (results.some(({ indexed }) => indexed)) {
-										this.queue.delete(id)
 										lastIndexedVersion = Math.max(indexRequest.version, lastIndexedVersion)
+										this.queue.delete(id)
+										// we still need to resolve any requests that we have received
+										if (indexRequest.resolveOnCompletion) {
+											for (const resolve of indexRequest.resolveOnCompletion) {
+												resolve()
+											}
+										}
 									} else {
 										sinceLastStateUpdate++
 										return indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
