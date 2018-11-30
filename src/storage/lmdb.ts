@@ -94,7 +94,7 @@ export function open(name, options): Database {
 				else
 					return this.pendingSync
 			} catch(error) {
-				handleError(error, this, txn, () => this.transaction(execute))
+				return handleError(error, this, txn, () => this.transaction(execute))
 			} finally {
 				if (!committed) {
 					try {
@@ -127,7 +127,7 @@ export function open(name, options): Database {
 				if (result !== null) // missing entry, really should be undefined
 					return result
 			} catch(error) {
-				handleError(error, this, txn, () => this.get(id))
+				return handleError(error, this, txn, () => this.get(id))
 			}
 		},
 		putSync(id, value) {
@@ -152,7 +152,7 @@ export function open(name, options): Database {
 			} catch(error) {
 				if (this.writeTxn)
 					throw error // if we are in a transaction, the whole transaction probably needs to restart
-				handleError(error, this, txn, () => this.put(id, value))
+				return handleError(error, this, txn, () => this.put(id, value))
 			}
 		},
 		remove(id) {
@@ -174,7 +174,7 @@ export function open(name, options): Database {
 				}
 				if (this.writeTxn)
 					throw error // if we are in a transaction, the whole transaction probably needs to restart
-				handleError(error, this, txn, () => this.remove(id))
+				return handleError(error, this, txn, () => this.remove(id))
 			}
 		},
 		removeSync(id) {
@@ -227,7 +227,7 @@ export function open(name, options): Database {
 								cursor.close()
 							} catch(error) { }
 						}
-						handleError(error, this, txn, getNextBlock)
+						return handleError(error, this, txn, getNextBlock)
 					}
 				}
 				let array
@@ -320,7 +320,7 @@ export function open(name, options): Database {
 			} catch(error) {
 				if (this.writeTxn)
 					throw error // if we are in a transaction, the whole transaction probably needs to restart
-				handleError(error, this, txn, () => this.batch(operations))
+				return handleError(error, this, txn, () => this.batch(operations))
 			}
 		},
 		close() {
