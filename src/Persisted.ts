@@ -404,14 +404,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			const whenFinished = () => {
 				try {
 					db.remove(INITIALIZING_PROCESS_KEY)
-					console.log('finished data initialization', this.name)
+					//console.log('finished data initialization', this.name)
 				} catch (error) {
 					console.warn(error.toString())
 				}
 			}
 			try {
 				return when(this.initializeData(), () => {
-					console.log('Finished initializeData', this.name)
+					//console.log('Finished initializeData', this.name)
 					this.updateDBVersion()
 					whenFinished()
 				}, (error) => {
@@ -424,12 +424,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 		let whenEachProcess = []
+		console.log('Connecting', this.name, 'to processes', this.otherProcesses)
 		for (const pid of this.otherProcesses) {
 			whenEachProcess.push(addProcess(pid, this).catch(() => {
 				let index = this.otherProcesses.indexOf(pid)
 				if (index > -1) {
 					this.otherProcesses.splice(index, 1)
-					db.remove(Buffer.from([1, 3, pid >> 8, pid & 0xff]))
+					db.remove(Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff]))
 				}
 				if (initializingProcess == pid) {
 					let doInit
@@ -795,9 +796,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	* Iterate through all instances to find instances since the given version
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
-		console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
+		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => {
-			console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
+			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let db = this.db
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			let isFullReset = this.startVersion > sinceVersion
@@ -962,7 +963,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			}
 		})
 		// whenWritten is a single promise per batch, so we can piggy-back off it that to batch version updates
-		if (!whenWritten.versionUpdate) {
+		if (whenWritten && !whenWritten.versionUpdate) {
 			whenWritten.versionUpdate = whenWritten.then(() => {
 				db.put(processKey, Buffer.from([]))
 				this.isWriting = false
