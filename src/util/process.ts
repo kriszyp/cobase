@@ -22,25 +22,44 @@ function startPipeClient(processId, Class) {
 		whenConnected = whenProcessConnected.get(processId)
 	} else {
 		whenConnected = new Promise((resolve, reject) => {
-			const socket = net.createConnection(getPipePath(processId))
-			let parsedStream = socket.pipe(createParseStream({
-				//encoding: 'utf16le',
-			})).on('error', (error) => {
-				console.error('Error in pipe client socket', error)
-			})
-			let serializingStream = createSerializeStream({
-				//encoding: 'utf16le'
-			})
-			serializingStream.pipe(socket)
-			serializingStream.pid = processId
-			socket.on('error', reject).on('connect', () => resolve(serializingStream))
-			socket.on('close', (event) => {
-				serializingStream.emit('close', event)
-			})
-			socket.unref()
-			parsedStream.on('data', (message) => {
-				onMessage(message, serializingStream)
-			})
+			const tryToConnect = (retries) => {
+				const socket = net.createConnection(getPipePath(processId))
+				let parsedStream = socket.pipe(createParseStream({
+					//encoding: 'utf16le',
+				})).on('error', (error) => {
+					console.error('Error in pipe client socket', error)
+				})
+				let serializingStream = createSerializeStream({
+					//encoding: 'utf16le'
+				})
+				serializingStream.pipe(socket)
+				serializingStream.pid = processId
+				let connected
+				socket.on('error', (error) => {
+					if (connected)
+						console.error(error) // shouldn't happen after a connection
+					else {
+						if (retries > 2)
+							reject(error)
+						else
+							setTimeout(() => {
+								tryToConnect(retries + 1)
+							}, 1500)
+					}
+				}).on('connect', () => {
+					connected = true
+					console.log('Connected to process', processId)
+					resolve(serializingStream)
+				})
+				socket.on('close', (event) => {
+					serializingStream.emit('close', event)
+				})
+				socket.unref()
+				parsedStream.on('data', (message) => {
+					onMessage(message, serializingStream)
+				})
+			}
+			tryToConnect(0)
 		})
 		whenProcessConnected.set(processId, whenConnected)
 	}
