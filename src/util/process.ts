@@ -131,7 +131,14 @@ function attachClass(stream, Class, processId) {
 					})
 					delete eventToSerialize.visited
 					delete eventToSerialize.source
-					delete eventToSerialize.sources
+					if (eventToSerialize.sources) {
+						eventToSerialize.sources = eventToSerialize.sources.map(source => ({
+							id: source.id,
+							constructor: {
+								name: source.constructor.name,
+							}
+						}))
+					}
 					delete eventToSerialize.previousValues
 					delete eventToSerialize.target
 					delete eventToSerialize.oldValue
