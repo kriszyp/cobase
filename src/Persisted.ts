@@ -791,7 +791,14 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let db = this.db
 		return db.iterable({
 			start: Buffer.from([2])
-		}).map(({ key, value }) => ({key: fromBufferKey(key), value})).asArray
+		}).map(({ key, value }) => {
+			let entry = this.prototype.parseEntryValue(value)
+			return {
+				key: fromBufferKey(key),
+				value: entry && entry.data,
+				version: entry && entry.version,
+			}
+		}).asArray
 	}
 
 	/**
