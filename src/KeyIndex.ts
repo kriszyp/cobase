@@ -61,12 +61,17 @@ export const Index = ({ Source }) => {
 				triggers: new Set(),
 			})
 		}
+		if (triggers) {
+			for (let trigger of triggers) {
+				entry.triggers.add(trigger)
+				if (trigger === INITIALIZATION_SOURCE) {
+					return // don't record sources for initialization
+				}
+			}
+		}
 		if (sources)
 			for (let source of sources)
 				entry.sources.add(source)
-		if (triggers)
-			for (let trigger of triggers)
-				entry.triggers.add(trigger)
 	}
 
 	return class extends Persistable.as(VArray) {
@@ -173,7 +178,7 @@ export const Index = ({ Source }) => {
 						if (removedValue !== undefined)
 							toRemove.delete(key)
 						let isChanged = removedValue === undefined || !value.equals(removedValue)
-						if (isChanged || value.length === 0) {
+						if (isChanged || value.length === 0 || this.alwaysUpdate) {
 							if (isChanged) {
 								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
 								operations.push({

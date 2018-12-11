@@ -307,7 +307,7 @@ export function open(name, options): Database {
 						txn[operation.type === 'del' ? 'del' : 'putBinary'](db, operation.key, value, AS_BINARY)
 					} catch (error) {
 						if (error.message.startsWith('MDB_NOTFOUND')) {
-							console.warn('MDB_NOTFOUND errors may safely be ignored', error)
+							// not an error
 						} else {
 							throw error
 						}
