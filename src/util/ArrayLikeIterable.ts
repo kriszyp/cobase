@@ -5,6 +5,11 @@ if (!Symbol.asyncIterator) {
 }
 
 export default class ArrayLikeIterable {
+	constructor(sourceArray?) {
+		if (sourceArray) {
+			this[Symbol.iterator] = sourceArray[Symbol.iterator].bind(sourceArray)
+		}
+	}
 	map(func) {
 		let source = this
 		let result = new ArrayLikeIterable()
