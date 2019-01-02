@@ -110,7 +110,6 @@ export const Index = ({ Source }) => {
 								previousVersion: indexRequest.previousVersion,
 								updatedPreviousVersion: previousEntity.version,
 								version: indexRequest.version,
-
 								now: Date.now(),
 							})
 
