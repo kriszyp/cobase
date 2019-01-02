@@ -12,35 +12,57 @@ const NOMINAL_SIZE = 100
 // more "accurate" expiration timing, but will also increase the overhead of the
 // algorithm
 const DECAY_RATE = 1.7
+
+const DECAY_INTERVAL = 10000
+const DECAY_REMOVAL = 10
+const EMPTY_SLOT = {
+  set priority(priority) {
+  },
+  get priority() {
+    return -1
+  },
+  clearCache() {
+  }
+}
+
 let offset = 0 // starting offset, shouldn't need to adjust
 class ExpirationStrategy {
 	cache = []
+
+	constructor() {
+		// periodically clean out entries so they decay over time as well.
+		setInterval(() => {
+			for (let i = 0; i < DECAY_REMOVAL; i++) {
+				this.useEntry(EMPTY_SLOT, Math.random())
+			}
+		}, DECAY_INTERVAL).unref()
+	}
 
 	useEntry(entity, size) {
 		if (!isFinite(size)) {
 			size = 100
 		}
-		if (entity.priority > -1) {
+		let lastPriority = entity.priority
+		if (lastPriority > -1) {
 			// remove from old slot if it is currently in cache
 			this.cache[entity.priority] = null
 		}
 		// define new priority
-		let lastPriority = entity.priority
 		// to prevent duplicate sizes from colliding, we add a revolving offset
 		// this is an 8-bit revolving offset. We could add more bits if we wanted
 		// to further reduce collisions, but minimizing offset bits actually helps leave "room"
 		// for multi-occurence entries to stick around longer, and more offset bits could cause overlaps
 		// in sizes which slightly reduces accuracies
-		offset = (offset + 149) & 255
+		// offset = (offset + 157) & 255
 		// calculate new priority/slot, placing large entries closer to expiration, smaller objects further from expiration
 		let adjustedSize = size / NOMINAL_SIZE
-		entity.priority = Math.floor(CACHE_ENTRIES / (1 +
+		let priority = entity.priority = Math.floor(CACHE_ENTRIES / (1 +
 			(lastPriority > -1 ?
 				(adjustedSize + CACHE_ENTRIES / lastPriority) / 3 :
 				adjustedSize)))
 		while(entity) {
 			// iteratively place entries in cache, pushing old entries closer to the end of the queue
-			let priority = entity.priority = Math.floor(entity.priority / DECAY_RATE)
+			priority = entity.priority = Math.floor(priority / DECAY_RATE)
 			if (priority == -1) {
 				return
 			}
@@ -81,6 +103,38 @@ class ExpirationStrategy {
 	get cachedEntrySize() {
 		return CACHE_ENTRIES
 	}
+	clearEntireCache() {
+		// clear the entire cache. This is useful for finding memory leaks
+		for (let i in this.cache) {
+			let entry = this.cache[i]
+			if (entry) {
+				entry.clearCache()
+				this.cache[i] = null
+			}
+		}
+	}
 	static defaultInstance = new ExpirationStrategy()
 }
 export default ExpirationStrategy
+
+/*
+This is the test I used to determine the optimal multiplier for spatial diversity:
+for (var multiplier = 0; multiplier < 255; multiplier++) {
+	entries = []
+	sum = 0
+	for (var i = 0; i < 256; i++) {
+		let n = ((i * multiplier) & 255)
+		for (var j = 0; j < 128; j++) {
+			if (entries[(n - j + 256) & 255] || entries[(n + j + 256) & 255]) {
+				sum += j
+				//console.log(j)
+				break
+			}
+		}
+		entries[n] = true
+	}
+	if (sum > 800) {
+		console.log(multiplier, sum)
+	}
+}
+*/
