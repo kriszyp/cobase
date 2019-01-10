@@ -37,6 +37,7 @@ export function open(name, options): Database {
 	console.warn('opening', name)
 	options = Object.assign({
 		path: location,
+		maxReaders: 256,
 		maxDbs: 1,
 		noMetaSync: true, // much better performance with this
 		mapSize: 16*1024*1024, // it can be as high 16TB
