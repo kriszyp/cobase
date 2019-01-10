@@ -24,30 +24,40 @@ function genericErrorHandler(err) {
 let env
 export function open(name, options): Database {
 	let location = './' + name
+	fs.ensureDirSync(location.replace(/\/[^\/]+$/, ''))
 	try {
-		fs.statSync(location)
+		// move from directory to files of databases
+		if (fs.statSync(location).isDirectory()) {
+			fs.moveSync(location + '/data.mdb', location + '.mdb')
+			fs.removeSync(location)
+		}
 	} catch (error) {
-		fs.mkdirsSync(location)
 	}
+	let startingSize = 0
 	try {
-		fs.removeSync(location + '/LOCK') // clean up any old locks
+		startingSize = fs.statSync(location + '.mdb').size
 	} catch(e) {}
+
 	let env = new Env()
 	let db
 	console.warn('opening', name)
 	options = Object.assign({
-		path: location,
-		maxReaders: 256,
+		path: location + '.mdb',
+		noSubdir: true,
 		maxDbs: 1,
 		noMetaSync: true, // much better performance with this
 		mapSize: 16*1024*1024, // it can be as high 16TB
 		noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
 	}, options)
+	while(options.mapSize < startingSize * 2) {
+		// make sure the starting map size is much bigger than the starting database file size
+		options.mapSize *= 4
+	}
 	if (options && options.clearOnStart) {
-		console.info('Removing', location)
-		fs.removeSync(location + '/data.mdb')
-		console.info('Removed', location)
+		console.info('Removing', location + '.mdb')
+		fs.removeSync(location + '.mdb')
+		console.info('Removed', location + '.mdb')
 	}
 	env.open(options)
 	function openDB() {
@@ -408,7 +418,7 @@ export function open(name, options): Database {
 				env.close()
 			} catch (error) {}
 			console.warn('Corrupted database,', location, 'attempting to delete the db file and restart', error)
-			fs.removeSync(location + '/data.mdb')
+			fs.removeSync(location + '.mdb')
 			env = new Env()
 			env.open(options)
 			return retry()
