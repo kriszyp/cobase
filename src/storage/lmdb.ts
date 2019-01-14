@@ -35,12 +35,13 @@ export function open(name, options): Database {
 	}
 	let startingSize = 0
 	try {
-		startingSize = fs.statSync(location + '.mdb').size
+		let stats = fs.statSync(location + '.mdb')
+		// some unix platforms do not return an accurate size of the *used* space of the files (instead return allocated space), so use blocks to compute
+		startingSize = process.platform == 'win32' ? stats.size : stats.blksize * stats.blocks
 	} catch(e) {}
 
 	let env = new Env()
 	let db
-	console.warn('opening', name)
 	options = Object.assign({
 		path: location + '.mdb',
 		noSubdir: true,
@@ -49,11 +50,13 @@ export function open(name, options): Database {
 		mapSize: 16*1024*1024, // it can be as high 16TB
 		noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
+		mapAsync: true,
 	}, options)
 	while(options.mapSize < startingSize * 2) {
 		// make sure the starting map size is much bigger than the starting database file size
 		options.mapSize *= 4
 	}
+
 	if (options && options.clearOnStart) {
 		console.info('Removing', location + '.mdb')
 		fs.removeSync(location + '.mdb')
@@ -80,6 +83,7 @@ export function open(name, options): Database {
 		bytesWritten: 0,
 		reads: 0,
 		writes: 0,
+		transactions: 0,
 		readTxn: env.beginTxn(READING_TNX),
 		transaction(execute, noSync) {
 			let result
@@ -96,6 +100,7 @@ export function open(name, options): Database {
 			try {
 				if (!noSync)
 					this.scheduleSync()
+				this.transactions++
 				txn = this.writeTxn = env.beginTxn()
 				result = execute()
 				txn.commit()
@@ -343,7 +348,10 @@ export function open(name, options): Database {
 					setTimeout(() => {
 						let currentSync = this.currentSync = this.pendingSync
 						this.pendingSync = null
+//						let now = Date.now()
 						this.sync((error) => {
+						//	if (Date.now()-now > 500)
+//								console.log('finished sync',Date.now()-now)
 							if (error) {
 								console.error(error)
 							}
@@ -351,8 +359,9 @@ export function open(name, options): Database {
 								this.currentSync = null
 							}
 							resolve()
+							setTimeout(() => {}, 1) // not sure why, but somehow this triggers completion sooner
 						})
-					}, 15)
+					}, 2000)
 				})
 			}))
 		},
