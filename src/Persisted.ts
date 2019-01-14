@@ -298,7 +298,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			const initializeReturn = this.initialize()
 			resolver(initializeReturn)
 			this._ready.then(() => {
-				console.log(this.name, 'is ready and initialized')
+				//console.log(this.name, 'is ready and initialized')
 				this.initialized = true
 			}, (error) => {
 				console.error('Error initializing', this.name, error)
@@ -385,7 +385,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				db.put(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
 			}
 			if (this.otherProcesses.includes(process.pid)) {
-				console.warn('otherProcesses includes self')
+				//console.warn('otherProcesses includes self')
 				this.otherProcesses.splice(this.otherProcesses.indexOf(process.pid))
 			}
 		})
@@ -393,8 +393,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let stateDPack = db.getSync(DB_VERSION_KEY)
 		let didReset
 		let state = stateDPack && parse(stateDPack)
-		if (this.name.match(/Scope/))
-			console.log('DB starting state', this.name, state)
 		if (state) {
 			this.dbVersion = state.dbVersion
 			this.startVersion = state.startVersion
@@ -426,7 +424,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 		let whenEachProcess = []
-		console.log('Connecting', this.name, 'to processes', this.otherProcesses)
+		//console.log('Connecting', this.name, 'to processes', this.otherProcesses)
 		for (const pid of this.otherProcesses) {
 			whenEachProcess.push(addProcess(pid, this).catch(() => {
 				let index = this.otherProcesses.indexOf(pid)
@@ -442,7 +440,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						initializingProcess = initializingProcess && +initializingProcess.toString()
 						if (initializingProcess == pid) {
 							// take over the initialization process
-							console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
+							//console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
 							db.put(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
 							doInit = true
 						}
@@ -457,7 +455,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (initializingProcess/* || !Persisted.doesInitialization*/) {
 			// there is another process handling initialization
 			return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), () => {
-				console.log('Connected to each process complete and finished initialization', this.name)
+				//console.log('Connected to each process complete and finished initialization', this.name)
 			})
 		}
 		return doDataInitialization()
@@ -811,8 +809,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			let db = this.db
 			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
 			let isFullReset = this.startVersion > sinceVersion
-			if (this.name === 'Scope')
-				console.log('Scanning for updates from', sinceVersion, this.startVersion, this.lastVersion, isFullReset, this.name)
 			if (this.lastVersion && this.lastVersion <= sinceVersion && !isFullReset) {
 				return []
 			}
@@ -900,7 +896,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					// object not found, this basically results in a 404, no reason to store or keep anything
 					return
 				}
-				console.warn('Setting empty value', value, 'for', this.id, this.constructor.name)
+				//console.warn('Setting empty value', value, 'for', this.id, this.constructor.name)
 				this.readyState = 'invalidated'
 			}
 			let data = ''
@@ -1085,7 +1081,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static resetAll(clearDb) {
-		console.log('reseting', this.name)
+		//console.log('reseting', this.name)
 		return Promise.resolve(spawn(function*() {
 			let version = this.startVersion = getNextVersion()
 			let allIds = yield this.fetchAllIds ? this.fetchAllIds() : []
@@ -1101,7 +1097,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
 				this.dbPut(id, this.prototype.serializeEntryValue(version, INVALIDATED_ENTRY), version)
 			}
-			console.info('Finished reseting', this.name)
+			//console.info('Finished reseting', this.name)
 		}.bind(this)))
 	}
 
