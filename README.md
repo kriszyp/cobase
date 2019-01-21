@@ -197,7 +197,7 @@ In both cases, the foreign key can be either a single (string or number) value, 
 
 ## Cobase API
 
-Cobase entities extend the Alkali Variable API, and consequently inherit its full API, as (described here)[https://github.com/kriszyp/alkali#variable-api]. For example, the following are methods available on cobase entity instances:
+Cobase entities extend the Alkali Variable API, and consequently inherit its full API, as [described here](https://github.com/kriszyp/alkali#variable-api). For example, the following are methods available on cobase entity instances:
 `valueOf()` - This retrieves the current value of this entity. If this is available synchronously, it will return the value directly. Otherwise, if this requires asynchronous resolution (if the store or transform is async, and it is not cached in memory), it will return a promise to the resolved value.
 `then(onFulfilled, onRejected)` - This also retrieves the current of the entity, using the standard promise API/callback. This method also means that all entities can be treated as promises/thenables, and used in places that accept promises, including the `await` operator.
 `updated(event?)` - This is can be called to indicate that the entity has been updated, and it's transform needs to be re-executed to retrieve its value.
