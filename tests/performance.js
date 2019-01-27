@@ -1,16 +1,16 @@
 const { removeSync } = require('fs-extra')
-const { open: openLevel } = require('../dist/storage/level')
+//const { open: openLevel } = require('../dist/storage/level')
 const { open: openLmdb } = require('../dist/storage/lmdb')
 //const { deflateSync, inflateSync } = require('zlib')
 const { deflateSync, inflateSync } = require('snappy')
-suite('performance', () => {
+suite('performance', function() {
 	removeSync('tests/db')
 
-	const level = openLevel('tests/db/test-level')
+//	const level = openLevel('tests/db/test-level')
 	const lmdb = openLmdb('tests/db/test-lmdb')
 	suiteSetup(() => {
 		lmdb.clear()
-		return level.clear()
+//		return level.clear()
 	})
 
 	let testString = 'test'
@@ -18,7 +18,7 @@ suite('performance', () => {
 		testString += 'some string data' + i
 	}
 
-	test('level-write', () => {
+/*	test('level-write', () => {
 		for (let i = 0; i < 10000; i++) {
 			level.putSync(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
 		}
@@ -44,13 +44,15 @@ suite('performance', () => {
 			})
 		}
 		return level.batch(operations)
-	})
-	test.only('lmdb-write', () => {
+	})*/
+	test('lmdb-write', () => {
+		let last
 		for (let i = 0; i < 10000; i++) {
-			lmdb.put(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
+			last= lmdb.put(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
 		}
+		return last
 	})
-	test.only('lmdb-read', () => {
+	test('lmdb-read', () => {
 		for (let i = 0; i < 10000; i++) {
 			lmdb.get(Buffer.from((i % 1000).toString()))
 		}
@@ -61,7 +63,8 @@ suite('performance', () => {
 			lmdb.get(Buffer.from((i % 1000).toString()))
 		}
 	})
-	test('lmdb-batch', () => {
+	test('lmdb-batch', function() {
+		this.timeout(10000)
 		let operations = []
 		for (let i = 0; i < 10000; i++) {
 			operations.push({
