@@ -50,7 +50,6 @@ export function open(name, options): Database {
 		mapSize: 16*1024*1024, // it can be as high 16TB
 		noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
-		mapAsync: true,
 	}, options)
 	while(options.mapSize < startingSize * 2) {
 		// make sure the starting map size is much bigger than the starting database file size
@@ -283,32 +282,6 @@ export function open(name, options): Database {
 			}
 			return iterable
 		},
-		iterateSync(options, callback) {
-			// This currently causes Node to crash
-			if (!leveldown.fixed)
-				throw new Error('Unstable function')
-			options.keyAsBuffer = false
-			options.valueAsBuffer = false
-			let iterator = db.iterator(options)
-			let nextResult
-
-			while ((nextResult = iterator.nextSync()).length > 0) {
-				if (options.gt == '0')
-					console.log('next returned',nextResult)
-				for (let i = 0, l = nextResult.length; i < l;) {
-					let value = nextResult[i++]
-					let key = nextResult[i++]
-					callback(key, value)
-				}
-			}
-			if (options.gt == '0')
-				console.log('end')
-			// clean up iterator
-			iterator.endSync()
-		},
-		batchSync(operations) {
-			return db.batch(operations)
-		},
 		batch(operations) {
 			this.writes += operations.length
 			this.bytesWritten += operations.reduce((a, b) => a + (b.value && b.value.length || 0), 0)
@@ -343,27 +316,33 @@ export function open(name, options): Database {
 			db.close()
 		},
 		scheduleSync() {
-			return this.pendingSync || (this.pendingSync = new Promise((resolve, reject) => {
-				when(this.currentSync, () => {
-					setTimeout(() => {
-						let currentSync = this.currentSync = this.pendingSync
-						this.pendingSync = null
-//						let now = Date.now()
-						this.sync((error) => {
-						//	if (Date.now()-now > 500)
-//								console.log('finished sync',Date.now()-now)
-							if (error) {
-								console.error(error)
-							}
-							if (currentSync == this.currentSync) {
-								this.currentSync = null
-							}
-							resolve()
-							setTimeout(() => {}, 1) // not sure why, but somehow this triggers completion sooner
+			let pendingPromise, db = this
+			return this.pendingSync || (this.pendingSync = {
+				then(callback, errback) { // this is a lazy promise, no sync until something awaits its completion
+					return (pendingPromise || (pendingPromise = new Promise((resolve, reject) => {
+						when(db.currentSync, () => {
+							setTimeout(() => {
+								let currentSync = db.currentSync = db.pendingSync
+								db.pendingSync = null
+								let now = Date.now()
+								console.log('syncing')
+								db.sync((error) => {
+								//	if (Date.now()-now > 500)
+										console.log('finished sync',Date.now()-now)
+									if (error) {
+										console.error(error)
+									}
+									if (currentSync == db.currentSync) {
+										db.currentSync = null
+									}
+									resolve()
+									setTimeout(() => {}, 1) // this is to deal with https://github.com/Venemo/node-lmdb/issues/138
+								})
+							}, 200)
 						})
-					}, 2000)
-				})
-			}))
+					}))).then(callback, errback)
+				}
+			})
 		},
 		sync(callback) {
 			return env.sync(callback || function(error) {
@@ -409,6 +388,14 @@ export function open(name, options): Database {
 
 		if (db && db.writeTxn)
 			db.writeTxn = null
+		if (error.message == 'The transaction is already closed.') {
+			try {
+				db.readTxn = env.beginTxn(READING_TNX)
+			} catch(error) {
+				return handleError(error, db, null, retry)
+			}
+			return retry()
+		}
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
 			const newSize = env.info().mapSize * 4
 			console.log('Resizing database', name, 'to', newSize)

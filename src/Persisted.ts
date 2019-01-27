@@ -950,11 +950,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		const db = this.db
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
-		const processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
-		if (!this.isWriting) {
-			db.put(processKey, Buffer.from(this.lastVersion.toString()))
-			this.isWriting = true
-		}
 		let whenWritten = this.whenWritten = db.transaction(() => {
 			const keyAsBuffer = toBufferKey(key)
 			if (checkVersion) {
@@ -967,16 +962,13 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				db.remove(keyAsBuffer)
 			}
 		})
-		// whenWritten is a single promise per batch, so we can piggy-back off it that to batch version updates
-		if (whenWritten && !whenWritten.versionUpdate) {
-			whenWritten.versionUpdate = whenWritten.then(() => {
-				db.put(processKey, Buffer.from([]))
-				this.isWriting = false
+		// queue up a write of the last version number
+		if (!this.queuedVersionWrite) {
+			this.queuedVersionWrite = true
+			setTimeout(() => {
 				db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
-				if (whenWritten === this.whenWritten) {
-					this.whenWritten = null
-				}
-			})
+				this.queuedVersionWrite = false
+			}, 200)
 		}
 	}
 
