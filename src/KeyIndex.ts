@@ -46,6 +46,9 @@ class InitializingIndexRequest implements IndexRequest {
 	}
 }
 
+const versionToDate = (version) =>
+	new Date(version / 256 + 1500000000000).toLocaleString()
+
 export const Index = ({ Source }) => {
 	Source.updateWithPrevious = true
 	let lastIndexedVersion = 0
@@ -107,10 +110,10 @@ export const Index = ({ Source }) => {
 								id,
 								name: this.name,
 								source: Source.name,
-								previousVersion: indexRequest.previousVersion,
-								updatedPreviousVersion: previousEntity.version,
-								version: indexRequest.version,
-								now: Date.now(),
+								previousVersion: versionToDate(indexRequest.previousVersion),
+								updatedPreviousVersion: versionToDate(previousEntity.version),
+								version: versionToDate(indexRequest.version),
+								now: new Date().toLocaleString(),
 							})
 
 						}
@@ -395,14 +398,12 @@ export const Index = ({ Source }) => {
 			}
 			this.checkAndUpdateProcessMap()
 
-			console.log('Initializing queue', this.name)
 			this.state = 'initializing queue'
 			for (let { id, version } of idsAndVersionsToReindex) {
 				if (!version)
 					console.log('resuming without version',this.name, id)
 				this.queue.set(id, new InitializingIndexRequest(version))
 			}
-			console.log('Initialized queue, ready to index', this.name)
 			this.state = 'processing'
 			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}
@@ -514,9 +515,9 @@ export const Index = ({ Source }) => {
 			// There is no version tracking with indices.
 			// however, indices always do send updates, and as long as we wait until we are ready and finished with initial indexing
 			// downstream tables should have received all the updates they need to proceed
-			console.log('getInstanceIdsAndVersionsSince from KeyIndex', this.name, version)
+			//console.log('getInstanceIdsAndVersionsSince from KeyIndex', this.name, version)
 			return this.ready.then(() => {
-				console.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
+				//console.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
 				return []
 			})
 		}
