@@ -17,7 +17,7 @@
   "dependencies": {
     "dpack": "^0.4.1",
     "fs-extra": "^7.0.0",
-    "node-lmdb": "^0.6.1",
+    "node-lmdb": "kriszyp/node-lmdb#msync",
     "ordered-binary": "^0.0.2",
     "snappy": "^6.1.1"
   },

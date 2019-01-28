@@ -12,8 +12,11 @@ const AS_STRING = {
 const AS_BINARY = {
 	keyIsBuffer: true
 }
-const READING_TNX = {
+const READING_TXN = {
 	readOnly: true
+}
+const WRITING_TXN = {
+	noSync: true
 }
 export const allDbs = new Map()
 function genericErrorHandler(err) {
@@ -48,8 +51,9 @@ export function open(name, options): Database {
 		maxDbs: 1,
 		noMetaSync: true, // much better performance with this
 		mapSize: 16*1024*1024, // it can be as high 16TB
-		noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
+		//noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
+		mapAsync: true,
 	}, options)
 	while(options.mapSize < startingSize * 2) {
 		// make sure the starting map size is much bigger than the starting database file size
@@ -83,7 +87,7 @@ export function open(name, options): Database {
 		reads: 0,
 		writes: 0,
 		transactions: 0,
-		readTxn: env.beginTxn(READING_TNX),
+		readTxn: env.beginTxn(READING_TXN),
 		transaction(execute, noSync) {
 			let result
 			if (this.writeTxn) {
@@ -100,7 +104,7 @@ export function open(name, options): Database {
 				if (!noSync)
 					this.scheduleSync()
 				this.transactions++
-				txn = this.writeTxn = env.beginTxn()
+				txn = this.writeTxn = env.beginTxn(WRITING_TXN)
 				result = execute()
 				txn.commit()
 				committed = true
@@ -158,7 +162,7 @@ export function open(name, options): Database {
 				const compressedValue = compressSync(value)
 				this.bytesWritten += compressedValue && compressedValue.length || 0
 				this.writes++
-				txn = this.writeTxn || env.beginTxn()
+				txn = this.writeTxn || env.beginTxn(WRITING_TXN)
 				txn.putBinary(db, id, compressedValue, AS_BINARY)
 				if (!this.writeTxn) {
 					txn.commit()
@@ -173,7 +177,7 @@ export function open(name, options): Database {
 		remove(id) {
 			let txn
 			try {
-				txn = this.writeTxn || env.beginTxn()
+				txn = this.writeTxn || env.beginTxn(WRITING_TXN)
 				this.writes++
 				txn.del(db, id)
 				if (!this.writeTxn) {
@@ -287,7 +291,7 @@ export function open(name, options): Database {
 			this.bytesWritten += operations.reduce((a, b) => a + (b.value && b.value.length || 0), 0)
 			let txn
 			try {
-				txn = this.writeTxn || env.beginTxn()
+				txn = this.writeTxn || env.beginTxn(WRITING_TXN)
 				for (let operation of operations) {
 					if (typeof operation.key != 'object')
 						throw new Error('non-buffer key')
@@ -317,18 +321,18 @@ export function open(name, options): Database {
 		},
 		scheduleSync() {
 			let pendingPromise, db = this
-			return this.pendingSync || (this.pendingSync = {
+			return this.pendingSync || (this.pendingSync = /*{
 				then(callback, errback) { // this is a lazy promise, no sync until something awaits its completion
-					return (pendingPromise || (pendingPromise = new Promise((resolve, reject) => {
+					return (pendingPromise || (pendingPromise = */new Promise((resolve, reject) => {
 						when(db.currentSync, () => {
 							setTimeout(() => {
 								let currentSync = db.currentSync = db.pendingSync
 								db.pendingSync = null
 								let now = Date.now()
-								console.log('syncing')
+								//console.log('syncing')
 								db.sync((error) => {
 								//	if (Date.now()-now > 500)
-										console.log('finished sync',Date.now()-now)
+								//		console.log('finished sync', name, error, Date.now()-now)
 									if (error) {
 										console.error(error)
 									}
@@ -336,20 +340,20 @@ export function open(name, options): Database {
 										db.currentSync = null
 									}
 									resolve()
-									setTimeout(() => {}, 1) // this is to deal with https://github.com/Venemo/node-lmdb/issues/138
-								})
+									//setTimeout(() => {}, 1) // this is to deal with https://github.com/Venemo/node-lmdb/issues/138
+								}, false)
 							}, 200)
 						})
-					}))).then(callback, errback)
+					}))/*).then(callback, errback)
 				}
-			})
+			})*/
 		},
-		sync(callback) {
+		sync(callback, force) {
 			return env.sync(callback || function(error) {
 				if (error) {
 					console.error(error)
 				}
-			})
+			}, force)
 		},
 		clear() {
 			//console.log('clearing db', name)
@@ -390,7 +394,7 @@ export function open(name, options): Database {
 			db.writeTxn = null
 		if (error.message == 'The transaction is already closed.') {
 			try {
-				db.readTxn = env.beginTxn(READING_TNX)
+				db.readTxn = env.beginTxn(READING_TXN)
 			} catch(error) {
 				return handleError(error, db, null, retry)
 			}
@@ -401,7 +405,7 @@ export function open(name, options): Database {
 			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)
 			if (db) {
-				db.readTxn = env.beginTxn(READING_TNX)
+				db.readTxn = env.beginTxn(READING_TXN)
 				db.readTxn.reset()
 			}
 			return retry()
@@ -419,7 +423,7 @@ export function open(name, options): Database {
 			env.open(options)
 			return retry()
 		}
-		db.readTxn = env.beginTxn(READING_TNX)
+		db.readTxn = env.beginTxn(READING_TXN)
 		db.readTxn.reset()
 		error.message = 'In database ' + name + ': ' + error.message
 		throw error
