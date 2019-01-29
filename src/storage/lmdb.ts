@@ -12,11 +12,8 @@ const AS_STRING = {
 const AS_BINARY = {
 	keyIsBuffer: true
 }
-const READING_TXN = {
+const READING_TNX = {
 	readOnly: true
-}
-const WRITING_TXN = {
-	noSync: true
 }
 export const allDbs = new Map()
 function genericErrorHandler(err) {
@@ -51,9 +48,8 @@ export function open(name, options): Database {
 		maxDbs: 1,
 		noMetaSync: true, // much better performance with this
 		mapSize: 16*1024*1024, // it can be as high 16TB
-		//noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
+		noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
-		mapAsync: true,
 	}, options)
 	while(options.mapSize < startingSize * 2) {
 		// make sure the starting map size is much bigger than the starting database file size
@@ -87,7 +83,7 @@ export function open(name, options): Database {
 		reads: 0,
 		writes: 0,
 		transactions: 0,
-		readTxn: env.beginTxn(READING_TXN),
+		readTxn: env.beginTxn(READING_TNX),
 		transaction(execute, noSync) {
 			let result
 			if (this.writeTxn) {
@@ -96,7 +92,7 @@ export function open(name, options): Database {
 				if (noSync)
 					return result
 				else
-					return this.pendingSync
+					return this.onDemandSync
 			}
 			let txn
 			let committed
@@ -104,14 +100,14 @@ export function open(name, options): Database {
 				if (!noSync)
 					this.scheduleSync()
 				this.transactions++
-				txn = this.writeTxn = env.beginTxn(WRITING_TXN)
+				txn = this.writeTxn = env.beginTxn()
 				result = execute()
 				txn.commit()
 				committed = true
 				if (noSync)
 					return result
 				else
-					return this.pendingSync
+					return this.onDemandSync
 			} catch(error) {
 				return handleError(error, this, txn, () => this.transaction(execute))
 			} finally {
@@ -162,7 +158,7 @@ export function open(name, options): Database {
 				const compressedValue = compressSync(value)
 				this.bytesWritten += compressedValue && compressedValue.length || 0
 				this.writes++
-				txn = this.writeTxn || env.beginTxn(WRITING_TXN)
+				txn = this.writeTxn || env.beginTxn()
 				txn.putBinary(db, id, compressedValue, AS_BINARY)
 				if (!this.writeTxn) {
 					txn.commit()
@@ -177,7 +173,7 @@ export function open(name, options): Database {
 		remove(id) {
 			let txn
 			try {
-				txn = this.writeTxn || env.beginTxn(WRITING_TXN)
+				txn = this.writeTxn || env.beginTxn()
 				this.writes++
 				txn.del(db, id)
 				if (!this.writeTxn) {
@@ -291,7 +287,7 @@ export function open(name, options): Database {
 			this.bytesWritten += operations.reduce((a, b) => a + (b.value && b.value.length || 0), 0)
 			let txn
 			try {
-				txn = this.writeTxn || env.beginTxn(WRITING_TXN)
+				txn = this.writeTxn || env.beginTxn()
 				for (let operation of operations) {
 					if (typeof operation.key != 'object')
 						throw new Error('non-buffer key')
@@ -319,41 +315,65 @@ export function open(name, options): Database {
 		close() {
 			db.close()
 		},
+		syncAverage: 100,
 		scheduleSync() {
-			let pendingPromise, db = this
-			return this.pendingSync || (this.pendingSync = /*{
-				then(callback, errback) { // this is a lazy promise, no sync until something awaits its completion
-					return (pendingPromise || (pendingPromise = */new Promise((resolve, reject) => {
-						when(db.currentSync, () => {
-							setTimeout(() => {
-								let currentSync = db.currentSync = db.pendingSync
-								db.pendingSync = null
-								let now = Date.now()
-								//console.log('syncing')
-								db.sync((error) => {
-								//	if (Date.now()-now > 500)
-								//		console.log('finished sync', name, error, Date.now()-now)
-									if (error) {
-										console.error(error)
-									}
-									if (currentSync == db.currentSync) {
-										db.currentSync = null
-									}
-									resolve()
-									//setTimeout(() => {}, 1) // this is to deal with https://github.com/Venemo/node-lmdb/issues/138
-								}, false)
-							}, 200)
+			let pendingPromise
+			if (this.onDemandSync)
+				return this.onDemandSync
+
+			let scheduledMs = this.syncAverage * 20 // with no demand, we schedule syncs slowly
+			let currentTimeout
+			const schedule = () => pendingPromise = new Promise((resolve, reject) => {
+				when(this.currentSync, () => {
+					//console.log('scheduling sync for', scheduledMs)
+					currentTimeout = setTimeout(() => {
+						currentTimeout = null
+						let currentSync = this.currentSync = this.onDemandSync
+						this.onDemandSync = null
+						let start = Date.now()
+						//console.log('syncing')
+						this.sync((error) => {
+							let elapsed = Date.now() - start
+							//if (elapsed > 500)
+						//		console.log('finished sync', name, elapsed)
+							this.syncAverage = this.syncAverage / 1.1 + elapsed
+
+							if (error) {
+								console.error(error)
+							}
+							if (currentSync == this.currentSync) {
+								this.currentSync = null
+							}
+							resolve()
+							setTimeout(() => {}, 1) // this is to deal with https://github.com/Venemo/node-lmdb/issues/138
 						})
-					}))/*).then(callback, errback)
+					}, scheduledMs).unref()
+				})
+			})
+			schedule()
+			let immediateMode
+
+			return this.onDemandSync = {
+				then: (callback, errback) => { // this is a semi-lazy promise, we speed up the sync if we detect that someone is demanding a callback
+					if (!immediateMode) {
+						immediateMode = true
+						scheduledMs = this.syncAverage / 3
+						if (currentTimeout) {
+							// reschedule for sooner if it is waiting for the timeout to finish
+							clearTimeout(currentTimeout)
+							schedule()
+						}
+					}
+					return pendingPromise.then(callback, errback)
 				}
-			})*/
+			}
 		},
-		sync(callback, force) {
+		sync(callback) {
 			return env.sync(callback || function(error) {
 				if (error) {
 					console.error(error)
 				}
-			}, force)
+			})
 		},
 		clear() {
 			//console.log('clearing db', name)
@@ -394,7 +414,7 @@ export function open(name, options): Database {
 			db.writeTxn = null
 		if (error.message == 'The transaction is already closed.') {
 			try {
-				db.readTxn = env.beginTxn(READING_TXN)
+				db.readTxn = env.beginTxn(READING_TNX)
 			} catch(error) {
 				return handleError(error, db, null, retry)
 			}
@@ -405,7 +425,7 @@ export function open(name, options): Database {
 			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)
 			if (db) {
-				db.readTxn = env.beginTxn(READING_TXN)
+				db.readTxn = env.beginTxn(READING_TNX)
 				db.readTxn.reset()
 			}
 			return retry()
@@ -423,7 +443,7 @@ export function open(name, options): Database {
 			env.open(options)
 			return retry()
 		}
-		db.readTxn = env.beginTxn(READING_TXN)
+		db.readTxn = env.beginTxn(READING_TNX)
 		db.readTxn.reset()
 		error.message = 'In database ' + name + ': ' + error.message
 		throw error
