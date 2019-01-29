@@ -321,7 +321,7 @@ export function open(name, options): Database {
 			if (this.onDemandSync)
 				return this.onDemandSync
 
-			let scheduledMs = this.syncAverage * 20 // with no demand, we schedule syncs slowly
+			let scheduledMs = this.syncAverage * 100 // with no demand, we schedule syncs very slowly
 			let currentTimeout
 			const schedule = () => pendingPromise = new Promise((resolve, reject) => {
 				when(this.currentSync, () => {
@@ -357,7 +357,7 @@ export function open(name, options): Database {
 				then: (callback, errback) => { // this is a semi-lazy promise, we speed up the sync if we detect that someone is demanding a callback
 					if (!immediateMode) {
 						immediateMode = true
-						scheduledMs = this.syncAverage / 3
+						scheduledMs = this.syncAverage
 						if (currentTimeout) {
 							// reschedule for sooner if it is waiting for the timeout to finish
 							clearTimeout(currentTimeout)
