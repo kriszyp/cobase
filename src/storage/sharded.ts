@@ -47,13 +47,13 @@ export function open(name, options): Database {
 		noSubdir: true,
 		maxDbs: 1,
 		noMetaSync: true, // much better performance with this
-		mapSize: 16*1024*1024, // it can be as high 16TB
+		mapSize: 16*1024*1024*1024, // it can be as high 16TB
 		noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
 	}, options)
-	while(options.mapSize < startingSize) {
+	while(options.mapSize < startingSize * 2) {
 		// make sure the starting map size is much bigger than the starting database file size
-		options.mapSize *= 2
+		options.mapSize *= 4
 	}
 
 	if (options && options.clearOnStart) {
@@ -62,6 +62,8 @@ export function open(name, options): Database {
 		console.info('Removed', location + '.mdb')
 	}
 	env.open(options)
+	let shardDivisions = []
+	let envs = []
 	function openDB() {
 		try {
 			db = env.openDbi({
@@ -74,6 +76,24 @@ export function open(name, options): Database {
 		}
 	}
 	openDB()
+	function getEnvForId(id) {
+		let low = 0
+		let high = shardDivisions.length
+		while (low < high) {
+			let pivot = (high + low) >> 1
+			if (id.compare(shardDivisions[pivot]) > 0) {
+				low = pivot
+			} else {
+				high = pivot
+			}
+		}
+		let env = envs[low]
+		if (!env) {
+			envs[low] = env = openEnv(shardDivisions[low] || Buffer.from([0]), shardDivisions[low + 1] || Buffer.from([255, 255, 255]))
+		}
+		return
+	}
+
 	const cobaseDb = {
 		db,
 		env,
@@ -135,7 +155,7 @@ export function open(name, options): Database {
 				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
 				result = result && uncompressSync(result)
 				if (!writeTxn) {
-					txn.reset()
+					txn.reset()Hi everyone,
 				}
 				this.bytesRead += result && result.length || 1
 				this.reads++
@@ -158,6 +178,7 @@ export function open(name, options): Database {
 				const compressedValue = compressSync(value)
 				this.bytesWritten += compressedValue && compressedValue.length || 0
 				this.writes++
+				env.putAsync(id, value)
 				txn = this.writeTxn || env.beginTxn()
 				txn.putBinary(db, id, compressedValue, AS_BINARY)
 				if (!this.writeTxn) {
@@ -317,6 +338,7 @@ export function open(name, options): Database {
 		},
 		syncAverage: 100,
 		scheduleSync() {
+			return Promise.resolve()
 			let pendingPromise
 			if (this.onDemandSync)
 				return this.onDemandSync
@@ -421,7 +443,7 @@ export function open(name, options): Database {
 			return retry()
 		}
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
-			const newSize = env.info().mapSize * 2
+			const newSize = env.info().mapSize * 4
 			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)
 			if (db) {
