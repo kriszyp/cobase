@@ -33,12 +33,6 @@ export function open(name, options): Database {
 		}
 	} catch (error) {
 	}
-	let startingSize = 0
-	try {
-		let stats = fs.statSync(location + '.mdb')
-		// some unix platforms do not return an accurate size of the *used* space of the files (instead return allocated space), so use blocks to compute
-		startingSize = process.platform == 'win32' ? stats.size : stats.blksize * stats.blocks
-	} catch(e) {}
 
 	let env = new Env()
 	let db
@@ -47,14 +41,9 @@ export function open(name, options): Database {
 		noSubdir: true,
 		maxDbs: 1,
 		noMetaSync: true, // much better performance with this
-		mapSize: 16*1024*1024, // it can be as high 16TB
 		noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
 	}, options)
-	while(options.mapSize < startingSize) {
-		// make sure the starting map size is much bigger than the starting database file size
-		options.mapSize *= 2
-	}
 
 	if (options && options.clearOnStart) {
 		console.info('Removing', location + '.mdb')
@@ -62,6 +51,7 @@ export function open(name, options): Database {
 		console.info('Removed', location + '.mdb')
 	}
 	env.open(options)
+
 	function openDB() {
 		try {
 			db = env.openDbi({
@@ -421,7 +411,9 @@ export function open(name, options): Database {
 			return retry()
 		}
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
-			const newSize = env.info().mapSize * 2
+			// increase by the golden ratio, which has the nice property of taking about the same space as the previous
+			// two spaces, which should help prevent virtual memory fragmentation
+			const newSize = Math.round(env.info().mapSize * 1.618 / 0x1000) * 0x1000
 			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)
 			if (db) {
