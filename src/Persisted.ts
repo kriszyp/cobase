@@ -527,6 +527,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				return event
 			}
 		}
+		if (event.version < this.version) {
+			// if we receive an update from another process that is _older_ than the current version, that means it occurred
+			// before our last update, but arrived (over IPC) after our last update, and should be completely ignored,
+			// as version updates must be purely monotonic
+			return event
+		}
 		this._initUpdate(event)
 
 		if (event.type === 'discovered') // skip reset
