@@ -354,6 +354,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
 		}
+		if (this.useWritemap !== undefined) {
+			// useWriteMap provides better performance but is not crash-proof
+			options.useWritemap = this.useWritemap
+		}
 		if (clearOnStart) {
 			console.info('Completely clearing', this.name)
 			options.clearOnStart = true

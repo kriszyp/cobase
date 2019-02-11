@@ -310,7 +310,6 @@ export function open(name, options): Database {
 			let pendingPromise
 			if (this.onDemandSync)
 				return this.onDemandSync
-
 			let scheduledMs = this.syncAverage * 100 // with no demand, we schedule syncs very slowly
 			let currentTimeout
 			const schedule = () => pendingPromise = new Promise((resolve, reject) => {
@@ -423,7 +422,6 @@ export function open(name, options): Database {
 			return retry()
 		} else if (error.message.startsWith('MDB_PAGE_NOTFOUND') || error.message.startsWith('MDB_CURSOR_FULL') || error.message.startsWith('MDB_CORRUPTED') || error.message.startsWith('MDB_INVALID')) {
 			// the noSync setting means that we can have partial corruption and we need to be able to recover
-			throw error
 			if (db) {
 				db.close()
 			}
@@ -431,9 +429,10 @@ export function open(name, options): Database {
 				env.close()
 			} catch (error) {}
 			console.warn('Corrupted database,', location, 'attempting to delete the db file and restart', error)
-		/	fs.removeSync(location + '.mdb')
+			fs.removeSync(location + '.mdb')
 			env = new Env()
 			env.open(options)
+			openDB()
 			return retry()
 		}
 		db.readTxn = env.beginTxn(READING_TNX)
