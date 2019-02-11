@@ -36,7 +36,8 @@ export function open(name, options): Database {
 
 	let env = new Env()
 	let db
-	let queue = []
+	let committingWrites
+	let scheduledWrites
 	options = Object.assign({
 		path: location + '.mdb',
 		noSubdir: true,
@@ -112,6 +113,20 @@ export function open(name, options): Database {
 			return this.get(id, asBuffer)
 		},
 		get(id) {
+			let idPrimitive
+			if (scheduledWrites) {
+				idPrimitive = id.toString('binary')
+				if (scheduledWrites.has(idPrimitive)) {
+					return scheduledWrites.get(idPrimitive)
+				}
+			}
+			if (committingWrites) {
+				idPrimitive = idPrimitive || id.toString('binary')
+				if (scheduledWrites.has(id)) {
+					return scheduledWrites.get(idPrimitive)
+				}
+			}
+
 			let txn
 			try {
 				const writeTxn = this.writeTxn
@@ -135,7 +150,10 @@ export function open(name, options): Database {
 			}
 		},
 		put(id, value) {
-			queue.push({ id, value })
+			if (!scheduledWrites) {
+				scheduledWrites = new Map()
+			}
+			scheduledWrites.set(id.toString('binary'), value && compressSync(value))
 			return this.scheduleCommit()
 		},
 		putSync(id, value) {
@@ -183,7 +201,10 @@ export function open(name, options): Database {
 			}
 		},
 		remove(id) {
-			queue.push({ id })
+			if (!scheduledWrites) {
+				scheduledWrites = new Map()
+			}
+			scheduledWrites.set(id.toString('binary'))
 			return this.scheduleCommit()
 		},
 		iterable(options) {
@@ -276,25 +297,36 @@ export function open(name, options): Database {
 		scheduleCommit() {
 			return this.pendingPromise || (this.pendingPromise = new Promise((resolve, reject) => {
 				when(this.currentSync, () => {
-					//console.log('scheduling sync for', scheduledMs)
+					console.log('scheduling commit')
 					setTimeout(() => {
 						let currentSync = this.currentSync = this.pendingPromise
-						let operations = queue
-						function doBatch() {
+						this.pendingPromise = null
+						let operations = []
+						for (const [id, value] of scheduledWrites) {
+							operations.push({ key: Buffer.from(id, 'binary'), value })
+						}
+						committingWrites = scheduledWrites
+						scheduledWrites = null
+						const doBatch = () => {
+							console.log('do batch', db.batchAsync)
 							db.batchAsync(operations, (error) => {
+								console.log('finished batch', error)
 								if (error) {
 									try {
-										handleError(error, db, null, doBatch)
+										handleError(error, this, null, doBatch)
 									} catch(error) {
+										committingWrites = null // commits are done, can eliminate this now
 										reject(error)
 									}
-								} else
+								} else {
+									committingWrites = null // commits are done, can eliminate this now
 									resolve()
+								}
 							})
+							console.log('started batch')
 						}
 						doBatch()
-						queue = []
-					}, 50).unref()
+					}, 50)
 				})
 			}))
 
@@ -307,7 +339,10 @@ export function open(name, options): Database {
 					throw new Error('non-buffer key')
 				try {
 					let value = operation.value && compressSync(operation.value)
-					queue.push({ id: operation.id, value: operation.value })
+					if (!scheduledWrites) {
+						scheduledWrites = new Map()
+					}
+					scheduledWrites.set(operation.key.toString('binary'), value)
 				} catch (error) {
 					if (error.message.startsWith('MDB_NOTFOUND')) {
 						// not an error

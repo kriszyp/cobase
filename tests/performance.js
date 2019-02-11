@@ -57,13 +57,14 @@ suite('performance', function() {
 			lmdb.get(Buffer.from((i % 1000).toString()))
 		}
 	})
-	test('lmdb-read-write', () => {
+	test.skip('lmdb-read-write', () => {
 		for (let i = 0; i < 10000; i++) {
 			lmdb.put(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
 			lmdb.get(Buffer.from((i % 1000).toString()))
 		}
 	})
 	test('lmdb-batch', function() {
+		let start = Date.now()
 		this.timeout(10000)
 		let operations = []
 		for (let i = 0; i < 10000; i++) {
@@ -73,6 +74,9 @@ suite('performance', function() {
 				value: Buffer.from(testString + i)
 			})
 		}
-		return lmdb.batch(operations)
+		console.log('set up operations', Date.now() -start)
+		let promise = lmdb.batch(operations)
+		console.log('after batch', Date.now() -start)
+		return promise.then(() => console.log('after commit', Date.now() -start))
 	})
 })
