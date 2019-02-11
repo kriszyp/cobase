@@ -36,12 +36,11 @@ export function open(name, options): Database {
 
 	let env = new Env()
 	let db
+	let queue = []
 	options = Object.assign({
 		path: location + '.mdb',
 		noSubdir: true,
 		maxDbs: 1,
-		noMetaSync: true, // much better performance with this
-		noSync: true, // this makes dbs prone to corruption/lost data, but that is acceptable for cached data, and has much better performance.
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
 	}, options)
 
@@ -135,10 +134,11 @@ export function open(name, options): Database {
 				return handleError(error, this, txn, () => this.get(id))
 			}
 		},
-		putSync(id, value) {
-			return this.put(id, value)
-		},
 		put(id, value) {
+			queue.push({ id, value })
+			return this.scheduleCommit()
+		},
+		putSync(id, value) {
 			let txn
 			try {
 				if (typeof value !== 'object') {
@@ -160,7 +160,7 @@ export function open(name, options): Database {
 				return handleError(error, this, txn, () => this.put(id, value))
 			}
 		},
-		remove(id) {
+		removeSync(id) {
 			let txn
 			try {
 				txn = this.writeTxn || env.beginTxn()
@@ -182,8 +182,9 @@ export function open(name, options): Database {
 				return handleError(error, this, txn, () => this.remove(id))
 			}
 		},
-		removeSync(id) {
-			this.remove(id)
+		remove(id) {
+			queue.push({ id })
+			return this.scheduleCommit()
 		},
 		iterable(options) {
 			let iterable = new ArrayLikeIterable()
@@ -272,35 +273,50 @@ export function open(name, options): Database {
 			}
 			return iterable
 		},
+		scheduleCommit() {
+			return this.pendingPromise || (this.pendingPromise = new Promise((resolve, reject) => {
+				when(this.currentSync, () => {
+					//console.log('scheduling sync for', scheduledMs)
+					setTimeout(() => {
+						let currentSync = this.currentSync = this.pendingPromise
+						let operations = queue
+						function doBatch() {
+							db.batchAsync(operations, (error) => {
+								if (error) {
+									try {
+										handleError(error, db, null, doBatch)
+									} catch(error) {
+										reject(error)
+									}
+								} else
+									resolve()
+							})
+						}
+						doBatch()
+						queue = []
+					}, 50).unref()
+				})
+			}))
+
+		},
 		batch(operations) {
 			this.writes += operations.length
 			this.bytesWritten += operations.reduce((a, b) => a + (b.value && b.value.length || 0), 0)
-			let txn
-			try {
-				txn = this.writeTxn || env.beginTxn()
-				for (let operation of operations) {
-					if (typeof operation.key != 'object')
-						throw new Error('non-buffer key')
-					try {
-						let value = operation.value && compressSync(operation.value)
-						txn[operation.type === 'del' ? 'del' : 'putBinary'](db, operation.key, value, AS_BINARY)
-					} catch (error) {
-						if (error.message.startsWith('MDB_NOTFOUND')) {
-							// not an error
-						} else {
-							throw error
-						}
+			for (let operation of operations) {
+				if (typeof operation.key != 'object')
+					throw new Error('non-buffer key')
+				try {
+					let value = operation.value && compressSync(operation.value)
+					queue.push({ id: operation.id, value: operation.value })
+				} catch (error) {
+					if (error.message.startsWith('MDB_NOTFOUND')) {
+						// not an error
+					} else {
+						throw error
 					}
 				}
-				if (!this.writeTxn) {
-					txn.commit()
-					return this.scheduleSync()
-				}
-			} catch(error) {
-				if (this.writeTxn)
-					throw error // if we are in a transaction, the whole transaction probably needs to restart
-				return handleError(error, this, txn, () => this.batch(operations))
 			}
+			return this.scheduleCommit()
 		},
 		close() {
 			db.close()
