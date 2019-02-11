@@ -412,7 +412,7 @@ export function open(name, options): Database {
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
 			// increase by the golden ratio, which has the nice property of taking about the same space as the previous
 			// two spaces, which should help prevent virtual memory fragmentation
-			const newSize = Math.round(env.info().mapSize * 1.618 / 0x1000) * 0x1000
+			const newSize = Math.round(env.info().mapSize * 1.5 / 0x1000) * 0x1000
 			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)
 			if (db) {
