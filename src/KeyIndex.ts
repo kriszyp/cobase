@@ -215,7 +215,7 @@ export const Index = ({ Source }) => {
 				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
 			if (operations.length > 0) {
-				this.db.batch(operations)
+				yield this.db.batch(operations)
 			}
 			if (updatedIndexEntries.size > 0) { // note that it is possible for zero index changes to occur, but the data to still change, when using references
 				this.sendUpdates()
@@ -350,7 +350,7 @@ export const Index = ({ Source }) => {
 				//if (indexingState.processes.size == 0) {
 					indexingState.version = Math.max(lastIndexedVersion, indexingState.version || 1)
 				//}
-				db.put(INDEXING_STATE, serialize(indexingState))
+				db.putSync(INDEXING_STATE, serialize(indexingState))
 				this.isRegisteredAsVersion = 0
 				//console.log('saved final indexing state', indexingState, this.name)
 			})
@@ -578,7 +578,7 @@ export const Index = ({ Source }) => {
 
 				// otherwise this should be added to our queue, and processed when it is our turn
 				// we record waiting processes so the main process doesn't record a version update beyond the version of this process
-				db.put(INDEXING_STATE, serialize(indexingState))
+				db.putSync(INDEXING_STATE, serialize(indexingState))
 				// once saved, don't include ourselves in the "other" processes
 				if (pendingProcesses) {
 					pendingProcesses.delete(process.pid)
@@ -620,7 +620,7 @@ export const Index = ({ Source }) => {
 						const indexingState = parse(db.get(INDEXING_STATE)) || {}
 						if (indexingState && indexingState.processes && indexingState.processes.has(pid)) {
 							indexingState.processes.delete(pid)
-							db.put(INDEXING_STATE, serialize(indexingState))
+							db.putSync(INDEXING_STATE, serialize(indexingState))
 						}
 					})
 					// TODO: resumeIndex?

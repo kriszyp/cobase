@@ -3,6 +3,18 @@ const { removeSync } = require('fs-extra')
 const { open: openLmdb } = require('../dist/storage/lmdb')
 //const { deflateSync, inflateSync } = require('zlib')
 const { deflateSync, inflateSync } = require('snappy')
+	var fs = require('fs')
+	var sampleData = JSON.parse(fs.readFileSync(__dirname + '/../../dpack/tests/samples/study.json'))
+
+var sampleBuffer = require('dpack').serialize(sampleData)
+var getRandomBuffer = () => {
+	var size = Math.random() * 30000 >> 0
+	var randomBuffer = Buffer.allocUnsafe(size)
+	for (var i = 0; i< size; i++) {
+		randomBuffer[i] = Math.random() * 256 >> 0
+	}
+	return randomBuffer
+}
 suite('performance', function() {
 	removeSync('tests/db')
 
@@ -48,7 +60,7 @@ suite('performance', function() {
 	test('lmdb-write', () => {
 		let last
 		for (let i = 0; i < 10000; i++) {
-			last= lmdb.put(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
+			last= lmdb.put(Buffer.from((i % 1000).toString()), sampleBuffer)
 		}
 		return last
 	})
@@ -57,9 +69,9 @@ suite('performance', function() {
 			lmdb.get(Buffer.from((i % 1000).toString()))
 		}
 	})
-	test.skip('lmdb-read-write', () => {
+	test('lmdb-read-write', () => {
 		for (let i = 0; i < 10000; i++) {
-			lmdb.put(Buffer.from((i % 1000).toString()), Buffer.from(testString + i))
+			lmdb.put(Buffer.from((i % 1000).toString()), sampleBuffer)
 			lmdb.get(Buffer.from((i % 1000).toString()))
 		}
 	})
@@ -71,7 +83,7 @@ suite('performance', function() {
 			operations.push({
 				type: 'put',
 				key: Buffer.from((i % 1000).toString()),
-				value: Buffer.from(testString + i)
+				value: sampleBuffer
 			})
 		}
 		console.log('set up operations', Date.now() -start)

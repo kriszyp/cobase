@@ -1,6 +1,9 @@
 import * as fs from 'fs-extra'
 import { Env, openDbi, Cursor } from 'node-lmdb'
 import { compressSync, uncompressSync } from 'snappy'
+/*var identity = v => v
+let compressSync = identity
+let uncompressSync = identity*/
 import ArrayLikeIterable from '../util/ArrayLikeIterable'
 import { Database } from './Database'
 import when from '../util/when'
@@ -117,13 +120,15 @@ export function open(name, options): Database {
 			if (scheduledWrites) {
 				idPrimitive = id.toString('binary')
 				if (scheduledWrites.has(idPrimitive)) {
-					return scheduledWrites.get(idPrimitive)
+					let result = scheduledWrites.get(idPrimitive)
+					return result && uncompressSync(result)
 				}
 			}
 			if (committingWrites) {
 				idPrimitive = idPrimitive || id.toString('binary')
-				if (scheduledWrites.has(id)) {
-					return scheduledWrites.get(idPrimitive)
+				if (committingWrites.has(id)) {
+					let result = committingWrites.get(idPrimitive)
+					return result && uncompressSync(result)
 				}
 			}
 
@@ -239,7 +244,11 @@ export function open(name, options): Database {
 						}
 						let i = 0
 						while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) <= 0 : currentKey.compare(endKey) >= 0)) && i++ < 100) {
-							array.push(currentKey, uncompressSync(cursor.getCurrentBinaryUnsafe()))
+							try {
+								array.push(currentKey, uncompressSync(cursor.getCurrentBinaryUnsafe()))
+							} catch(error) {
+								console.log('error uncompressing value for key', currentKey)
+							}
 							if (count++ >= options.limit) {
 								finished = true
 								break
@@ -297,7 +306,6 @@ export function open(name, options): Database {
 		scheduleCommit() {
 			return this.pendingPromise || (this.pendingPromise = new Promise((resolve, reject) => {
 				when(this.currentSync, () => {
-					console.log('scheduling commit')
 					setTimeout(() => {
 						let currentSync = this.currentSync = this.pendingPromise
 						this.pendingPromise = null
@@ -308,10 +316,10 @@ export function open(name, options): Database {
 						committingWrites = scheduledWrites
 						scheduledWrites = null
 						const doBatch = () => {
-							console.log('do batch', db.batchAsync)
+							//console.log('do batch', name, operations.map(o => o.key.toString('binary')).join(','))
 							db.batchAsync(operations, (error) => {
-								console.log('finished batch', error)
 								if (error) {
+									console.log('error in batch', error)
 									try {
 										handleError(error, this, null, doBatch)
 									} catch(error) {
@@ -323,7 +331,6 @@ export function open(name, options): Database {
 									resolve()
 								}
 							})
-							console.log('started batch')
 						}
 						doBatch()
 					}, 50)
@@ -461,9 +468,7 @@ export function open(name, options): Database {
 			return retry()
 		}
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
-			// increase by the golden ratio, which has the nice property of taking about the same space as the previous
-			// two spaces, which should help prevent virtual memory fragmentation
-			const newSize = Math.round(env.info().mapSize * 1.5 / 0x1000) * 0x1000
+			const newSize = Math.ceil(env.info().mapSize * 1.3 / 0x200000 + 1) * 0x200000
 			console.log('Resizing database', name, 'to', newSize)
 			env.resize(newSize)
 			if (db) {

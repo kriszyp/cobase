@@ -318,7 +318,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			db.clear()
 			// restore the metadata
 			for (const { key, value } of allMeta) {
-				db.put(key, value)
+				db.putSync(key, value)
 			}
 		})
 		console.info('Cleared the database', this.name, 'rebuilding')
@@ -383,10 +383,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				start: Buffer.from([1, 3]),
 				end: INITIALIZING_PROCESS_KEY,
 			}).map(({key, value}) => (key[2] << 24) + (key[3] << 16) + (key[4] << 8) + key[5])).filter(pid => !isNaN(pid))
-			db.put(processKey, Buffer.from([])) // register process, in ready state
+			db.putSync(processKey, Buffer.from([])) // register process, in ready state
 			if (!initializingProcess || !this.otherProcesses.includes(initializingProcess)) {
 				initializingProcess = null
-				db.put(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
+				db.putSync(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
 			}
 			if (this.otherProcesses.includes(process.pid)) {
 				//console.warn('otherProcesses includes self')
@@ -445,7 +445,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						if (initializingProcess == pid) {
 							// take over the initialization process
 							//console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
-							db.put(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
+							db.putSync(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
 							doInit = true
 						}
 					})
@@ -719,19 +719,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	parseEntryValue(buffer) {
 		if (buffer) {
-			const parser = createParser()
-			parser.setSource(buffer.slice(0,24).toString(), 0)  // the lazy version only reads the first fews bits to get the version
-			const version = parser.read()
-			if (parser.hasMoreData()) {
-				const valueBuffer = buffer.slice(parser.getOffset())
-				if (valueBuffer.length === 1) {
-					// probably undefined, but either way, might as well do the parsing immediately
-					return {
-						version,
-						data: parser.read(),
-						buffer,
-					}
-				}
+			const version = buffer.readUIntBE(2, 6)
+			if (buffer.length > 8) {
+				const parser = createParser()
+				const valueBuffer = buffer.slice(8)
 				return {
 					version,
 					data: parseLazy(valueBuffer, parser),
@@ -916,8 +907,22 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (this.shouldPersist !== false) {
 				let db = Class.db
 				let version = this[versionProperty]
-				this._cachedValue = value = (value && typeof value === 'object') ? asBlock(value) : value
-				data = this.serializeEntryValue(version, value)
+				let blocks = 0
+				if (value && typeof value === 'object') {
+					var newValue = {}
+					for (var key in value) {
+						var subValue = value[key]
+						if (subValue && typeof subValue === 'object') {
+							newValue[key] = asBlock(subValue)
+						} else {
+							newValue[key] = subValue
+						}
+					}
+					value = asBlock(newValue)
+					blocks++
+				}
+				this._cachedValue = value
+				data = this.serializeEntryValue(version, value, blocks)
 				Class.dbPut(this.id, data, version/*, (oldEntry) => {
 					// the check version so it will only write if the version matches (in case another process modified it) or it is new entry
 					const { data, version: oldVersion } = this.parseEntryValue(oldEntry)
@@ -946,12 +951,32 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		})
 	}
 
-	serializeEntryValue(version, object) {
-		const serializer = createSerializer()
-		serializer.serialize(version)
-		if (object !== INVALIDATED_ENTRY)
-			serializer.serialize(object)
-		return serializer.getSerialized()
+	serializeEntryValue(version, object, blocks) {
+		var start = ((4 + blocks / 1.3) >> 0) * 8
+		var buffer
+		if (object === INVALIDATED_ENTRY) {
+			buffer = Buffer.allocUnsafe(8)
+			start = 8
+		} else {
+			buffer = serialize(object, {
+				startOffset: start
+			})
+		}
+		var sizeTableBuffer = buffer.sizeTable
+		let startOfHeader = start - 8 - (sizeTableBuffer ? sizeTableBuffer.length : 0)
+		if (startOfHeader < 0) {
+			console.error('Allocated header space was insufficient, concatenating buffers')
+			let header = Buffer.alloc(8)
+			header.writeUIntBE(version, 2, 6)
+			return Buffer.concat([header, sizeTableBuffer, buffer.slice(start)])
+		}
+		buffer[startOfHeader] = 0
+		buffer[startOfHeader + 1] = 0
+		buffer.writeUIntBE(version, startOfHeader + 2, 6)
+		if (sizeTableBuffer) {
+			sizeTableBuffer.copy(buffer, startOfHeader + 8)
+		}
+		return buffer.slice(startOfHeader)
 	}
 
 	static dbPut(key, value?, version?, checkVersion?) {
@@ -960,18 +985,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		const db = this.db
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
-		let whenWritten = this.whenWritten = db.transaction(() => {
-			const keyAsBuffer = toBufferKey(key)
-			if (checkVersion) {
-				if (!checkVersion(db.get(keyAsBuffer)))
-					return // don't write if the check version doesn't match.
-			}
-			if (value) {
-				db.put(keyAsBuffer, value)
-			} else {
-				db.remove(keyAsBuffer)
-			}
-		})
+		const keyAsBuffer = toBufferKey(key)
+		let whenWritten = this.whenWritten = db.put(keyAsBuffer, value)
 		// queue up a write of the last version number
 		if (!this.queuedVersionWrite) {
 			this.queuedVersionWrite = true
