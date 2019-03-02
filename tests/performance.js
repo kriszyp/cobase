@@ -66,10 +66,15 @@ suite('performance', function() {
 	})
 	test('lmdb-read', () => {
 		for (let i = 0; i < 10000; i++) {
-			lmdb.get(Buffer.from((i % 1000).toString()))
+			global.test = lmdb.get(Buffer.from((i % 1000).toString()), {
+				onShareInvalidate(arg) {
+					console.log('onShareInvalidate', arg)
+				}
+			})
 		}
 	})
 	test('lmdb-read-write', () => {
+		console.log('lmdb.get', lmdb.get.length)
 		for (let i = 0; i < 10000; i++) {
 			lmdb.put(Buffer.from((i % 1000).toString()), sampleBuffer)
 			lmdb.get(Buffer.from((i % 1000).toString()))

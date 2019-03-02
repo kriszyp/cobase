@@ -7,6 +7,7 @@ let uncompressSync = identity*/
 import ArrayLikeIterable from '../util/ArrayLikeIterable'
 import { Database } from './Database'
 import when from '../util/when'
+import WeakValueMap from '../util/WeakValueMap'
 
 const STARTING_ARRAY = [null]
 const AS_STRING = {
@@ -41,10 +42,14 @@ export function open(name, options): Database {
 	let db
 	let committingWrites
 	let scheduledWrites
+	let sharedBuffersActive = new WeakValueMap()
+	let sharedBuffersToInvalidate = new WeakValueMap()
+	let shareId = 0
 	options = Object.assign({
 		path: location + '.mdb',
 		noSubdir: true,
 		maxDbs: 1,
+		noMetaSync: true, // we use the completion of the next transaction to mark when a previous transaction is finally durable, plus meta-sync doesn't really wait for flush to finish on windows, so not altogether reliable anyway
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
 	}, options)
 
@@ -76,7 +81,10 @@ export function open(name, options): Database {
 		reads: 0,
 		writes: 0,
 		transactions: 0,
+		sharedBufferThreshold: 64, // should be about 512
 		readTxn: env.beginTxn(READING_TNX),
+		sharedBuffersActiveTxn: env.beginTxn(READING_TNX),
+		sharedBuffersToInvalidateTxn: env.beginTxn(READING_TNX),
 		transaction(execute, noSync) {
 			let result
 			if (this.writeTxn) {
@@ -115,20 +123,18 @@ export function open(name, options): Database {
 		getSync(id, asBuffer) {
 			return this.get(id, asBuffer)
 		},
-		get(id) {
+		get(id, options) {
 			let idPrimitive
 			if (scheduledWrites) {
 				idPrimitive = id.toString('binary')
 				if (scheduledWrites.has(idPrimitive)) {
-					let result = scheduledWrites.get(idPrimitive)
-					return result && uncompressSync(result)
+					return scheduledWrites.get(idPrimitive)
 				}
 			}
 			if (committingWrites) {
 				idPrimitive = idPrimitive || id.toString('binary')
 				if (committingWrites.has(id)) {
-					let result = committingWrites.get(idPrimitive)
-					return result && uncompressSync(result)
+					return committingWrites.get(idPrimitive)
 				}
 			}
 
@@ -142,7 +148,17 @@ export function open(name, options): Database {
 					txn.renew()
 				}
 				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
-				result = result && uncompressSync(result)
+				if (result) {
+					if (options && options.onShareInvalidate && result.length > this.sharedBufferThreshold) {
+						let parentArrayBuffer = result.parent // this is the internal ArrayBuffer with that references the external/shared memory
+						sharedBuffersActive.set(shareId++, parentArrayBuffer)
+						parentArrayBuffer.onShareInvalidate = options.onShareInvalidate
+					} else {
+						// below threshold, make a copy of the buffer
+						result = Buffer.from(result)
+					}
+				}
+				
 				if (!writeTxn) {
 					txn.reset()
 				}
@@ -158,7 +174,7 @@ export function open(name, options): Database {
 			if (!scheduledWrites) {
 				scheduledWrites = new Map()
 			}
-			scheduledWrites.set(id.toString('binary'), value && compressSync(value))
+			scheduledWrites.set(id.toString('binary'), value)
 			return this.scheduleCommit()
 		},
 		putSync(id, value) {
@@ -168,11 +184,10 @@ export function open(name, options): Database {
 					throw new Error('putting string value')
 					value = Buffer.from(value)
 				}
-				const compressedValue = compressSync(value)
-				this.bytesWritten += compressedValue && compressedValue.length || 0
+				this.bytesWritten += value && value.length || 0
 				this.writes++
 				txn = this.writeTxn || env.beginTxn()
-				txn.putBinary(db, id, compressedValue, AS_BINARY)
+				txn.putBinary(db, id, value, AS_BINARY)
 				if (!this.writeTxn) {
 					txn.commit()
 					return this.scheduleSync()					
@@ -245,7 +260,7 @@ export function open(name, options): Database {
 						let i = 0
 						while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) <= 0 : currentKey.compare(endKey) >= 0)) && i++ < 100) {
 							try {
-								array.push(currentKey, uncompressSync(cursor.getCurrentBinaryUnsafe()))
+								array.push(currentKey, cursor.getCurrentBinaryUnsafe())
 							} catch(error) {
 								console.log('error uncompressing value for key', currentKey)
 							}
@@ -304,39 +319,74 @@ export function open(name, options): Database {
 			return iterable
 		},
 		scheduleCommit() {
-			return this.pendingPromise || (this.pendingPromise = new Promise((resolve, reject) => {
-				when(this.currentSync, () => {
-					setTimeout(() => {
-						let currentSync = this.currentSync = this.pendingPromise
-						this.pendingPromise = null
-						let operations = []
-						for (const [id, value] of scheduledWrites) {
-							operations.push({ key: Buffer.from(id, 'binary'), value })
-						}
-						committingWrites = scheduledWrites
-						scheduledWrites = null
-						const doBatch = () => {
-							//console.log('do batch', name, operations.map(o => o.key.toString('binary')).join(','))
-							db.batchAsync(operations, (error) => {
-								if (error) {
-									console.log('error in batch', error)
-									try {
-										handleError(error, this, null, doBatch)
-									} catch(error) {
-										committingWrites = null // commits are done, can eliminate this now
-										reject(error)
-									}
-								} else {
-									committingWrites = null // commits are done, can eliminate this now
-									resolve()
+			if (!this.pendingBatch) {
+				// pendingBatch promise represents the completion of the transaction
+				let thisBatch = this.pendingBatch = new Promise((resolve, reject) => {
+					when(this.currentBatch, () => {
+						setTimeout(() => {
+							let currentBatch = this.currentBatch = this.pendingBatch
+							this.pendingBatch = null
+							this.pendingSync = null
+							if (scheduledWrites) {
+								// operations to perform, collect them as an array and start doing them
+								let operations = []
+								for (const [id, value] of scheduledWrites) {
+									operations.push([db, Buffer.from(id, 'binary'), value])
 								}
-							})
-						}
-						doBatch()
-					}, 50)
+								committingWrites = scheduledWrites
+								scheduledWrites = null
+								const doBatch = () => {
+									//console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
+									env.batchWrite(operations, AS_BINARY, (error) => {
+										//console.log('finished batch', name, Date.now(), Date.now() - start)
+										if (error) {
+											console.log('error in batch', error)
+											try {
+												// see if we can recover from recoverable error (like full map with a resize)
+												handleError(error, this, null, doBatch)
+											} catch(error) {
+												committingWrites = null // commits are done, can eliminate this now
+												reject(error)
+											}
+										} else {
+											committingWrites = null // commits are done, can eliminate this now
+											resolve()
+										}
+									})
+								}
+								doBatch()
+							} else {
+								let start = Date.now()
+								// if no operations are queued, we just do a sync, not transaction necessary
+								// TODO: Ideally we'd like this to be only an fdatasync/FlushFileBuffers call, and the map already asyncrhonously flushing for the metadata
+								this.sync((error) => {
+									console.log('finished sync', name, Date.now(), Date.now() - start)
+									if (error)
+										reject(error)
+									else
+										resolve()
+								})
+							}
+						}, 50)
+					})
 				})
-			}))
-
+				// pendingBatch promise represents the completion of the transaction, but the metadata update that
+				// points to the new transaction is not guaranteed to be written to disk until the next transaction
+				// or sync (something that calls fdatasync/FlushFileBuffers)
+				this.pendingSynced = {
+					// only schedule the follow up sync lazily, if the promise then is actually called
+					then: (onFulfilled, onRejected) =>
+						// schedule another commit after this one so the meta-data write can be flushed, even if it ends up just being a sync call
+						thisBatch.then(() => {
+							this.scheduleCommit()
+							return this.pendingBatch.then(onFulfilled, onRejected)
+						}),
+					// provide access to the transaction promise, since if availability of subsequent read is what is needed,
+					// the committed promise provides that (you don't have to wait for disk flush to access the committed data in memory)
+					committed: this.pendingBatch
+				}
+			}
+			return this.pendingSynced
 		},
 		batch(operations) {
 			this.writes += operations.length
@@ -345,7 +395,7 @@ export function open(name, options): Database {
 				if (typeof operation.key != 'object')
 					throw new Error('non-buffer key')
 				try {
-					let value = operation.value && compressSync(operation.value)
+					let value = operation.value
 					if (!scheduledWrites) {
 						scheduledWrites = new Map()
 					}
@@ -362,20 +412,53 @@ export function open(name, options): Database {
 		},
 		close() {
 			db.close()
+			env.close()
+		},
+		resetSharedBuffers(force) {
+			// these have to overlap, so we can access the old buffers and be assured anything that sticks around still has a read txn before it
+			let toAbort = this.sharedBuffersToInvalidateTxn
+			this.sharedBuffersToInvalidateTxn = this.sharedBuffersActiveTxn
+			if (!force)
+				this.sharedBuffersActiveTxn = env.beginTxn(READING_TNX)
+
+			let newSharedBuffersActive = new WeakValueMap();
+			[sharedBuffersToInvalidate, sharedBuffersActive].forEach((sharedBuffers, i) => {
+				let bufferIds = sharedBuffers._keysAsArray()
+				console.log('bufferIds',i,bufferIds)
+				for (const id of bufferIds) {
+					let buffer = sharedBuffers.get(id)
+					if (buffer) {
+						if (buffer.onShareInvalidate(force || i) === false && !force) {
+							newSharedBuffersActive.set(id, buffer)
+						}
+						// else false is specifically indicating that the shared buffer is still valid, so keep it around in that case
+					}
+				}
+			})
+			if (force) {
+				sharedBuffersToInvalidate = new WeakValueMap()
+			} else {
+				sharedBuffersToInvalidate = sharedBuffersActive
+			}
+			sharedBuffersActive = newSharedBuffersActive
+			toAbort.abort() // release the previous shared buffer txn
+			if (force) {
+				this.sharedBuffersToInvalidateTxn.abort()
+			}
 		},
 		syncAverage: 100,
 		scheduleSync() {
-			let pendingPromise
+			let pendingBatch
 			if (this.onDemandSync)
 				return this.onDemandSync
 			let scheduledMs = this.syncAverage * 100 // with no demand, we schedule syncs very slowly
 			let currentTimeout
-			const schedule = () => pendingPromise = new Promise((resolve, reject) => {
-				when(this.currentSync, () => {
+			const schedule = () => pendingBatch = new Promise((resolve, reject) => {
+				when(this.currentBatch, () => {
 					//console.log('scheduling sync for', scheduledMs)
 					currentTimeout = setTimeout(() => {
 						currentTimeout = null
-						let currentSync = this.currentSync = this.onDemandSync
+						let currentBatch = this.currentBatch = this.onDemandSync
 						this.onDemandSync = null
 						let start = Date.now()
 						//console.log('syncing', Date.now())
@@ -388,8 +471,8 @@ export function open(name, options): Database {
 							if (error) {
 								console.error(error)
 							}
-							if (currentSync == this.currentSync) {
-								this.currentSync = null
+							if (currentBatch == this.currentBatch) {
+								this.currentBatch = null
 							}
 							resolve()
 							setTimeout(() => {}, 1) // this is to deal with https://github.com/Venemo/node-lmdb/issues/138
@@ -411,7 +494,7 @@ export function open(name, options): Database {
 							schedule()
 						}
 					}
-					return pendingPromise.then(callback, errback)
+					return pendingBatch.then(callback, errback)
 				}
 			}
 		},
@@ -432,6 +515,11 @@ export function open(name, options): Database {
 			} catch(error) {
 				handleError(error, this, null, () => this.clear())
 			}
+		},
+		testResize() {
+			handleError(new Error('MDB_MAP_FULL'), this, null, () => {
+				console.log('done resizing')
+			})
 		}
 	}
 	cobaseDb.readTxn.reset()
@@ -470,10 +558,15 @@ export function open(name, options): Database {
 		if (error.message.startsWith('MDB_MAP_FULL') || error.message.startsWith('MDB_MAP_RESIZED')) {
 			const newSize = Math.ceil(env.info().mapSize * 1.3 / 0x200000 + 1) * 0x200000
 			console.log('Resizing database', name, 'to', newSize)
+			if (db) {
+				db.resetSharedBuffers(true)
+			}
 			env.resize(newSize)
 			if (db) {
 				db.readTxn = env.beginTxn(READING_TNX)
 				db.readTxn.reset()
+				db.sharedBuffersActiveTxn = env.beginTxn(READING_TNX)
+				db.sharedBuffersToInvalidateTxn = env.beginTxn(READING_TNX)
 			}
 			return retry()
 		} else if (error.message.startsWith('MDB_PAGE_NOTFOUND') || error.message.startsWith('MDB_CURSOR_FULL') || error.message.startsWith('MDB_CORRUPTED') || error.message.startsWith('MDB_INVALID')) {

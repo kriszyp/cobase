@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { createSerializer, serialize, parse, parseLazy, createParser, asBlock } from 'dpack'
+import { createSerializer, serialize, parse, parseLazy, createParser, asBlock, isBlock, copy, copyBuffers } from 'dpack'
 import * as lmdb from './storage/lmdb'
 import when from './util/when'
 import WeakValueMap from './util/WeakValueMap'
@@ -492,16 +492,19 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this._whenUpdateProcessed
 	}
 
-	valueOf() {
+	valueOf(flag) {
 		let context = currentContext
 		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
 			context.ifModifiedSince = undefined
 		}
 		const whenUpdateProcessed = this._whenUpdateProcessed
+		const withValue = flag ?
+			() => context ? context.executeWithin(() => when(super.valueOf(true), copy)) : when(super.valueOf(true), copy) :
+			() => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true)
 		if (whenUpdateProcessed) {
-			return whenUpdateProcessed.then(() => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
+			return whenUpdateProcessed.then(withValue)
 		}
-		return when(this.constructor.whenUpdatedInContext(context), () => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true))
+		return when(this.constructor.whenUpdatedInContext(context), withValue)
 	}
 
 	gotValue(value) {
@@ -714,7 +717,16 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	loadLocalData() {
 		let Class = this.constructor as PersistedType
 		let db = Class.db
-		return this.parseEntryValue(Class.db.get(toBufferKey(this.id)))
+		let block = this.parseEntryValue(Class.db.get(toBufferKey(this.id), {
+			onShareInvalidate(force) {
+				// TODO: if state byte indicates it is still fresh && !force:
+				// return false
+				// calling Buffer.from on ArrayBuffer returns NodeBuffer, calling again copies it
+				block.data && copyBuffers(block.data, this, Buffer.from(Buffer.from(this)))
+				this.onShareInvalidate = null // nothing more we can do at this point
+			}
+		}))
+		return block
 	}
 
 	parseEntryValue(buffer) {
@@ -907,19 +919,26 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (this.shouldPersist !== false) {
 				let db = Class.db
 				let version = this[versionProperty]
-				let blocks = 0
+				let blocks = 4
 				if (value && typeof value === 'object') {
-					var newValue = {}
-					for (var key in value) {
-						var subValue = value[key]
-						if (subValue && typeof subValue === 'object') {
-							newValue[key] = asBlock(subValue)
-						} else {
-							newValue[key] = subValue
+					if (value.constructor === Object) {
+						blocks = 0
+						var newValue = {}
+						for (var key in value) {
+							var subValue = value[key]
+							if (subValue && typeof subValue === 'object') {
+								newValue[key] = asBlock(subValue)
+								blocks++
+							} else {
+								newValue[key] = subValue
+							}
 						}
+						value = asBlock(newValue)
+						blocks++
+					} else if (isBlock(value)) {
+						// TODO: Maybe we should have someway to test if it a block is already parsed and can be safely accessed without incurring parsing cost
+						blocks = 15
 					}
-					value = asBlock(newValue)
-					blocks++
 				}
 				this._cachedValue = value
 				data = this.serializeEntryValue(version, value, blocks)

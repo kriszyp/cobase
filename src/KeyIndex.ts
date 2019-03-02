@@ -215,7 +215,7 @@ export const Index = ({ Source }) => {
 				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
 			if (operations.length > 0) {
-				yield this.db.batch(operations)
+				yield this.db.batch(operations).committed
 			}
 			if (updatedIndexEntries.size > 0) { // note that it is possible for zero index changes to occur, but the data to still change, when using references
 				this.sendUpdates()
