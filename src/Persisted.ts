@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { createSerializer, serialize, parse, parseLazy, createParser, asBlock, isBlock, copy, copyBuffers } from 'dpack'
+import { createSerializer, serialize, parse, parseLazy, createParser, asBlock, isBlock, copy, reassignBuffers } from 'dpack'
 import * as lmdb from './storage/lmdb'
 import when from './util/when'
 import WeakValueMap from './util/WeakValueMap'
@@ -13,6 +13,7 @@ import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
 import { registerClass, addProcess } from './util/process'
 import { DEFAULT_CONTEXT } from './RequestContext'
+import { runCompression, uncompressEntry, compressEntry, COMPRESSED_STATUS } from './util/compressor'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
@@ -21,6 +22,7 @@ const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // table metadata 2
 const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
 const INITIALIZATION_SOURCE = 'is-initializing'
 export const INVALIDATED_ENTRY = { state: 'invalidated'}
+const INVALIDATED_STATE = 1
 let globalDoesInitialization
 
 global.cache = expirationStrategy // help with debugging
@@ -59,6 +61,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static dbFolder = 'cachedb'
 	static db: Database
 	db: Database
+	repetitiveGets: boolean
+
 	static updatingProcessConnection: {
 		sendMessage(data: any): Promise<any>
 	}
@@ -492,15 +496,18 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this._whenUpdateProcessed
 	}
 
-	valueOf(flag) {
+	valueOf(mode) {
 		let context = currentContext
 		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
 			context.ifModifiedSince = undefined
 		}
 		const whenUpdateProcessed = this._whenUpdateProcessed
-		const withValue = flag ?
+		const withValue = typeof mode === 'object' ?
 			() => context ? context.executeWithin(() => when(super.valueOf(true), copy)) : when(super.valueOf(true), copy) :
-			() => context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true)
+			() => {
+				this.repetitiveGets = true // direct calls without internal mode/flags mean it is more likely to be repeated (so we probably don't want to compress it)
+				return context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true)
+			}
 		if (whenUpdateProcessed) {
 			return whenUpdateProcessed.then(withValue)
 		}
@@ -702,6 +709,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return promisedResult
 	}
+	static runCompression() {
+		runCompression(this.db)
+	}
+
 })
 
 const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Base {
@@ -717,22 +728,28 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	loadLocalData() {
 		let Class = this.constructor as PersistedType
 		let db = Class.db
-		let block = this.parseEntryValue(Class.db.get(toBufferKey(this.id), {
-			onShareInvalidate(force) {
-				// TODO: if state byte indicates it is still fresh && !force:
+		let key = toBufferKey(this.id)
+		let entryBuffer = Class.db.get(key)
+		if (entryBuffer && entryBuffer[0] === COMPRESSED_STATUS) {
+			entryBuffer = uncompressEntry(Class.db, key, entryBuffer)
+		}
+
+		let block = this.parseEntryValue(entryBuffer, {
+			sharedReference(forceCopy) {
+				// TODO: if state byte indicates it is still fresh && !forceCopy:
 				// return false
 				// calling Buffer.from on ArrayBuffer returns NodeBuffer, calling again copies it
-				block.data && copyBuffers(block.data, this, Buffer.from(Buffer.from(this)))
-				this.onShareInvalidate = null // nothing more we can do at this point
+				block.data && reassignBuffers(block.data, Buffer.from(Buffer.from(this)), this)
+				this.sharedReference = null // nothing more we can do at this point
 			}
-		}))
+		})
 		return block
 	}
 
 	parseEntryValue(buffer) {
 		if (buffer) {
 			const version = buffer.readUIntBE(2, 6)
-			if (buffer.length > 8) {
+			if (buffer.length > 8 && buffer[0] === 0) {
 				const parser = createParser()
 				const valueBuffer = buffer.slice(8)
 				return {
@@ -942,7 +959,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				}
 				this._cachedValue = value
 				data = this.serializeEntryValue(version, value, blocks)
-				Class.dbPut(this.id, data, version/*, (oldEntry) => {
+				Class.dbPut(this.id, data, version, !this.repetitiveGets/*, (oldEntry) => {
 					// the check version so it will only write if the version matches (in case another process modified it) or it is new entry
 					const { data, version: oldVersion } = this.parseEntryValue(oldEntry)
 					if (data !== INVALIDATED_ENTRY || version == oldVersion || newToCache) {
@@ -998,14 +1015,18 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return buffer.slice(startOfHeader)
 	}
 
-	static dbPut(key, value?, version?, checkVersion?) {
+	static dbPut(key, value?, version?, compress?) {
 		if (typeof value != 'object' && value) {
 			value = Buffer.from(value.toString())
 		}
 		const db = this.db
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
 		const keyAsBuffer = toBufferKey(key)
-		let whenWritten = this.whenWritten = db.put(keyAsBuffer, value)
+		if (compress) {
+			compressEntry(db, keyAsBuffer, value)
+		} else {
+			this.whenWritten = db.put(keyAsBuffer, value)
+		}
 		// queue up a write of the last version number
 		if (!this.queuedVersionWrite) {
 			this.queuedVersionWrite = true
@@ -1048,7 +1069,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	}
 	patch(properties) {
 		return this.then((value) =>
-			when(this.put(value = Object.assign(value || {}, properties)), () => value))
+			when(this.put(value = Object.assign(value ? copy(value) : {}, properties)), () => value))
 	}
 	put(value, event) {
 		let newToCache = !this.getValue()
@@ -1069,7 +1090,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 export default Persisted
 export const Persistable = MakePersisted(Transform)
 interface PersistedType extends Function {
-	dbPut(id, value?, version?): void
+	dbPut(id, value?, version?, compress?): void
 	otherProcesses: any[]
 	instanceSetUpdated(event): any
 	updated(event, by): any
@@ -1131,7 +1152,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					continue
 				}
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
-				this.dbPut(id, this.prototype.serializeEntryValue(version, INVALIDATED_ENTRY), version)
+				this.invalidateEntry(id, version)
 			}
 			//console.info('Finished reseting', this.name)
 		}.bind(this)))
@@ -1152,12 +1173,36 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				// completely empty entry for deleted items
 				Class.dbPut(this.id)
 			} else {
-				Class.dbPut(this.id, this.serializeEntryValue(version, INVALIDATED_ENTRY), version)
+				Class.invalidateEntry(this.id, version)
 			}
 //			}
 		}
 	}
 
+	static invalidateEntry(id, version) {
+		// we create the header separately and then copy it so it can be an atomic (64-bit) memory copy
+		const newHeader = Buffer.allocUnsafe(8)
+		newHeader.writeUIntBE(version, 2, 6)
+		newHeader[0] = INVALIDATED_STATE
+		newHeader[1] = 0
+		const db = this.db
+		const entryBuffer = db.get(toBufferKey(id), {
+			sharedReference: true
+		})
+		if (entryBuffer) {
+			if (entryBuffer[0] === 4) { // make sure it is not being compressed
+				// start a transaction to perform this
+				db.transaction(() => {
+					newHeader.copy(entryBuffer)
+				})
+			} else {
+				newHeader.copy(entryBuffer)
+				//db.scheduleCommit() // schedule a sync to get the memory change flushed
+			}
+		} else {
+			this.dbPut(id, newHeader)
+		}
+	}
 	getTransform() {
 		return checkInputTransform
 	}
@@ -1229,7 +1274,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 							event.triggers = [ INITIALIZATION_SOURCE ]
 							inMemoryInstance.updated(event)
 						} else {
-							this.dbPut(id, this.prototype.serializeEntryValue(version, INVALIDATED_ENTRY), version)
+							this.invalidateEntry(id, version)
 						}
 					}
 					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)

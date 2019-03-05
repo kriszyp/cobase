@@ -149,10 +149,10 @@ export function open(name, options): Database {
 				}
 				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
 				if (result) {
-					if (options && options.onShareInvalidate && result.length > this.sharedBufferThreshold) {
+					if (options && options.sharedReference && result.length > this.sharedBufferThreshold) {
 						let parentArrayBuffer = result.parent // this is the internal ArrayBuffer with that references the external/shared memory
 						sharedBuffersActive.set(shareId++, parentArrayBuffer)
-						parentArrayBuffer.onShareInvalidate = options.onShareInvalidate
+						parentArrayBuffer.sharedReference = options.sharedReference
 					} else {
 						// below threshold, make a copy of the buffer
 						result = Buffer.from(result)
@@ -427,8 +427,8 @@ export function open(name, options): Database {
 				console.log('bufferIds',i,bufferIds)
 				for (const id of bufferIds) {
 					let buffer = sharedBuffers.get(id)
-					if (buffer) {
-						if (buffer.onShareInvalidate(force || i) === false && !force) {
+					if (buffer && typeof buffer.sharedReference === 'function') {
+						if (buffer.sharedReference(force || i) === false && !force) {
 							newSharedBuffersActive.set(id, buffer)
 						}
 						// else false is specifically indicating that the shared buffer is still valid, so keep it around in that case
