@@ -10,6 +10,7 @@ import when from '../util/when'
 import WeakValueMap from '../util/WeakValueMap'
 
 const STARTING_ARRAY = [null]
+const VALUE_OVERFLOW_THRESHOLD = 2048
 const AS_STRING = {
 	asBuffer: false
 }
@@ -26,17 +27,9 @@ function genericErrorHandler(err) {
 	}
 }
 let env
+const EXTENSION = '.mdpack'
 export function open(name, options): Database {
 	let location = './' + name
-	fs.ensureDirSync(location.replace(/\/[^\/]+$/, ''))
-	try {
-		// move from directory to files of databases
-		if (fs.statSync(location).isDirectory()) {
-			fs.moveSync(location + '/data.mdb', location + '.mdb')
-			fs.removeSync(location)
-		}
-	} catch (error) {
-	}
 
 	let env = new Env()
 	let db
@@ -46,7 +39,7 @@ export function open(name, options): Database {
 	let sharedBuffersToInvalidate = new WeakValueMap()
 	let shareId = 0
 	options = Object.assign({
-		path: location + '.mdb',
+		path: location + EXTENSION,
 		noSubdir: true,
 		maxDbs: 1,
 		noMetaSync: true, // we use the completion of the next transaction to mark when a previous transaction is finally durable, plus meta-sync doesn't really wait for flush to finish on windows, so not altogether reliable anyway
@@ -54,9 +47,9 @@ export function open(name, options): Database {
 	}, options)
 
 	if (options && options.clearOnStart) {
-		console.info('Removing', location + '.mdb')
-		fs.removeSync(location + '.mdb')
-		console.info('Removed', location + '.mdb')
+		console.info('Removing', location + EXTENSION)
+		fs.removeSync(location + EXTENSION)
+		console.info('Removed', location + EXTENSION)
 	}
 	env.open(options)
 
@@ -81,7 +74,7 @@ export function open(name, options): Database {
 		reads: 0,
 		writes: 0,
 		transactions: 0,
-		sharedBufferThreshold: 64, // should be about 512
+		sharedBufferThreshold: VALUE_OVERFLOW_THRESHOLD, // should be at least 2048 (smaller than that don't go in overflow pages, and they can be copied/moved on any write)
 		readTxn: env.beginTxn(READING_TNX),
 		sharedBuffersActiveTxn: env.beginTxn(READING_TNX),
 		sharedBuffersToInvalidateTxn: env.beginTxn(READING_TNX),
@@ -427,8 +420,9 @@ export function open(name, options): Database {
 				console.log('bufferIds',i,bufferIds)
 				for (const id of bufferIds) {
 					let buffer = sharedBuffers.get(id)
+					let forceUnload = force || buffer.length < VALUE_OVERFLOW_THRESHOLD
 					if (buffer && typeof buffer.sharedReference === 'function') {
-						if (buffer.sharedReference(force || i) === false && !force) {
+						if (buffer.sharedReference(forceUnload || i) === false && !forceUnload) {
 							newSharedBuffersActive.set(id, buffer)
 						}
 						// else false is specifically indicating that the shared buffer is still valid, so keep it around in that case

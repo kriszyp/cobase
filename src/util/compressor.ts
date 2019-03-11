@@ -6,7 +6,7 @@ export const STANDBY_STATUS = 2
 export const COMPRESSING_STATUS = 3
 export const COMPRESSED_STATUS = 4
 export const UNCOMPRESSING_STATUS = 5
-const COMPRESSION_THRESHOLD = 128
+const COMPRESSION_THRESHOLD = 2048
 export async function runCompression(db) {
 	let iterator = db.iterable({ start: Buffer.from([2]) })
 	for (let { key, value } of iterator) {
@@ -52,7 +52,7 @@ export function uncompressEntry(db, key, compressedValue, callback) {
 export function compressEntry(db, key, value) {
 	if (value.length > COMPRESSION_THRESHOLD) {
 		value[0] = COMPRESSING_STATUS
-		db.put(key, value) // put this uncompressed value in so there is immediate consistency
+//		db.put(key, value) // put this uncompressed value in so there is immediate consistency
 		let header = value.slice(0, 8)
 		compress(value.slice(8), (error, compressedValue) => {
 			header[0] = COMPRESSED_STATUS

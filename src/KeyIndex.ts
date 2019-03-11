@@ -17,6 +17,7 @@ const EMPTY_BUFFER = Buffer.from([])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 60
 const INITIALIZATION_SOURCE = 'is-initializing'
+const INDEXING_STATE_SIZE = 3584 // good size for ensuring that it is an (and only one) overflow page in LMDB, and won't be moved
 const INITIALIZATION_SOURCE_SET = new Set([INITIALIZATION_SOURCE])
 export interface IndexRequest {
 	previousState?: any
@@ -55,7 +56,11 @@ export const Index = ({ Source }) => {
 	let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
 	const sourceVersions = {}
 	const processingSourceVersions = new Map<String, number>()
-	let pendingProcesses = new Map<number, number>()
+	let pendingProcesses = false
+	let stateOffset = 0
+	// this is shared memory buffer between processes where we define what each process is currently indexing, so processes can determine if there are potentially conflicts
+	// in what is being processed
+	let indexingState: Buffer
 	function addUpdatedIndexEntry(key, sources, triggers) {
 		let entry = updatedIndexEntries.get(key)
 		if (!entry) {
@@ -265,15 +270,24 @@ export const Index = ({ Source }) => {
 						yield this.delay(this.nice) // short delay for other processing to occur
 					for (let [id, indexRequest] of queue) {
 						// check for concurrent processes
-						if (indexRequest.pendingProcesses && pendingProcesses) {
+						if (pendingProcesses) {
 							let pendingRequests = []
-							for (const pid of indexRequest.pendingProcesses) {
-								// check to see if the version could be in conflict
-								let pendingProcessVersion = pendingProcesses.get(pid)
-								if (pendingProcessVersion < indexRequest.previousVersion) {
-									pendingRequests.push(this.sendRequestToIndex(pid, id, indexRequest))
+							if (!indexingState) {
+								this.getIndexingState()
+							}
+							const processes = indexingState[1]
+							pendingProcesses = false
+							for (let i = 0; i < processes; i++) {
+								let offset = (i + 1) * 16
+								let pendingProcessVersion
+								if (offset != stateOffset && (pendingProcessVersion = indexingState.readUIntBE(offset + 10, 6)) !== 0 &&
+										pendingProcessVersion < indexRequest.previousVersion) {
+									pendingRequests.push(this.sendRequestToIndex(indexingState.readUInt32BE(offset + 4), id, indexRequest))
+									pendingProcesses = true
+									return
 								}
 							}
+
 							if (pendingRequests.length > 0) {
 								actionsInProgress.push(Promise.all(pendingRequests).then(results => {
 									if (results.some(({ indexed }) => indexed)) {
@@ -307,7 +321,7 @@ export const Index = ({ Source }) => {
 							sinceLastStateUpdate = 0
 							yield Promise.all(indexingStarted)
 							let processedEntries = indexingStarted.length
-							this.saveLatestVersion()
+							this.saveLatestVersion(false)
 							cpuUsage = process.cpuUsage()
 							let lastCpuUsage = cpuTotalUsage
 							cpuTotalUsage = cpuUsage.user + cpuUsage.system
@@ -326,9 +340,9 @@ export const Index = ({ Source }) => {
 					yield Promise.all(actionsInProgress) // wait for any outstanding requests
 					this.state = 'processing'
 					yield Promise.all(indexingInProgress) // then wait for all indexing to finish everything
-					this.saveLatestVersion()
+					this.saveLatestVersion(false)
 				} while (queue.size > 0)
-				this.finishAsIndexer()
+				this.saveLatestVersion(true)
 				// TODO: Wait for tentative values to be dismissed
 				if (initialQueueSize > 100) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
@@ -340,20 +354,6 @@ export const Index = ({ Source }) => {
 			if (this.onStateChange) {
 				this.onStateChange({ processing: true, started: false })
 			}
-		}
-
-		static finishAsIndexer() {
-			const db = this.db
-			return db.transaction(() => {
-				const indexingState = parse(db.get(INDEXING_STATE)) || {}
-				indexingState.processes.delete(process.pid)
-				//if (indexingState.processes.size == 0) {
-					indexingState.version = Math.max(lastIndexedVersion, indexingState.version || 1)
-				//}
-				db.putSync(INDEXING_STATE, serialize(indexingState))
-				this.isRegisteredAsVersion = 0
-				//console.log('saved final indexing state', indexingState, this.name)
-			})
 		}
 
 		static *resumeIndex() {
@@ -411,20 +411,25 @@ export const Index = ({ Source }) => {
 		static delay(ms) {
 			return new Promise(resolve => setTimeout(resolve, ms))
 		}
-		static saveLatestVersion() {
+		static saveLatestVersion(finished) {
 			let indexedProgress = lastIndexedVersion
 			let nextIndexRequest = this.queue[0]
 			if (nextIndexRequest) {
 				// if there is an index request in the queue with an earlier version, make our last version right before that.
 				indexedProgress = Math.min(nextIndexRequest.version - 1, lastIndexedVersion)
 			}
-			const indexingState = parse(this.db.get(INDEXING_STATE)) || {}
-			if (!indexingState.processes) {
-				indexingState.processes = new Map()
+
+			if (!indexingState) {
+				this.getIndexingState()
 			}
-			indexingState.processes.set(process.pid, indexedProgress)
-			indexingState.version = indexedProgress
-			this.db.put(INDEXING_STATE, serialize(indexingState))
+			const versionWord = Buffer.alloc(8)
+			versionWord.writeUIntBE(lastIndexedVersion, 2, 6)
+			versionWord.copy(indexingState, 8) // copy into global version too
+			if (finished) {
+				indexingState.fill(0, stateOffset + 8, stateOffset + 16) // clear the version number
+			} else {
+				versionWord.copy(indexingState, stateOffset + 8) // copy word for an atomic update
+			}
 		}
 
 		static sendUpdates() {
@@ -540,6 +545,46 @@ export const Index = ({ Source }) => {
 			})
 		}
 
+		static getIndexingState() {
+			const getOptions = {
+				sharedReference(forceUnload) {
+					if (forceUnload === true) {
+						indexingState = null
+					} else {
+						return false // if it is not forced, indicate that it is always up-to-date (we never overwrite this entry)
+					}
+				}
+			}
+			return indexingState = this.db.get(INDEXING_STATE, getOptions)
+		}
+		static initializeDB() {
+			let initializingProcess = super.initializeDB()
+			const db = this.db
+			return db.transaction(() => {
+				// we setup the indexing state buffer
+				this.getIndexingState()
+				if (!indexingState || indexingState.length !== INDEXING_STATE_SIZE) {
+					db.putSync(INDEXING_STATE, Buffer.alloc(INDEXING_STATE_SIZE))
+					this.getIndexingState() // now get the shared reference to it
+				}
+				stateOffset = 16
+				while (stateOffset < indexingState.length) {
+					const processId = indexingState.readUInt32BE(stateOffset + 4)
+					if (processId === 0) { // empty slot, grab it for this process
+						indexingState.writeUInt32BE(process.pid, stateOffset + 4)
+						indexingState[1] = Math.max(indexingState[1], stateOffset / 16)
+						return // directly write to buffer, don't need to do a put
+					}
+					stateOffset += 16
+				}
+				console.error('No free indexing process slots, need to reset indexing state table')
+				indexingState.fill(0, 0, 1024)
+				stateOffset = 16
+				indexingState.writeUInt32BE(process.pid, stateOffset + 4)
+				indexingState[1] = 1
+			})
+			return initializingProcess
+		}
 		static initialize(module) {
 			this.initializing = true
 			this.Sources[0].start()
@@ -562,30 +607,26 @@ export const Index = ({ Source }) => {
 			if (this.isRegisteredAsVersion === lastIndexedVersion) {
 				return
 			}
-			const db = this.db
-			return db.transaction(() => {
-				const indexingState = parse(db.get(INDEXING_STATE)) || {}
-
-				pendingProcesses = null
-				if (!indexingState.processes) {
-					indexingState.processes = new Map()
-				} else if (indexingState.processes.size) {
-					pendingProcesses = indexingState.processes
+			if (!indexingState) {
+				// need to re-retrieve it
+				this.getIndexingState()
+			}
+			const globalLastVersion = Buffer.from(indexingState.slice(8, 16)).readUIntBE(2, 6) // copy atomically and read second 64-bit word
+			lastIndexedVersion = Math.max(lastIndexedVersion, globalLastVersion || 0)
+			const versionWord = Buffer.alloc(8)
+			versionWord.writeUIntBE(lastIndexedVersion, 2, 6)
+			versionWord.copy(indexingState, stateOffset + 8) // copy word for an atomic update
+			const processes = indexingState[1]
+			pendingProcesses = false
+			this.isRegisteredAsVersion === lastIndexedVersion
+			for (let i = 0; i < processes; i++) {
+				let offset = (i + 1) * 16
+				if (offset != stateOffset && indexingState.readUIntBE(offset + 10, 6) !== 0) {
+					pendingProcesses = true
+					return
 				}
-				lastIndexedVersion = Math.max(lastIndexedVersion, indexingState.version || 0)
-				this.isRegisteredAsVersion = lastIndexedVersion
-				indexingState.processes.set(process.pid, lastIndexedVersion)
-
-				// otherwise this should be added to our queue, and processed when it is our turn
-				// we record waiting processes so the main process doesn't record a version update beyond the version of this process
-				db.putSync(INDEXING_STATE, serialize(indexingState))
-				// once saved, don't include ourselves in the "other" processes
-				if (pendingProcesses) {
-					pendingProcesses.delete(process.pid)
-				}
-				return pendingProcesses
-			})
-		}
+			}
+ 		}
 		static pendingRequests = new Map()
 		static sendRequestToIndex(pid, id, indexRequest) {
 			try {
@@ -614,17 +655,25 @@ export const Index = ({ Source }) => {
 				if (error.message.startsWith('No socket')) {
 					// clean up if the process/socket is dead
 					console.info('Cleaning up socket to old process', pid)
-					pendingProcesses.delete(pid)
-					const db = this.db
-					db.transaction(() => {
-						const indexingState = parse(db.get(INDEXING_STATE)) || {}
-						if (indexingState && indexingState.processes && indexingState.processes.has(pid)) {
-							indexingState.processes.delete(pid)
-							db.putSync(INDEXING_STATE, serialize(indexingState))
+					if (!indexingState) {
+						this.getIndexingState()
+					}
+					const processes = indexingState[1]
+					let lastProcessNumber = 0
+					for (let i = 0; i < processes; i++) {
+						let offset = (i + 1) * 16
+						let slotPid
+						if (offset != stateOffset && (slotPid = indexingState.readUInt32BE(offset + 4))) {
+							if (slotPid === pid) {
+								indexingState.fill(0, stateOffset, stateOffset + 16) // clear it out by zeroing
+							} else {
+								lastProcessNumber = i
+							}
 						}
-					})
-					// TODO: resumeIndex?
+					}
+					indexingState[1] = lastProcessNumber + 1 // reset the number of processes since it may have decreased
 					return { indexed: false }
+					// TODO: resumeIndex?
 				}
 				throw error
 			}
@@ -698,13 +747,6 @@ export const Index = ({ Source }) => {
 						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
 					})
 					this.requestProcessing(DEFAULT_INDEXING_DELAY)
-				}
-				if (pendingProcesses) {
-					indexRequest.pendingProcesses = []
-					for (const [pid, version] of pendingProcesses) {
-						if (event.version > version)
-							indexRequest.pendingProcesses.push(pid)
-					}
 				}
 				if (!indexRequest.version) {
 					throw new Error('missing version')

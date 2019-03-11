@@ -352,14 +352,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static set doesInitialization(flag) {
 		this._doesInitialization = flag
 	}
-	static initialize() {
-		this.instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
+	static initializeDB() {
 		const options = {}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
 		}
 		if (this.useWritemap !== undefined) {
-			// useWriteMap provides better performance but is not crash-proof
+			// useWriteMap provides better performance
 			options.useWritemap = this.useWritemap
 		}
 		if (clearOnStart) {
@@ -368,16 +367,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name, options)
 
-		clearTimeout(this._registerTimeout)
-		if (global[this.name]) {
-			throw new Error(this.name + ' already registered')
-		}
-		global[this.name] = this
-		for (let Source of this.Sources || []) {
-			Source.notifies(this)
-		}
-		this.instancesById.name = this.name
-		let doesInitialization = Persisted.doesInitialization
 		const processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
 		let initializingProcess
 		db.transaction(() => {
@@ -405,6 +394,23 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.dbVersion = state.dbVersion
 			this.startVersion = state.startVersion
 		}
+		return initializingProcess
+	}
+	static initialize() {
+		this.instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
+		
+		clearTimeout(this._registerTimeout)
+		if (global[this.name]) {
+			throw new Error(this.name + ' already registered')
+		}
+		global[this.name] = this
+		for (let Source of this.Sources || []) {
+			Source.notifies(this)
+		}
+		this.instancesById.name = this.name
+		let doesInitialization = Persisted.doesInitialization
+		let initializingProcess = this.initializeDB()
+		const db = this.db
 		registerClass(this)
 		const doDataInitialization = () => {
 			//console.log('start data initialization', this.name)
@@ -476,7 +482,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
-			return when(this.resetAll(clearDb), () => clearDb)
+			return when(this.resetAll(clearDb), () => db.scheduleCommit()).then(() => clearDb)
 		}
 	}
 
@@ -639,6 +645,18 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.listenersWithContext.delete(target)
 		}
 		return super.stopNotifies(target)
+	}
+	static subscribedInstances: Map
+	init() {
+		if (!this.subscribedInstances) {
+			this.subscribedInstances = new Map()
+		}
+		this.subscribedInstances.set(this.id, this)
+		return super.init()
+	}
+	cleanup() {
+		this.subscribedInstances.delete(this.id)
+		return super.cleanup()		
 	}
 
 	static notifies(target) {
@@ -1022,10 +1040,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		const db = this.db
 		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
 		const keyAsBuffer = toBufferKey(key)
+		this.whenWritten = db.put(keyAsBuffer, value)
 		if (compress) {
 			compressEntry(db, keyAsBuffer, value)
-		} else {
-			this.whenWritten = db.put(keyAsBuffer, value)
 		}
 		// queue up a write of the last version number
 		if (!this.queuedVersionWrite) {
