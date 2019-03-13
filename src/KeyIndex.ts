@@ -114,6 +114,7 @@ export const Index = ({ Source }) => {
 							console.warn('Indexing with previously invalidated state, re-retrieval failed', {
 								id,
 								name: this.name,
+								status: indexRequest.status,
 								source: Source.name,
 								previousVersion: versionToDate(indexRequest.previousVersion),
 								updatedPreviousVersion: versionToDate(previousEntity.version),
@@ -280,11 +281,12 @@ export const Index = ({ Source }) => {
 							for (let i = 0; i < processes; i++) {
 								let offset = (i + 1) * 16
 								let pendingProcessVersion
-								if (offset != stateOffset && (pendingProcessVersion = indexingState.readUIntBE(offset + 10, 6)) !== 0 &&
-										pendingProcessVersion < indexRequest.previousVersion) {
-									pendingRequests.push(this.sendRequestToIndex(indexingState.readUInt32BE(offset + 4), id, indexRequest))
+								if (offset != stateOffset && (pendingProcessVersion = indexingState.readUIntBE(offset + 10, 6)) !== 0) {
 									pendingProcesses = true
-									return
+									if (pendingProcessVersion <= indexRequest.previousVersion ||
+										indexRequest.previousState === INVALIDATED_ENTRY && pendingProcessVersion <= indexRequest.version) {
+										pendingRequests.push(this.sendRequestToIndex(indexingState.readUInt32BE(offset + 4), id, indexRequest))
+									}
 								}
 							}
 
@@ -301,11 +303,13 @@ export const Index = ({ Source }) => {
 										}
 									} else {
 										sinceLastStateUpdate++
-										return indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
+										indexRequest.status = 'sent request, told to proceed'
+										indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
 									}
 								}))
 							} else { // no other processes that are processing a version that could be conflicting
 								sinceLastStateUpdate++
+								indexRequest.status = 'pending processes, but all processing later versions'
 								indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
 							}
 						} else {
@@ -568,17 +572,20 @@ export const Index = ({ Source }) => {
 					this.getIndexingState() // now get the shared reference to it
 				}
 				stateOffset = 16
-				while (stateOffset < indexingState.length) {
-					const processId = indexingState.readUInt32BE(stateOffset + 4)
-					if (processId === 0) { // empty slot, grab it for this process
-						indexingState.writeUInt32BE(process.pid, stateOffset + 4)
-						indexingState[1] = Math.max(indexingState[1], stateOffset / 16)
-						return // directly write to buffer, don't need to do a put
+				if (indexingState[1] < 20) {
+					while (stateOffset < indexingState.length) {
+						const processId = indexingState.readUInt32BE(stateOffset + 4)
+						if (processId === 0) { // empty slot, grab it for this process
+							indexingState.writeUInt32BE(process.pid, stateOffset + 4)
+							indexingState[1] = Math.max(indexingState[1], stateOffset / 16)
+							console.log('Registered indexing process at offset', stateOffset, indexingState[1], process.pid)
+							return // directly write to buffer, don't need to do a put
+						}
+						stateOffset += 16
 					}
-					stateOffset += 16
 				}
 				console.error('No free indexing process slots, need to reset indexing state table')
-				indexingState.fill(0, 0, 1024)
+				indexingState.fill(0, 0, INDEXING_STATE_SIZE)
 				stateOffset = 16
 				indexingState.writeUInt32BE(process.pid, stateOffset + 4)
 				indexingState[1] = 1
@@ -604,24 +611,24 @@ export const Index = ({ Source }) => {
 		static isRegisteredAsVersion = -1 // have we registered our process, and at what version
 		static whenAllConcurrentlyIndexing?: Promise<any> // promise if we are waiting for the initial indexing process to join the concurrent indexing mode
 		static checkAndUpdateProcessMap() {
-			if (this.isRegisteredAsVersion === lastIndexedVersion) {
+			/*if (this.isRegisteredAsVersion === lastIndexedVersion) {
 				return
-			}
+			}*/
 			if (!indexingState) {
 				// need to re-retrieve it
 				this.getIndexingState()
 			}
 			const globalLastVersion = Buffer.from(indexingState.slice(8, 16)).readUIntBE(2, 6) // copy atomically and read second 64-bit word
-			lastIndexedVersion = Math.max(lastIndexedVersion, globalLastVersion || 0)
+			lastIndexedVersion = Math.max(lastIndexedVersion, globalLastVersion || 1)
 			const versionWord = Buffer.alloc(8)
 			versionWord.writeUIntBE(lastIndexedVersion, 2, 6)
 			versionWord.copy(indexingState, stateOffset + 8) // copy word for an atomic update
 			const processes = indexingState[1]
 			pendingProcesses = false
-			this.isRegisteredAsVersion === lastIndexedVersion
+			this.isRegisteredAsVersion = lastIndexedVersion
 			for (let i = 0; i < processes; i++) {
 				let offset = (i + 1) * 16
-				if (offset != stateOffset && indexingState.readUIntBE(offset + 10, 6) !== 0) {
+				if (offset != stateOffset && indexingState.readUIntBE(offset + 10, 6) !== 0 && indexingState.readUInt32BE(offset + 4) !== 0) {
 					pendingProcesses = true
 					return
 				}
@@ -655,33 +662,46 @@ export const Index = ({ Source }) => {
 				if (error.message.startsWith('No socket')) {
 					// clean up if the process/socket is dead
 					console.info('Cleaning up socket to old process', pid)
-					if (!indexingState) {
-						this.getIndexingState()
-					}
-					const processes = indexingState[1]
-					let lastProcessNumber = 0
-					for (let i = 0; i < processes; i++) {
-						let offset = (i + 1) * 16
-						let slotPid
-						if (offset != stateOffset && (slotPid = indexingState.readUInt32BE(offset + 4))) {
-							if (slotPid === pid) {
-								indexingState.fill(0, stateOffset, stateOffset + 16) // clear it out by zeroing
-							} else {
-								lastProcessNumber = i
-							}
-						}
-					}
-					indexingState[1] = lastProcessNumber + 1 // reset the number of processes since it may have decreased
+					this.removeDeadProcessEntry(pid)
 					return { indexed: false }
 					// TODO: resumeIndex?
 				}
 				throw error
 			}
 		}
+
+		static removeDeadProcessEntry(pid)  {
+			if (!indexingState) {
+				this.getIndexingState()
+			}
+			console.info('Removing dead process entry', pid)
+			const processes = indexingState[1]
+			let lastProcessNumber = 0
+			for (let i = 1; i < processes + 1; i++) {
+				let offset = i * 16
+				let slotPid
+				if (slotPid = indexingState.readUInt32BE(offset + 4)) {
+					if (offset != stateOffset && slotPid === pid) {
+						indexingState.fill(0, offset, offset + 16) // clear it out by zeroing
+						console.info('Found and removed dead process entry', pid, 'at offset', offset)
+					} else {
+						lastProcessNumber = i // valid entry, increase last process index
+					}
+				}
+			}
+			console.log('setting process count', lastProcessNumber)
+			indexingState[1] = lastProcessNumber // reset the number of processes since it may have decreased
+		}
+
+		static cleanupDeadProcessReference(pid, initializingProcess) {
+			this.removeDeadProcessEntry(pid)
+			return super.cleanupDeadProcessReference(pid, initializingProcess)
+		}
+
 		static receiveRequest({ id, version, previousVersion, hasPreviousState }) {
 			const updateInQueue = this.queue.get(id);
 			if (updateInQueue) {
-				if ((updateInQueue.previousVersion || 0) < previousVersion || !hasPreviousState) {
+				if ((updateInQueue.previousVersion || 0) <= previousVersion || !hasPreviousState) {
 					// we have an earlier starting point, keep ours
 					if (updateInQueue.version < version) {
 						// TODO: Update our entity?

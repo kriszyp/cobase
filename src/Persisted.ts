@@ -412,57 +412,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let initializingProcess = this.initializeDB()
 		const db = this.db
 		registerClass(this)
-		const doDataInitialization = () => {
-			//console.log('start data initialization', this.name)
-			this.lastVersion = Math.max(this.lastVersion, +db.getSync(LAST_VERSION_IN_DB_KEY) || 0) // re-retrieve this, it could have changed since we got a lock
-			const whenFinished = () => {
-				try {
-					db.remove(INITIALIZING_PROCESS_KEY)
-					//console.log('finished data initialization', this.name)
-				} catch (error) {
-					console.warn(error.toString())
-				}
-			}
-			try {
-				return when(this.initializeData(), () => {
-					//console.log('Finished initializeData', this.name)
-					this.updateDBVersion()
-					whenFinished()
-				}, (error) => {
-					console.error(error)
-					whenFinished()
-				})
-			} catch (error) {
-				console.error(error)
-				whenFinished()
-			}
-		}
+
 		let whenEachProcess = []
 		//console.log('Connecting', this.name, 'to processes', this.otherProcesses)
 		for (const pid of this.otherProcesses) {
 			whenEachProcess.push(addProcess(pid, this).catch(() => {
-				let index = this.otherProcesses.indexOf(pid)
-				if (index > -1) {
-					this.otherProcesses.splice(index, 1)
-					db.remove(Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff]))
-				}
-				if (initializingProcess == pid) {
-					let doInit
-					db.transaction(() => {
-						// make sure it is still the initializing process
-						initializingProcess = db.get(Buffer.from([1, 4]))
-						initializingProcess = initializingProcess && +initializingProcess.toString()
-						if (initializingProcess == pid) {
-							// take over the initialization process
-							//console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
-							db.putSync(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
-							doInit = true
-						}
-					})
-					if (doInit) {
-						return doDataInitialization()
-					}
-				}
+				this.cleanupDeadProcessReference(pid, initializingProcess)
 			}))
 		}
 		// make sure these are inherited
@@ -472,7 +427,60 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				//console.log('Connected to each process complete and finished initialization', this.name)
 			})
 		}
-		return doDataInitialization()
+		return this.doDataInitialization()
+	}
+	static doDataInitialization() {
+		//console.log('start data initialization', this.name)
+		this.lastVersion = Math.max(this.lastVersion, +this.db.getSync(LAST_VERSION_IN_DB_KEY) || 0) // re-retrieve this, it could have changed since we got a lock
+		const whenFinished = () => {
+			try {
+				this.db.remove(INITIALIZING_PROCESS_KEY)
+				//console.log('finished data initialization', this.name)
+			} catch (error) {
+				console.warn(error.toString())
+			}
+		}
+		try {
+			return when(this.initializeData(), () => {
+				//console.log('Finished initializeData', this.name)
+				this.updateDBVersion()
+				whenFinished()
+			}, (error) => {
+				console.error(error)
+				whenFinished()
+			})
+		} catch (error) {
+			console.error(error)
+			whenFinished()
+		}
+	}
+	static cleanupDeadProcessReference(pid, initializingProcess) {
+		// error connecting to another process, which means it is dead/old and we need to clean up
+		// and possibly take over initialization
+		let index = this.otherProcesses.indexOf(pid)
+		const db = this.db
+		if (index > -1) {
+			this.otherProcesses.splice(index, 1)
+			db.remove(Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff]))
+		}
+		if (initializingProcess == pid) {
+			let doInit
+			db.transaction(() => {
+				// make sure it is still the initializing process
+				initializingProcess = db.get(Buffer.from([1, 4]))
+				initializingProcess = initializingProcess && +initializingProcess.toString()
+				if (initializingProcess == pid) {
+					// take over the initialization process
+					//console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
+					db.putSync(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
+					doInit = true
+				}
+			})
+			if (doInit) {
+				return this.doDataInitialization()
+			}
+		}
+
 	}
 	static initializeData() {
 		const db = this.db
@@ -1207,7 +1215,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			sharedReference: true
 		})
 		if (entryBuffer) {
-			if (entryBuffer[0] === 4) { // make sure it is not being compressed
+			if (entryBuffer[0] === 4 || entryBuffer.length < 10048) {
+				// if it is too small for an overflow page or it is being compressed need to
 				// start a transaction to perform this
 				db.transaction(() => {
 					newHeader.copy(entryBuffer)

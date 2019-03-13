@@ -17,6 +17,10 @@ const AS_STRING = {
 const AS_BINARY = {
 	keyIsBuffer: true
 }
+const AS_BINARY_ALLOW_NOT_FOUND = {
+	keyIsBuffer: true,
+	ignoreNotFound: true
+}
 const READING_TNX = {
 	readOnly: true
 }
@@ -78,7 +82,7 @@ export function open(name, options): Database {
 		readTxn: env.beginTxn(READING_TNX),
 		sharedBuffersActiveTxn: env.beginTxn(READING_TNX),
 		sharedBuffersToInvalidateTxn: env.beginTxn(READING_TNX),
-		transaction(execute, noSync) {
+		transaction(execute, noSync, abort) {
 			let result
 			if (this.writeTxn) {
 				// already nested in a transaction, just execute and return
@@ -96,7 +100,11 @@ export function open(name, options): Database {
 				this.transactions++
 				txn = this.writeTxn = env.beginTxn()
 				result = execute()
-				txn.commit()
+				if (abort) {
+					txn.abort()
+				} else {
+					txn.commit()
+				}
 				committed = true
 				if (noSync)
 					return result
@@ -330,7 +338,7 @@ export function open(name, options): Database {
 								scheduledWrites = null
 								const doBatch = () => {
 									//console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
-									env.batchWrite(operations, AS_BINARY, (error) => {
+									env.batchWrite(operations, AS_BINARY_ALLOW_NOT_FOUND, (error) => {
 										//console.log('finished batch', name, Date.now(), Date.now() - start)
 										if (error) {
 											console.log('error in batch', error)
@@ -353,7 +361,8 @@ export function open(name, options): Database {
 								// if no operations are queued, we just do a sync, not transaction necessary
 								// TODO: Ideally we'd like this to be only an fdatasync/FlushFileBuffers call, and the map already asyncrhonously flushing for the metadata
 								this.sync((error) => {
-									console.log('finished sync', name, Date.now(), Date.now() - start)
+									if (Date.now() - start > 100)
+										console.log('finished sync', name, Date.now(), Date.now() - start)
 									if (error)
 										reject(error)
 									else
