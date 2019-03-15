@@ -313,19 +313,18 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static clearAllData() {
 		let db = this.db
+		let count = 0
 		db.transaction(() => {
 			// we need to preserve the persistent metadata when we clear the db
-			const allMeta = Array.from(db.iterable({
-				start: Buffer.from([1, 0]),
-				end: Buffer.from([1, 5]),
-			}))
-			db.clear()
-			// restore the metadata
-			for (const { key, value } of allMeta) {
-				db.putSync(key, value)
+			for (const { key } of db.iterable({
+				values: false,
+				start: Buffer.from([1, 6]) // start after the metadata
+			})) {
+				db.removeSync(key)
+				count++
 			}
 		})
-		console.info('Cleared the database', this.name, 'rebuilding')
+		console.info('Cleared the database', this.name, 'of', count, 'entries, rebuilding')
 	}
 
 	static register(sourceCode?: { id?: string, version?: number }) {
@@ -595,6 +594,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				Class.instanceSetUpdated(event)
 			}
 			super.updated(event, by)
+			if (event.sourceProcess) {
+				// if it came from another process, we should re-read it before assuming it has been invalidated
+				this.readyState = null
+			}
 		}
 		// notify class listeners too
 		for (let listener of Class.listeners || []) {
@@ -1207,7 +1210,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		writeUInt(newHeader, version)
 		newHeader[0] = INVALIDATED_STATE
 		newHeader[1] = 0
-		const db = this.db
+		/*const db = this.db
 		const entryBuffer = db.get(toBufferKey(id), {
 			sharedReference: true
 		})
@@ -1222,9 +1225,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				newHeader.copy(entryBuffer)
 				//db.scheduleCommit() // schedule a sync to get the memory change flushed
 			}
-		} else {
+		} else {*/
 			this.dbPut(id, newHeader)
-		}
+		//}
 	}
 	getTransform() {
 		return checkInputTransform
@@ -1276,6 +1279,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static initializeData() {
+		console.log('initializeData', this.name)
 		const initialized = super.initializeData()
 		return when(initialized, () => {
 			let receivedPendingVersion = []

@@ -15,7 +15,7 @@ export interface Database {
 }
 export interface IterableOptions {
 	start: Buffer,
-	end: Buffer,
+	end?: Buffer,
 	values?: boolean
 	reverse?: boolean
 	valueAsBuffer?: boolean

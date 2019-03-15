@@ -27,6 +27,8 @@ export interface IndexRequest {
 	sources?: Set<any>
 	version: number
 	triggers?: Set<any>
+	previousValues?: Map
+	by?: any
 	resolveOnCompletion?: Function[]
 }
 interface IndexEntryUpdate {
@@ -105,25 +107,31 @@ export const Index = ({ Source }) => {
 						// the update yet. After we send the indexing request to the other processes, if any concurrently indexing process
 						// responds, it should mean that it has finished resolving and we can make another attempat at retrieving the previous state
 						// so we can properly sequence the indexing operations
-						const previousEntity = entity.loadLocalData()
+						let previousEntity = indexRequest.previousValues.get(indexRequest.by) // see if another index has updated this
 						previousState = previousEntity.data
-						if (previousState === INVALIDATED_ENTRY) {
-							// TODO: if it is still invalidated, that may mean that another process snuck in another update. we may want to try requesting previous state again.
-							// But generally this is because an previous indexing process died, leaving invalidated entries in place.
-							previousState = undefined
-							console.warn('Indexing with previously invalidated state, re-retrieval failed', {
-								id,
-								name: this.name,
-								status: indexRequest.status,
-								source: Source.name,
-								previousVersion: versionToDate(indexRequest.previousVersion),
-								updatedPreviousVersion: versionToDate(previousEntity.version),
-								version: versionToDate(indexRequest.version),
-								now: new Date().toLocaleString(),
-							})
+						if (previousState  === INVALIDATED_ENTRY) {
 
+							previousEntity = entity.loadLocalData()
+
+							previousState = previousEntity.data
+							indexRequest.previousValues.set(indexRequest.by, previousEntity)
+							if (previousState === INVALIDATED_ENTRY) {
+								// TODO: if it is still invalidated, that may mean that another process snuck in another update. we may want to try requesting previous state again.
+								// But generally this is because an previous indexing process died, leaving invalidated entries in place.
+								previousState = undefined
+								console.warn('Indexing with previously invalidated state, re-retrieval failed', {
+									id,
+									name: this.name,
+									status: indexRequest.status,
+									source: Source.name,
+									previousVersion: versionToDate(indexRequest.previousVersion),
+									updatedPreviousVersion: versionToDate(previousEntity.version),
+									version: versionToDate(indexRequest.version),
+									now: new Date().toLocaleString(),
+								})
+							}
+							indexRequest.previousVersion = previousEntity.version
 						}
-						indexRequest.previousVersion = previousEntity.version
 					}
 					if (previousState && previousState.then) {
 						previousState = yield previousState
@@ -221,6 +229,7 @@ export const Index = ({ Source }) => {
 				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
 			this.queue.delete(id)
+			const sourceWhenWritten = Source.whenWritten
 			if (operations.length > 0) {
 				yield this.db.batch(operations).committed
 			}
@@ -228,6 +237,9 @@ export const Index = ({ Source }) => {
 				this.sendUpdates()
 			}
 			if (indexRequest.resolveOnCompletion) {
+				if (sourceWhenWritten) {
+					yield sourceWhenWritten.committed
+				}
 				for (const resolve of indexRequest.resolveOnCompletion) {
 					resolve()
 				}
@@ -364,6 +376,7 @@ export const Index = ({ Source }) => {
 
 		static *resumeIndex() {
 			// TODO: if it is over half the index, just rebuild
+			console.log('resumeIndex', this.name)
 			this.state = 'initializing'
 			const db: Database = this.db
 			console.log('resumeIndex', this.name, 'starting from', lastIndexedVersion)
@@ -549,7 +562,7 @@ export const Index = ({ Source }) => {
 			})
 		}
 
-		static getIndexingState() {
+		static getIndexingState(onlyTry?) {
 			const getOptions = {
 				sharedReference(forceUnload) {
 					if (forceUnload === true) {
@@ -559,17 +572,21 @@ export const Index = ({ Source }) => {
 					}
 				}
 			}
-			return indexingState = this.db.get(INDEXING_STATE, getOptions)
+			indexingState = this.db.get(INDEXING_STATE, getOptions)
+			if (!indexingState && !onlyTry) {
+				this.initializeIndexingState()
+			}
+			return indexingState
 		}
-		static initializeDB() {
-			let initializingProcess = super.initializeDB()
+		static initializeIndexingState() {
 			const db = this.db
-			return db.transaction(() => {
+			db.transaction(() => {
+				this.getIndexingState(true)
 				// we setup the indexing state buffer
-				this.getIndexingState()
 				if (!indexingState || indexingState.length !== INDEXING_STATE_SIZE) {
 					db.putSync(INDEXING_STATE, Buffer.alloc(INDEXING_STATE_SIZE))
-					this.getIndexingState() // now get the shared reference to it
+					console.log('wrote the INDEXING_STATE', this.name)
+					this.getIndexingState(true) // now get the shared reference to it again
 				}
 				lastIndexedVersion = readUInt(Buffer.from(indexingState.slice(8, 16))) || 1
 				stateOffset = 16
@@ -580,7 +597,8 @@ export const Index = ({ Source }) => {
 							writeUInt(indexingState, process.pid, stateOffset)
 							indexingState[1] = Math.max(indexingState[1], stateOffset / 16)
 							console.log('Registered indexing process at offset', stateOffset, indexingState[1], process.pid)
-							return // directly write to buffer, don't need to do a put
+							// directly write to buffer, don't need to do a put
+							return indexingState
 						}
 						stateOffset += 16
 					}
@@ -591,6 +609,10 @@ export const Index = ({ Source }) => {
 				writeUInt(indexingState, process.pid, stateOffset)
 				indexingState[1] = 1
 			})
+		}
+		static initializeDB() {
+			let initializingProcess = super.initializeDB()
+			this.initializeIndexingState()
 			return initializingProcess
 		}
 		static initialize(module) {
@@ -675,7 +697,6 @@ export const Index = ({ Source }) => {
 			if (!indexingState) {
 				this.getIndexingState()
 			}
-			console.info('Removing dead process entry', pid)
 			const processes = indexingState[1]
 			let lastProcessNumber = 0
 			for (let i = 1; i < processes + 1; i++) {
@@ -684,13 +705,11 @@ export const Index = ({ Source }) => {
 				if (slotPid = readUInt(indexingState, offset)) {
 					if (offset != stateOffset && slotPid === pid) {
 						indexingState.fill(0, offset, offset + 16) // clear it out by zeroing
-						console.info('Found and removed dead process entry', pid, 'at offset', offset)
 					} else {
 						lastProcessNumber = i // valid entry, increase last process index
 					}
 				}
 			}
-			console.log('setting process count', lastProcessNumber)
 			indexingState[1] = lastProcessNumber // reset the number of processes since it may have decreased
 		}
 
@@ -705,7 +724,8 @@ export const Index = ({ Source }) => {
 				if ((updateInQueue.previousVersion || 0) <= previousVersion || !hasPreviousState) {
 					// we have an earlier starting point, keep ours
 					if (updateInQueue.version < version) {
-						// TODO: Update our entity?
+						// update our version number to be the latest
+						updateInQueue.version = version
 					}
 					//console.log('receiveRequest', id, this.name, 'version', version, 'previousVersion', previousVersion, 'will handle')
 					return new Promise(resolve =>
@@ -764,6 +784,10 @@ export const Index = ({ Source }) => {
 						now: Date.now(),
 						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
 					})
+					if (indexRequest.previousState == INVALIDATED_ENTRY) {
+						indexRequest.previousValues = event.previousValues // need to have a shared map to update
+						indexRequest.by = by
+					}
 					history.push({ id, indexRequest })
 					this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				}

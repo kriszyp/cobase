@@ -45,7 +45,7 @@ export function open(name, options): Database {
 	options = Object.assign({
 		path: location + EXTENSION,
 		noSubdir: true,
-		maxDbs: 1,
+		maxDbs: 2,
 		noMetaSync: true, // we use the completion of the next transaction to mark when a previous transaction is finally durable, plus meta-sync doesn't really wait for flush to finish on windows, so not altogether reliable anyway
 		useWritemap: true, // it seems like this makes the dbs slightly more prone to corruption, but definitely still occurs without, and this provides better performance
 	}, options)
@@ -151,7 +151,7 @@ export function open(name, options): Database {
 				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
 				if (result) {
 					if (options && options.sharedReference && result.length > this.sharedBufferThreshold) {
-						let parentArrayBuffer = result.parent // this is the internal ArrayBuffer with that references the external/shared memory
+						let parentArrayBuffer = result.buffer // this is the internal ArrayBuffer with that references the external/shared memory
 						sharedBuffersActive.set(shareId++, parentArrayBuffer)
 						parentArrayBuffer.sharedReference = options.sharedReference
 					} else {
@@ -191,7 +191,6 @@ export function open(name, options): Database {
 				txn.putBinary(db, id, value, AS_BINARY)
 				if (!this.writeTxn) {
 					txn.commit()
-					return this.scheduleSync()					
 				}
 			} catch(error) {
 				if (this.writeTxn)
@@ -261,7 +260,7 @@ export function open(name, options): Database {
 						let i = 0
 						while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) <= 0 : currentKey.compare(endKey) >= 0)) && i++ < 100) {
 							try {
-								array.push(currentKey, cursor.getCurrentBinaryUnsafe())
+								array.push(currentKey, options.values === false ? null : cursor.getCurrentBinaryUnsafe())
 							} catch(error) {
 								console.log('error uncompressing value for key', currentKey)
 							}
@@ -444,9 +443,17 @@ export function open(name, options): Database {
 				sharedBuffersToInvalidate = sharedBuffersActive
 			}
 			sharedBuffersActive = newSharedBuffersActive
-			toAbort.abort() // release the previous shared buffer txn
+			try {
+				toAbort.abort() // release the previous shared buffer txn
+			} catch(error) {
+				console.warn(error)
+			}
+			try {
 			if (force) {
 				this.sharedBuffersToInvalidateTxn.abort()
+			}
+			} catch(error) {
+				console.warn(error)
 			}
 		},
 		syncAverage: 100,
@@ -530,8 +537,17 @@ export function open(name, options): Database {
 	return cobaseDb
 	function handleError(error, db, txn, retry) {
 		try {
-			if (db && db.readTxn)
+			if (db && db.readTxn) {
+				db.readTxn.renew()
+				try {
+					console.log('db.get(Buffer.from([1, 5])', name, db.readTxn.getBinaryUnsafe(db.db, Buffer.from([1, 5]), AS_BINARY))
+					db.readTxn.reset()
+				} catch(error){
+										db.readTxn.reset()
+
+				}
 				db.readTxn.abort()
+			}
 		} catch(error) {
 		//	console.warn('txn already aborted')
 		}
