@@ -396,6 +396,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return initializingProcess
 	}
+
+
+	static getStructureVersion() {
+		// default version handling is just to get the static version, but this can be overriden with something
+		// that gets this asynchronously
+		return this.version		
+	}
+
 	static initialize() {
 		this.instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
 		
@@ -409,26 +417,30 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization
-		let initializingProcess = this.initializeDB()
-		const db = this.db
-		registerClass(this)
+		when(this.getStructureVersion(), dbVersion => {
+			this.version = dbVersion
+			let initializingProcess = this.initializeDB()
+			const db = this.db
+			registerClass(this)
 
-		let whenEachProcess = []
-		//console.log('Connecting', this.name, 'to processes', this.otherProcesses)
-		for (const pid of this.otherProcesses) {
-			whenEachProcess.push(addProcess(pid, this).catch(() => {
-				this.cleanupDeadProcessReference(pid, initializingProcess)
-			}))
-		}
-		// make sure these are inherited
-		if (initializingProcess/* || !Persisted.doesInitialization*/) {
-			// there is another process handling initialization
-			return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), () => {
-				//console.log('Connected to each process complete and finished initialization', this.name)
-			})
-		}
-		return this.doDataInitialization()
+			let whenEachProcess = []
+			//console.log('Connecting', this.name, 'to processes', this.otherProcesses)
+			for (const pid of this.otherProcesses) {
+				whenEachProcess.push(addProcess(pid, this).catch(() => {
+					this.cleanupDeadProcessReference(pid, initializingProcess)
+				}))
+			}
+			// make sure these are inherited
+			if (initializingProcess/* || !Persisted.doesInitialization*/) {
+				// there is another process handling initialization
+				return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), () => {
+					//console.log('Connected to each process complete and finished initialization', this.name)
+				})
+			}
+			return this.doDataInitialization()
+		})
 	}
+
 	static doDataInitialization() {
 		//console.log('start data initialization', this.name)
 		this.lastVersion = Math.max(this.lastVersion, +this.db.getSync(LAST_VERSION_IN_DB_KEY) || 0) // re-retrieve this, it could have changed since we got a lock
@@ -774,7 +786,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	parseEntryValue(buffer) {
 		if (buffer) {
-			const version = buffer.readUIntBE(2, 6)
+			const version = readUInt(buffer)
 			if (buffer.length > 8 && buffer[0] === 0) {
 				const parser = createParser()
 				const valueBuffer = buffer.slice(8)
@@ -806,11 +818,17 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			else
 				this.promise = null
 			if (data && data !== INVALIDATED_ENTRY) {
-				this.readyState = 'up-to-date'
+				
 				this.version = Math.max(version, this.version || 0)
-				this[versionProperty] = version
-				this._cachedValue = data
-				expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
+				if (this.version == version) {
+					this.readyState = 'up-to-date'
+					this[versionProperty] = version
+					this._cachedValue = data
+					expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
+				} else {
+					// if we have a newer version than the db, leav in invalidated state
+					this.readyState = 'invalidated'
+				}
 			} else if (version) {
 				this.version = Math.max(version, this.version || 0)
 				this.readyState = 'invalidated'
@@ -962,29 +980,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (this.shouldPersist !== false) {
 				let db = Class.db
 				let version = this[versionProperty]
-				let blocks = 4
-				if (value && typeof value === 'object') {
-					if (value.constructor === Object) {
-						blocks = 0
-						var newValue = {}
-						for (var key in value) {
-							var subValue = value[key]
-							if (subValue && typeof subValue === 'object') {
-								newValue[key] = asBlock(subValue)
-								blocks++
-							} else {
-								newValue[key] = subValue
-							}
-						}
-						value = asBlock(newValue)
-						blocks++
-					} else if (isBlock(value)) {
-						// TODO: Maybe we should have someway to test if it a block is already parsed and can be safely accessed without incurring parsing cost
-						blocks = 15
-					}
-				}
 				this._cachedValue = value
-				data = this.serializeEntryValue(version, value, blocks)
+				data = this.serializeEntryValue(version, value, 20/*blocks*/)
 				Class.dbPut(this.id, data, version, !this.repetitiveGets/*, (oldEntry) => {
 					// the check version so it will only write if the version matches (in case another process modified it) or it is new entry
 					const { data, version: oldVersion } = this.parseEntryValue(oldEntry)
@@ -1014,7 +1011,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	serializeEntryValue(version, object, blocks) {
-		var start = ((4 + blocks / 1.3) >> 0) * 8
+		var start = 256//((4 + blocks / 1.3) >> 0) * 8
 		var buffer
 		if (object === INVALIDATED_ENTRY) {
 			buffer = Buffer.allocUnsafe(8)
@@ -1029,12 +1026,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (startOfHeader < 0) {
 			console.error('Allocated header space was insufficient, concatenating buffers')
 			let header = Buffer.alloc(8)
-			header.writeUIntBE(version, 2, 6)
+			writeUInt(header, version)
 			return Buffer.concat([header, sizeTableBuffer, buffer.slice(start)])
 		}
 		buffer[startOfHeader] = 0
 		buffer[startOfHeader + 1] = 0
-		buffer.writeUIntBE(version, startOfHeader + 2, 6)
+		writeUInt(buffer, version, startOfHeader)
 		if (sizeTableBuffer) {
 			sizeTableBuffer.copy(buffer, startOfHeader + 8)
 		}
@@ -1090,7 +1087,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	getValue() {
 		if (!this.readyState)
 			this.loadLatestLocalData()
-		return when(super.getValue(), (value) => this._cachedValue || value) // we use the cached value, since it should be a dpack block
+		return super.getValue()
 	}
 	patch(properties) {
 		return this.then((value) =>
@@ -1136,7 +1133,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		let context = currentContext
 		if (!this.readyState)
 			this.loadLatestLocalData()
-		if (this.cachedVersion > -1 && this.readyState === 'up-to-date') {
+		if (this.cachedVersion > -1 && this.cachedVersion >= this.version && this.readyState === 'up-to-date') {
 			// it is live, so we can shortcut and just return the cached value
 			if (context) {
 				context.setVersion(this.cachedVersion)
@@ -1146,7 +1143,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}
 			return this.cachedValue
 		}
-		return when(super.getValue(), (value) => this._cachedValue || value) // we use the cached value, since it should be a dpack block
+		return super.getValue()
 	}
 
 	is(value, event) {
@@ -1207,7 +1204,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static invalidateEntry(id, version) {
 		// we create the header separately and then copy it so it can be an atomic (64-bit) memory copy
 		const newHeader = Buffer.allocUnsafe(8)
-		newHeader.writeUIntBE(version, 2, 6)
+		writeUInt(newHeader, version)
 		newHeader[0] = INVALIDATED_STATE
 		newHeader[1] = 0
 		const db = this.db
@@ -1395,7 +1392,25 @@ const checkInputTransform = {
 		if (args[0] === undefined && args.length > 0) {
 			return
 		}
-		return instance.transform.apply(instance, args)
+		let result = instance.transform.apply(instance, args)
+		return when(result, (value) => {
+			// convert to partitioned blocks
+			if (value && typeof value === 'object' && !isBlock(value)) {
+				if (value.constructor === Object) {
+					var newValue = {}
+					for (var key in value) {
+						var subValue = value[key]
+						if (subValue && typeof subValue === 'object') {
+							newValue[key] = asBlock(subValue)
+						} else {
+							newValue[key] = subValue
+						}
+					}
+					return asBlock(newValue)
+				}
+			}
+			return value
+		})
 	}
 }
 secureAccess.checkPermissions = () => true
@@ -1408,4 +1423,13 @@ export function configure(options) {
 	Persistable.dbFolder = options.cacheDbFolder || options.dbFolder
 	globalDoesInitialization = options.doesInitialization
 	clearOnStart = options.clearOnStart
+}
+
+// write a 64-bit uint (could be optimized/improved)
+function writeUInt(buffer, number, offset?) {
+	buffer.writeUIntBE(number, (offset || 0) + 2, 6)
+}
+// read a 64-bit uint (could be optimized/improved)
+function readUInt(buffer, offset?) {
+	return buffer.readUIntBE((offset || 0) + 2, 6)
 }
