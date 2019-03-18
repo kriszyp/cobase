@@ -1,6 +1,5 @@
 import * as fs from 'fs-extra'
 import { Env, openDbi, Cursor } from 'node-lmdb'
-import { compressSync, uncompressSync } from 'snappy'
 /*var identity = v => v
 let compressSync = identity
 let uncompressSync = identity*/

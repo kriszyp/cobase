@@ -999,8 +999,15 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				data = this.serializeEntryValue(version, value, 20/*blocks*/)
 				const keyAsBuffer = toBufferKey(key)
 				this.whenWritten = db.put(keyAsBuffer, value)
-				if (!this.repetitiveGets && false) {
-					compressEntry(db, keyAsBuffer, value)
+				if (!this.repetitiveGets) {
+					let compressedData = Buffer.allocUnsafe(data.length)
+					let compressedLength = lz4Compress(data, compressedData, 12)
+					if (compressedLength) {
+						data.copy(compressedData, 0, 0, 8)
+						compressedData[0] = COMPRESSED_STATUS
+						compressedData.writeUInt32BE(compressedLength, 8)
+						data = compressedData
+					} // else it didn't compress any smaller, bail out
 				}
 				let whenValueCommitted = this.whenValueCommitted = this.db.put(keyAsBuffer, data, this.invalidatedHeader(version)).committed.then(result => {
 					if (result === false) {
