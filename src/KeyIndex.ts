@@ -99,10 +99,13 @@ export const Index = ({ Source }) => {
 				// TODO: handle delta, for optimized index updaes
 				// this is for recording changed entities and removing the values that previously had been indexed
 				let previousEntries
+				previousState = yield previousState
 				let entity = Source.for(id)
 				try {
 					if (previousState === INVALIDATED_ENTRY) {
-						// this is one of the trickiest conditions in multi-process indexing. This generally means that there was an update
+						this.queue.delete(id)
+						return this.sendRequestToIndex()
+/*						// this is one of the trickiest conditions in multi-process indexing. This generally means that there was an update
 						// event that occurred on entity that was already updated in another process, but that other process had not resolved
 						// the update yet. After we send the indexing request to the other processes, if any concurrently indexing process
 						// responds, it should mean that it has finished resolving and we can make another attempat at retrieving the previous state
@@ -131,7 +134,7 @@ export const Index = ({ Source }) => {
 								})
 							}
 							indexRequest.previousVersion = previousEntity.version
-						}
+						}*/
 					}
 					if (previousState && previousState.then) {
 						previousState = yield previousState
@@ -172,6 +175,7 @@ export const Index = ({ Source }) => {
 							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name, entity && entity.id)
 						}
 					}
+					yield entity.whenValueCommitted
 					if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 					// let the indexBy define how we get the set of values to index
 					try {
@@ -218,12 +222,6 @@ export const Index = ({ Source }) => {
 				if (Index.onIndexEntry) {
 					Index.onIndexEntry(this.name, id, previousEntries, entries)
 				}
-				if (indexRequest.version) {
-			//		console.log('indexRequest.version', indexRequest.version)
-					lastIndexedVersion = Math.max(indexRequest.version, lastIndexedVersion)
-				}
-				else
-					console.warn('index request missing version', this.name, id)
 			} catch(error) {
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
@@ -231,7 +229,7 @@ export const Index = ({ Source }) => {
 			this.queue.delete(id)
 			const sourceWhenWritten = Source.whenWritten
 			if (operations.length > 0) {
-				yield this.db.batch(operations).committed
+				yield this.submitWrites(operations, previousVersion, version)
 			}
 			if (updatedIndexEntries.size > 0) { // note that it is possible for zero index changes to occur, but the data to still change, when using references
 				this.sendUpdates()
@@ -243,6 +241,78 @@ export const Index = ({ Source }) => {
 				for (const resolve of indexRequest.resolveOnCompletion) {
 					resolve()
 				}
+			}
+		}
+		static pendingVersions = new Map()
+
+		static updateEarliestPendingVersion() {
+			const processes = indexingState[1]
+			for (let i = 1; i < processes + 1; i++) {
+				let offset = i * 16
+				let processVersion
+				let pid
+				if (offset != stateOffset && (processVersion = readUInt(indexingState, offset + 8)) !== 0 && (pid = readUInt(indexingState, offset)) !== 0) {
+					if (processVersion < this.earliestPendingVersion || processVersion === this.earliestPendingVersion && pid < process.pid) {
+						this.earliestPendingVersionInOtherProcesses = processVersion
+					}
+				}
+			}
+		}
+		static submitWrites(operations, previousVersion, version) {
+			let committed
+			if (previousVersion < this.earliestPendingVersionInOtherProcesses) {
+				// previous version is earlier than all writes, proceed
+				committed = this.db.batch(operations).committed
+			} else {
+				// first, read an updated earliestPendingVersion to see if it is still before our pending write
+				this.earliestPendingVersionInOtherProcesses = version
+				this.updateEarliestPendingVersion()
+				if (previousVersion < this.earliestPendingVersion) {
+					// now previous version is earlier than all writes from other processes, proceed
+					committed = this.db.batch(operations).committed
+				} else {
+					this.queuedWrites.push({
+						previousVersion,
+						version,
+						operations
+					})
+					if (!this.queuedRequestForWriteNotification) {
+						return this.queuedRequestForWriteNotification = this.sendRequestForWriteNotification().then(() => this.resumeWrites())
+					}
+				}
+			}
+			committed.maxVersion = Math.max(committed.maxVersion || 0, version)
+			if (!this.pendingVersions.has(committed)) {
+				this.pendingVersions.set(committed, version)
+				committed.then(() => {
+					this.pendingVersions.delete(committed)
+					let myEarliestPendingVersion = 0 // recompute this
+					for ([, version] of this.pendingVersions) {
+						myEarliestPendingVersion = Math.min(myEarliestPendingVersion || Infinity, version)
+					}
+					if (myEarliestPendingVersion === undefined && this.queue.size) {
+						for (let [, { version }] of this.queue) {
+							myEarliestPendingVersion = Math.min(myEarliestPendingVersion || Infinity, version)
+						}
+					}
+					this.updateProcessMap(myEarliestPendingVersion, true)
+					this.earliestPendingVersionInOtherProcesses = myEarliestPendingVersion || (committed.maxVersion + 1)
+					this.updateEarliestPendingVersion()
+
+					const versionWord = Buffer.alloc(8)
+					writeUInt(versionWord, this.earliestPendingVersionInOtherProcesses)
+					versionWord.copy(indexingState, 8) // copy word for an atomic update
+					
+				})
+			}
+			return committed
+		}
+
+		static resumeWrites() {
+			const resumedWrites = this.queuedWrites
+			this.queuedWrites = []
+			for (const { operations, previousVersion, version} of resumedWrites) {
+				this.submitWrites(operations, previousVersion, version)
 			}
 		}
 
@@ -284,53 +354,6 @@ export const Index = ({ Source }) => {
 					if (this.nice > 0)
 						yield this.delay(this.nice) // short delay for other processing to occur
 					for (let [id, indexRequest] of queue) {
-						// check for concurrent processes
-						if (pendingProcesses) {
-							let pendingRequests = []
-							if (!indexingState) {
-								this.getIndexingState()
-							}
-							const processes = indexingState[1]
-							pendingProcesses = false
-							for (let i = 0; i < processes; i++) {
-								let offset = (i + 1) * 16
-								let pendingProcessVersion
-								if (offset != stateOffset && (pendingProcessVersion = readUInt(indexingState, offset + 8)) !== 0) {
-									pendingProcesses = true
-									if (pendingProcessVersion <= indexRequest.previousVersion ||
-										indexRequest.previousState === INVALIDATED_ENTRY && pendingProcessVersion <= indexRequest.version) {
-										pendingRequests.push(this.sendRequestToIndex(readUInt(indexingState, offset), id, indexRequest))
-									}
-								}
-							}
-
-							if (pendingRequests.length > 0) {
-								actionsInProgress.push(Promise.all(pendingRequests).then(results => {
-									if (results.some(({ indexed }) => indexed)) {
-										lastIndexedVersion = Math.max(indexRequest.version, lastIndexedVersion)
-										this.queue.delete(id)
-										// we still need to resolve any requests that we have received
-										if (indexRequest.resolveOnCompletion) {
-											for (const resolve of indexRequest.resolveOnCompletion) {
-												resolve()
-											}
-										}
-									} else {
-										sinceLastStateUpdate++
-										indexRequest.status = 'sent request, told to proceed'
-										indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
-									}
-								}))
-							} else { // no other processes that are processing a version that could be conflicting
-								sinceLastStateUpdate++
-								indexRequest.status = 'pending processes, but all processing later versions'
-								indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
-							}
-						} else {
-							sinceLastStateUpdate++
-							indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
-						}
-
 						if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * speedAdjustment) {
 							// we have process enough, commit our changes so far
 							this.onBeforeCommit && this.onBeforeCommit(id)
@@ -339,7 +362,7 @@ export const Index = ({ Source }) => {
 							sinceLastStateUpdate = 0
 							yield Promise.all(indexingStarted)
 							let processedEntries = indexingStarted.length
-							this.saveLatestVersion(false)
+							//this.saveLatestVersion(false)
 							cpuUsage = process.cpuUsage()
 							let lastCpuUsage = cpuTotalUsage
 							cpuTotalUsage = cpuUsage.user + cpuUsage.system
@@ -355,12 +378,11 @@ export const Index = ({ Source }) => {
 						}
 					}
 					this.state = 'waiting on other processes'
-					//yield Promise.all(actionsInProgress) // wait for any outstanding requests
 					this.state = 'processing'
 					yield Promise.all(indexingInProgress) // then wait for all indexing to finish everything
-					this.saveLatestVersion(false)
+					//this.saveLatestVersion(false)
 				} while (queue.size > 0)
-				this.saveLatestVersion(true)
+				//this.saveLatestVersion(true)
 				// TODO: Wait for tentative values to be dismissed
 				if (initialQueueSize > 100) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
@@ -413,7 +435,7 @@ export const Index = ({ Source }) => {
 				this.state = 'ready'
 				return
 			}
-			this.checkAndUpdateProcessMap()
+			this.updateProcessMap(lastIndexedVersion)
 
 			this.state = 'initializing queue'
 			for (let { id, version } of idsAndVersionsToReindex) {
@@ -631,30 +653,22 @@ export const Index = ({ Source }) => {
 				return spawn(this.resumeIndex())
 			})
 		}
-		static isRegisteredAsVersion = -1 // have we registered our process, and at what version
+		static myEarliestPendingVersion = 0 // have we registered our process, and at what version
 		static whenAllConcurrentlyIndexing?: Promise<any> // promise if we are waiting for the initial indexing process to join the concurrent indexing mode
-		static checkAndUpdateProcessMap() {
-			/*if (this.isRegisteredAsVersion === lastIndexedVersion) {
-				return
-			}*/
-			if (!indexingState) {
-				// need to re-retrieve it
-				this.getIndexingState()
-			}
-			const globalLastVersion = readUInt(Buffer.from(indexingState.slice(8, 16))) // copy atomically and read second 64-bit word
-			lastIndexedVersion = Math.max(lastIndexedVersion, globalLastVersion || 1)
-			const versionWord = Buffer.alloc(8)
-			writeUInt(versionWord, lastIndexedVersion)
-			versionWord.copy(indexingState, stateOffset + 8) // copy word for an atomic update
-			const processes = indexingState[1]
-			pendingProcesses = false
-			this.isRegisteredAsVersion = lastIndexedVersion
-			for (let i = 0; i < processes; i++) {
-				let offset = (i + 1) * 16
-				if (offset != stateOffset && readUInt(indexingState, offset + 8) !== 0 && readUInt(indexingState, offset) !== 0) {
-					pendingProcesses = true
-					return
+		static waitForProcess: {
+			runUntilVersion: number
+			pid: number
+		}
+		static updateProcessMap(version, force?) {
+			if (this.myEarliestPendingVersion === 0 || force) {
+				if (!indexingState) {
+					// need to re-retrieve it
+					this.getIndexingState()
 				}
+				const versionWord = Buffer.alloc(8)
+				writeUInt(versionWord, version)
+				versionWord.copy(indexingState, stateOffset + 8) // copy word for an atomic update
+				this.myEarliestPendingVersion = version
 			}
  		}
 		static pendingRequests = new Map()
@@ -719,6 +733,7 @@ export const Index = ({ Source }) => {
 		}
 
 		static receiveRequest({ id, version, previousVersion, hasPreviousState }) {
+			return this.whenUnblockedProcessing
 			const updateInQueue = this.queue.get(id);
 			if (updateInQueue) {
 				if ((updateInQueue.previousVersion || 0) <= previousVersion || !hasPreviousState) {
@@ -765,14 +780,15 @@ export const Index = ({ Source }) => {
 				return event
 			}
 			if (id && !this.gettingAllIds) {
-				this.checkAndUpdateProcessMap()
+				const version = event.version
+				this.updateProcessMap(version)
 				// queue up processing the event
 				let indexRequest = this.queue.get(id)
 				if (indexRequest) {
 					// put it at that end so version numbers are in order, but don't alter the previous state or version, that is still what we will be diffing from
 					this.queue.delete(id)
 					this.queue.set(id, indexRequest)
-					indexRequest.version = event.version
+					indexRequest.version = version
 					if (event.triggers)
 						for (let trigger of event.triggers)
 							indexRequest.triggers.add(trigger)
@@ -780,7 +796,7 @@ export const Index = ({ Source }) => {
 					this.queue.set(id, indexRequest = {
 						previousState: previousEntry && previousEntry.data,
 						previousVersion: previousEntry ? previousEntry.version : -1,
-						version: event.version,
+						version: version,
 						now: Date.now(),
 						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
 					})
@@ -791,7 +807,7 @@ export const Index = ({ Source }) => {
 					history.push({ id, indexRequest })
 					this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				}
-				if (!indexRequest.version) {
+				if (!version) {
 					throw new Error('missing version')
 				}
 				indexRequest.deleted = event.type == 'deleted'

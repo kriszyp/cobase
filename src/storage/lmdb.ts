@@ -129,13 +129,13 @@ export function open(name, options): Database {
 			if (scheduledWrites) {
 				idPrimitive = id.toString('binary')
 				if (scheduledWrites.has(idPrimitive)) {
-					return scheduledWrites.get(idPrimitive)
+					return scheduledWrites.get(idPrimitive).value
 				}
 			}
 			if (committingWrites) {
 				idPrimitive = idPrimitive || id.toString('binary')
 				if (committingWrites.has(id)) {
-					return committingWrites.get(idPrimitive)
+					return committingWrites.get(idPrimitive).value
 				}
 			}
 
@@ -149,15 +149,9 @@ export function open(name, options): Database {
 					txn.renew()
 				}
 				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
-				if (result) {
-					if (options && options.sharedReference && result.length > this.sharedBufferThreshold) {
-						let parentArrayBuffer = result.buffer // this is the internal ArrayBuffer with that references the external/shared memory
-						sharedBuffersActive.set(shareId++, parentArrayBuffer)
-						parentArrayBuffer.sharedReference = options.sharedReference
-					} else {
-						// below threshold, make a copy of the buffer
-						result = Buffer.from(result)
-					}
+				if (result && (!options && options.noCopy)) {
+					// make a copy so we aren't referencing shared memory
+					result = Buffer.from(result)
 				}
 				
 				if (!writeTxn) {
@@ -171,12 +165,29 @@ export function open(name, options): Database {
 				return handleError(error, this, txn, () => this.get(id))
 			}
 		},
-		put(id, value) {
+		notifyOnInvalidation(buffer, onInvalidation) {
+			let parentArrayBuffer = buffer.buffer // this is the internal ArrayBuffer with that references the external/shared memory
+			sharedBuffersActive.set(shareId++, parentArrayBuffer)
+			parentArrayBuffer.onInvalidation = onInvalidation
+		},
+		put(id, value, ifValue) {
 			if (!scheduledWrites) {
 				scheduledWrites = new Map()
 			}
-			scheduledWrites.set(id.toString('binary'), value)
-			return this.scheduleCommit()
+			let key = id.toString('binary')
+			scheduledWrites.set(key, {
+				value,
+				ifValue
+			})
+			let whenSynced = this.scheduleCommit()
+			if (ifValue) {
+				const withResult = (unsuccessfulWrites) => !unsuccessfulWrites.has(id)
+				let whenSyncedWithResult = whenSynced.then(withResult)
+				whenSyncedWithResult.committed = whenSynced.committed.then(withResult)
+				return whenSyncedWithResult
+			}
+			return whenSynced
+
 		},
 		putSync(id, value) {
 			let txn
@@ -220,11 +231,13 @@ export function open(name, options): Database {
 				return handleError(error, this, txn, () => this.remove(id))
 			}
 		},
-		remove(id) {
+		remove(id, ifValue) {
 			if (!scheduledWrites) {
 				scheduledWrites = new Map()
 			}
-			scheduledWrites.set(id.toString('binary'))
+			scheduledWrites.set(id.toString('binary'), {
+				ifValue
+			})
 			return this.scheduleCommit()
 		},
 		iterable(options) {
@@ -330,14 +343,14 @@ export function open(name, options): Database {
 							if (scheduledWrites) {
 								// operations to perform, collect them as an array and start doing them
 								let operations = []
-								for (const [id, value] of scheduledWrites) {
-									operations.push([db, Buffer.from(id, 'binary'), value])
+								for (const [id, { value, ifValue }] of scheduledWrites) {
+									operations.push([db, Buffer.from(id, 'binary'), value, ifValue])
 								}
 								committingWrites = scheduledWrites
 								scheduledWrites = null
 								const doBatch = () => {
 									//console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
-									env.batchWrite(operations, AS_BINARY_ALLOW_NOT_FOUND, (error) => {
+									env.batchWrite(operations, AS_BINARY_ALLOW_NOT_FOUND, (error, results) => {
 										//console.log('finished batch', name, Date.now(), Date.now() - start)
 										if (error) {
 											console.log('error in batch', error)
@@ -350,7 +363,14 @@ export function open(name, options): Database {
 											}
 										} else {
 											committingWrites = null // commits are done, can eliminate this now
-											resolve()
+											// find any unsuccessful writes
+											const unsuccessfulWrites = new Set()
+											for (let i = 0, l = results.length; i < l; i++) {
+												if (results[i] === false) {
+													unsuccessfulWrites.add(operations[i][1].toString('binary'))
+												}
+											}
+											resolve(unsuccessfulWrites)
 										}
 									})
 								}
@@ -400,7 +420,7 @@ export function open(name, options): Database {
 					if (!scheduledWrites) {
 						scheduledWrites = new Map()
 					}
-					scheduledWrites.set(operation.key.toString('binary'), value)
+					scheduledWrites.set(operation.key.toString('binary'), { value })
 				} catch (error) {
 					if (error.message.startsWith('MDB_NOTFOUND')) {
 						// not an error

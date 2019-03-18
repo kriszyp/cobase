@@ -14,6 +14,7 @@ import { Database, IterableOptions, OperationsArray } from './storage/Database'
 import { registerClass, addProcess } from './util/process'
 import { DEFAULT_CONTEXT } from './RequestContext'
 import { runCompression, uncompressEntry, compressEntry, COMPRESSED_STATUS } from './util/compressor'
+import { encodeBlock as lz4Compress, decodeBlock as lz4Uncompress } from 'lz4'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
@@ -23,6 +24,9 @@ const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
 const INITIALIZATION_SOURCE = 'is-initializing'
 export const INVALIDATED_ENTRY = { state: 'invalidated'}
 const INVALIDATED_STATE = 1
+const NO_COPY_OPTIONS = {
+	noCopy: true
+}
 let globalDoesInitialization
 
 global.cache = expirationStrategy // help with debugging
@@ -157,8 +161,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (!isMultiProcess && this.readyState === 'up-to-date' && this._cachedValue) {
 			return previousValues.set(this, this._cachedValue)
 		}
-		if (!previousValues.has(this))
-			previousValues.set(this, this.loadLocalData())
+		if (previousValues.has(this)) {
+			return previousValues.get(this)
+		} else {
+			let previousValue = this.loadLocalData()
+			previousValues.set(this, previousValue)
+			return previousValue
+		}
 	}
 
 	static index(propertyName: string, indexBy?: (value, sourceKey) => any) {
@@ -577,15 +586,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event.type === 'discovered') // skip reset
 			Variable.prototype.updated.apply(this, arguments)
 		else {
-			if (Class.updateWithPrevious) {
-				if (true/* isMultiProcess */) {
-					this.constructor.db.transaction(() => {
-						this.assignPreviousValue(event)
-						this.resetCache(event)
-					})
-				}
-			} else
-				this.resetCache(event)
+			this.invalidateEntry(event)
 			event.whenWritten = Class.whenWritten
 			if (event.type == 'deleted') {
 				this.readyState = 'no-local-data'
@@ -621,7 +622,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	resetCache(event) {
+	invalidateEntry(event) {
 		this._cachedValue = undefined
 		this.readyState = null
 	}
@@ -766,33 +767,48 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this.asDPack ? this.asDPack.length * this.dPackMultiplier : 100
 	}
 
-	loadLocalData() {
+	loadLocalData(conditional) {
 		let Class = this.constructor as PersistedType
 		let db = Class.db
 		let key = toBufferKey(this.id)
-		let entryBuffer = Class.db.get(key)
-		if (entryBuffer && entryBuffer[0] === COMPRESSED_STATUS) {
-			entryBuffer = uncompressEntry(Class.db, key, entryBuffer)
+		let entryBuffer = Class.db.get(key, NO_COPY_OPTIONS)
+		if (!entryBuffer)
+			return {}
+		const version = readUInt(entryBuffer)
+		const cachedValueValid = entryBuffer[0] !== INVALIDATED_ENTRY && version === this[versionProperty] && this._cachedValue
+		if (cachedValueValid && conditional) {
+			return true
 		}
-
-		let block = this.parseEntryValue(entryBuffer, {
-			sharedReference(forceCopy) {
+		if (entryBuffer[0] === COMPRESSED_STATUS) {
+			// uncompress from the shared memory
+			// TODO: Do this on-access
+			let uncompressedLength = entryBuffer.readUIntBE32(8)
+			let uncompressedBuffer = Buffer.allocUnsafe(uncompressedLength)
+			lz4Uncompress(entryBuffer, uncompressedBuffer, 12)
+			return this.parseEntryValue(entryBuffer, uncompressedBuffer)
+		} else if (entryBuffer.length > 2048) {
+			// use shared memory
+			let block = this.parseEntryValue(entryBuffer)
+			Class.db.notifyOnInvalidation(entryBuffer, (forceCopy) => {
 				// TODO: if state byte indicates it is still fresh && !forceCopy:
 				// return false
 				// calling Buffer.from on ArrayBuffer returns NodeBuffer, calling again copies it
 				block.data && reassignBuffers(block.data, Buffer.from(Buffer.from(this)), this)
-				this.sharedReference = null // nothing more we can do at this point
-			}
-		})
-		return block
+				this.onInvalidation = null // nothing more we can do at this point
+			})
+			return block
+		} else { // TODO: directly do INVALIDATED_STATE here
+			// Do a memcpy of the memory so we aren't using a shared memory
+			return this.parseEntryValue(entryBuffer, Buffer.from(entryBuffer.slice(8)))
+		}
 	}
 
-	parseEntryValue(buffer) {
+	parseEntryValue(buffer, valueBuffer) {
 		if (buffer) {
 			const version = readUInt(buffer)
 			if (buffer.length > 8 && buffer[0] === 0) {
 				const parser = createParser()
-				const valueBuffer = buffer.slice(8)
+				valueBuffer = valueBuffer || buffer.slice(8)
 				return {
 					version,
 					data: parseLazy(valueBuffer, parser),
@@ -812,39 +828,35 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	loadLatestLocalData() {
-		this.readyState = 'loading-local-data'
 		let isSync
-		let promise = when(this.loadLocalData(), (entry) => {
-			const { version, data, buffer } = entry
-			if (isSync === undefined)
-				isSync = true
-			else
-				this.promise = null
-			if (data && data !== INVALIDATED_ENTRY) {
-				
-				this.version = Math.max(version, this.version || 0)
-				if (this.version == version) {
-					this.readyState = 'up-to-date'
-					this[versionProperty] = version
-					this._cachedValue = data
-					expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
-				} else {
-					// if we have a newer version than the db, leav in invalidated state
-					this.readyState = 'invalidated'
-				}
-			} else if (version) {
-				this.version = Math.max(version, this.version || 0)
-				this.readyState = 'invalidated'
+		let entry = this.loadLocalData(true)
+		if (entry === true) // verified we have latest from db, don't change anything
+			return
+
+		const { version, data, buffer } = entry
+		if (isSync === undefined)
+			isSync = true
+		else
+			this.promise = null
+		if (data && data !== INVALIDATED_ENTRY) {
+			this.version = Math.max(version, this.version || 0)
+			if (this.version == version) {
+				this.readyState = 'up-to-date'
+				this[versionProperty] = version
+				this._cachedValue = data
+				expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
 			} else {
-				this.updateVersion()
-				this.readyState = 'no-local-data'
+				// if we have a newer version than the db, leav in invalidated state
+				this.readyState = 'invalidated'
 			}
-			return entry
-		})
-		if (isSync)
-			return promise
-		isSync = false
-		return this.promise = promise
+		} else if (version) {
+			this.version = Math.max(version, this.version || 0)
+			this.readyState = 'invalidated'
+		} else {
+			this.updateVersion()
+			this.readyState = 'no-local-data'
+		}
+		return entry
 	}
 
 	static getInstanceIds(range: IterableOptions) {
@@ -985,20 +997,23 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				let version = this[versionProperty]
 				this._cachedValue = value
 				data = this.serializeEntryValue(version, value, 20/*blocks*/)
-				Class.dbPut(this.id, data, version, !this.repetitiveGets/*, (oldEntry) => {
-					// the check version so it will only write if the version matches (in case another process modified it) or it is new entry
-					const { data, version: oldVersion } = this.parseEntryValue(oldEntry)
-					if (data !== INVALIDATED_ENTRY || version == oldVersion || newToCache) {
-						return true // ok
-					} else {
-						/*
-						let event = new ReplacedEvent() //IncomingEvent()
-						event.triggers = [ INITIALIZATION_SOURCE ]
-						event.source = this
-						event.version = version
-						Class.updated(event, this)
+				const keyAsBuffer = toBufferKey(key)
+				this.whenWritten = db.put(keyAsBuffer, value)
+				if (!this.repetitiveGets && false) {
+					compressEntry(db, keyAsBuffer, value)
+				}
+				let whenValueCommitted = this.whenValueCommitted = this.db.put(keyAsBuffer, data, this.invalidatedHeader(version)).committed.then(result => {
+					if (result === false) {
+						let event = new ReplacedEvent()
+						event.version = this.loadLocalData().version
+						event.sourceProcess = true // invalidated from another process
+						this.updated(event)
 					}
-				}*/)
+					if (whenValueCommitted == this.whenValueCommitted) {
+						this.whenValueCommitted = null
+					}
+				})
+				
 				if (newToCache) {
 					// fire an updated, if it is a new object
 					let event = new DiscoveredEvent()
@@ -1088,8 +1103,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	}
 
 	getValue() {
-		if (!this.readyState)
-			this.loadLatestLocalData()
+		this.loadLatestLocalData()
 		return super.getValue()
 	}
 	patch(properties) {
@@ -1134,8 +1148,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	getValue() {
 		let context = currentContext
-		if (!this.readyState)
-			this.loadLatestLocalData()
+		this.loadLatestLocalData()
 		if (this.cachedVersion > -1 && this.cachedVersion >= this.version && this.readyState === 'up-to-date') {
 			// it is live, so we can shortcut and just return the cached value
 			if (context) {
@@ -1177,58 +1190,56 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					continue
 				}
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
-				this.invalidateEntry(id, version)
+				this.db.put(toBufferKey(id), this.invalidatedHeader(version))
 			}
 			//console.info('Finished reseting', this.name)
 		}.bind(this)))
 	}
 
-	resetCache(event) {
+	invalidateEntry(event) {
+		const keyAsBuffer = toBufferKey(this.id)
+		this.whenWritten = db.put(keyAsBuffer, value)
+		let previousValue
+		const Class = this.constructor as PersistedType
+		if (Class.updateWithPrevious) {
+			previousValue = this.assignPreviousValue(event)
+		}
+		let previousHeader = previousValue && previousValue.buffer && previousValue.buffer.slice(0, 8)
 		this._cachedValue = undefined
 		this.cachedVersion = undefined
 		let version = this.version
-		const Class = this.constructor as PersistedType
 		if (this.shouldPersist !== false &&
 			!(event && event.sourceProcess && // if it came from another process we can count on it to have written the update, check to make sure it is running against this table
 				(Class.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
 					Class.otherProcesses.some(otherProcessId => otherProcessId < process.pid) // otherwise, defer to the lowest number process to handle it
 				))) {
 			// storing as a version alone to indicate invalidation
+			let promise
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
-				Class.dbPut(this.id)
+				promise = this.db.remove(keyAsBuffer, previousHeader)
 			} else {
-				Class.invalidateEntry(this.id, version)
+				promise = this.db.put(keyAsBuffer, Class.invalidatedHeader(version), previousHeader)
 			}
-//			}
+			event.previousValues.set(this, promise.then((result) => {
+				if (result === false) {
+					// it was no longer the same as what we read, re-run
+					this.invalidateEntry(event)
+					return event.previousValues.get(this)
+				}
+				return previousValue
+			}))
 		}
 	}
 
-	static invalidateEntry(id, version) {
-		// we create the header separately and then copy it so it can be an atomic (64-bit) memory copy
-		const newHeader = Buffer.allocUnsafe(8)
-		writeUInt(newHeader, version)
-		newHeader[0] = INVALIDATED_STATE
-		newHeader[1] = 0
-		/*const db = this.db
-		const entryBuffer = db.get(toBufferKey(id), {
-			sharedReference: true
-		})
-		if (entryBuffer) {
-			if (entryBuffer[0] === 4 || entryBuffer.length < 10048) {
-				// if it is too small for an overflow page or it is being compressed need to
-				// start a transaction to perform this
-				db.transaction(() => {
-					newHeader.copy(entryBuffer)
-				})
-			} else {
-				newHeader.copy(entryBuffer)
-				//db.scheduleCommit() // schedule a sync to get the memory change flushed
-			}
-		} else {*/
-			this.dbPut(id, newHeader)
-		//}
+	static invalidatedHeader(version) {
+		const buffer = Buffer.allocUnsafe(8)
+		writeUInt(buffer, version)
+		buffer[0] = INVALIDATED_STATE
+		buffer[1] = 0
+		return buffer
 	}
+
 	getTransform() {
 		return checkInputTransform
 	}
@@ -1301,7 +1312,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 							event.triggers = [ INITIALIZATION_SOURCE ]
 							inMemoryInstance.updated(event)
 						} else {
-							this.invalidateEntry(id, version)
+							this.db.put(toBufferKey(id), this.invalidatedHeader(version))
 						}
 					}
 					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
