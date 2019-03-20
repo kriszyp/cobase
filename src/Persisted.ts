@@ -424,8 +424,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			Source.notifies(this)
 		}
 		this.instancesById.name = this.name
-		let doesInitialization = Persisted.doesInitialization
-		when(this.getStructureVersion(), dbVersion => {
+		let doesInitialization = Persisted.doesInitialization && false
+		return when(this.getStructureVersion(), dbVersion => {
+			console.log("db version", this.name, dbVersion)
 			this.version = dbVersion
 			let initializingProcess = this.initializeDB()
 			const db = this.db
@@ -445,6 +446,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					//console.log('Connected to each process complete and finished initialization', this.name)
 				})
 			}
+if(false)
 			return this.doDataInitialization()
 		})
 	}
@@ -767,11 +769,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this.asDPack ? this.asDPack.length * this.dPackMultiplier : 100
 	}
 
-	loadLocalData(conditional) {
+	loadLocalData(conditional?) {
 		let Class = this.constructor as PersistedType
 		let db = Class.db
 		let key = toBufferKey(this.id)
-		let entryBuffer = Class.db.get(key, NO_COPY_OPTIONS)
+		let entryBuffer = db.get(key, NO_COPY_OPTIONS)
 		if (!entryBuffer)
 			return {}
 		const version = readUInt(entryBuffer)
@@ -782,11 +784,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (entryBuffer[0] === COMPRESSED_STATUS) {
 			// uncompress from the shared memory
 			// TODO: Do this on-access
-			let uncompressedLength = entryBuffer.readUIntBE32(8)
+			let uncompressedLength = entryBuffer.readUInt32BE(8)
 			let uncompressedBuffer = Buffer.allocUnsafe(uncompressedLength)
-			lz4Uncompress(entryBuffer, uncompressedBuffer, 12)
+			lz4Uncompress(entryBuffer.slice(12), uncompressedBuffer)
 			return this.parseEntryValue(entryBuffer, uncompressedBuffer)
-		} else if (entryBuffer.length > 2048) {
+		} else if (entryBuffer.length > 2048 && false) {
 			// use shared memory
 			let block = this.parseEntryValue(entryBuffer)
 			Class.db.notifyOnInvalidation(entryBuffer, (forceCopy) => {
@@ -806,7 +808,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	parseEntryValue(buffer, valueBuffer) {
 		if (buffer) {
 			const version = readUInt(buffer)
-			if (buffer.length > 8 && buffer[0] === 0) {
+			if (buffer.length > 8 && (buffer[0] === 0 || buffer[0] === COMPRESSED_STATUS)) {
 				const parser = createParser()
 				valueBuffer = valueBuffer || buffer.slice(8)
 				return {
@@ -997,22 +999,27 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				let version = this[versionProperty]
 				this._cachedValue = value
 				data = this.serializeEntryValue(version, value, 20/*blocks*/)
-				const keyAsBuffer = toBufferKey(key)
-				this.whenWritten = db.put(keyAsBuffer, value)
-				if (!this.repetitiveGets) {
-					let compressedData = Buffer.allocUnsafe(data.length)
-					let compressedLength = lz4Compress(data, compressedData, 12)
+				const keyAsBuffer = toBufferKey(this.id)
+				if (!this.repetitiveGets && data.length > 1024) {
+					let compressedData = Buffer.allocUnsafe(data.length - 100)
+					let compressedLength = lz4Compress(data.slice(8), compressedData, 12, compressedData.length)
 					if (compressedLength) {
 						data.copy(compressedData, 0, 0, 8)
 						compressedData[0] = COMPRESSED_STATUS
-						compressedData.writeUInt32BE(compressedLength, 8)
-						data = compressedData
+						compressedData.writeUInt32BE(data.length - 8, 8)
+						data = compressedData.slice(0, 12 + compressedLength)
 					} // else it didn't compress any smaller, bail out
 				}
-				let whenValueCommitted = this.whenValueCommitted = this.db.put(keyAsBuffer, data, this.invalidatedHeader(version)).committed.then(result => {
+				let whenValueCommitted = this.whenValueCommitted = this.db.put(keyAsBuffer, data, Class.invalidatedHeader(version)).committed.then(result => {
 					if (result === false) {
+						let newVersion = this.loadLocalData().version
+						if (newVersion < version) {
+							// this shouldn't happen
+							console.warn('Entry was replaced with older version')
+							return
+						}
 						let event = new ReplacedEvent()
-						event.version = this.loadLocalData().version
+						event.version = newVersion
 						event.sourceProcess = true // invalidated from another process
 						this.updated(event)
 					}
@@ -1123,7 +1130,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 		event.source = this
 		this.assignPreviousValue(event)
 		this.readyState = 'up-to-date'
-		let result = super.put(value, event)
+		let result = super.put(convertToBlocks(value), event)
 		if (newToCache) {
 			this.constructor.instanceSetUpdated(event)
 		}
@@ -1177,7 +1184,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		event.source = this
 		this.updated(event, this)
 		this.cachedVersion = this.version
-		this.cachedValue = value
+		this.cachedValue = convertToBlocks(value)
 		this.readyState = 'up-to-date'
 		return this
 	}
@@ -1204,14 +1211,13 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	invalidateEntry(event) {
-		const keyAsBuffer = toBufferKey(this.id)
-		this.whenWritten = db.put(keyAsBuffer, value)
-		let previousValue
 		const Class = this.constructor as PersistedType
+		const keyAsBuffer = toBufferKey(this.id)
+		let previousEntry
 		if (Class.updateWithPrevious) {
-			previousValue = this.assignPreviousValue(event)
+			previousEntry = this.assignPreviousValue(event)
 		}
-		let previousHeader = previousValue && previousValue.buffer && previousValue.buffer.slice(0, 8)
+		let previousHeader = previousEntry && previousEntry.buffer && previousEntry.buffer.slice(0, 8)
 		this._cachedValue = undefined
 		this.cachedVersion = undefined
 		let version = this.version
@@ -1228,14 +1234,21 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			} else {
 				promise = this.db.put(keyAsBuffer, Class.invalidatedHeader(version), previousHeader)
 			}
-			event.previousValues.set(this, promise.then((result) => {
-				if (result === false) {
-					// it was no longer the same as what we read, re-run
-					this.invalidateEntry(event)
-					return event.previousValues.get(this)
-				}
-				return previousValue
-			}))
+			if (event.previousValues) {
+				event.previousValues.set(this, promise.then((result) => {
+					if (result === false) {
+						let newVersion = this.loadLocalData().version
+						if (newVersion > version) {
+							return {} // don't do anything further, db is ahead of us, and we should take no indexing action
+						} else {
+							// it was no longer the same as what we read, re-run, as we have a more recent update
+							this.invalidateEntry(event)
+							return event.previousValues.get(this)
+						}
+					}
+					return previousEntry
+				}))
+			}
 		}
 	}
 
@@ -1415,25 +1428,27 @@ const checkInputTransform = {
 			return
 		}
 		let result = instance.transform.apply(instance, args)
-		return when(result, (value) => {
-			// convert to partitioned blocks
-			if (value && typeof value === 'object' && !isBlock(value)) {
-				if (value.constructor === Object) {
-					var newValue = {}
-					for (var key in value) {
-						var subValue = value[key]
-						if (subValue && typeof subValue === 'object') {
-							newValue[key] = asBlock(subValue)
-						} else {
-							newValue[key] = subValue
-						}
-					}
-					return asBlock(newValue)
+		return when(result, convertToBlocks)
+	}
+}
+function convertToBlocks(value) {
+	// convert to partitioned blocks
+	if (value && typeof value === 'object' && !isBlock(value)) {
+		if (value.constructor === Object) {
+			var newValue = {}
+			for (var key in value) {
+				var subValue = value[key]
+				if (subValue && typeof subValue === 'object') {
+					newValue[key] = asBlock(subValue)
+				} else {
+					newValue[key] = subValue
 				}
 			}
-			return value
-		})
+			return asBlock(newValue)
+		}
 	}
+	return value
+
 }
 secureAccess.checkPermissions = () => true
 import { Reduced } from './Reduced'

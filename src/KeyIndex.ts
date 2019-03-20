@@ -20,8 +20,7 @@ const INITIALIZATION_SOURCE = 'is-initializing'
 const INDEXING_STATE_SIZE = 3584 // good size for ensuring that it is an (and only one) overflow page in LMDB, and won't be moved
 const INITIALIZATION_SOURCE_SET = new Set([INITIALIZATION_SOURCE])
 export interface IndexRequest {
-	previousState?: any
-	previousVersion?: number
+	previousEntry?: any
 	pendingProcesses?: number[]
 	deleted?: boolean
 	sources?: Set<any>
@@ -55,7 +54,6 @@ const versionToDate = (version) =>
 export const Index = ({ Source }) => {
 	Source.updateWithPrevious = true
 	let lastIndexedVersion = 0
-	let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
 	const sourceVersions = {}
 	const processingSourceVersions = new Map<String, number>()
 	let pendingProcesses = false
@@ -63,26 +61,6 @@ export const Index = ({ Source }) => {
 	// this is shared memory buffer between processes where we define what each process is currently indexing, so processes can determine if there are potentially conflicts
 	// in what is being processed
 	let indexingState: Buffer
-	function addUpdatedIndexEntry(key, sources, triggers) {
-		let entry = updatedIndexEntries.get(key)
-		if (!entry) {
-			updatedIndexEntries.set(key, entry = {
-				sources: new Set(),
-				triggers: new Set(),
-			})
-		}
-		if (triggers) {
-			for (let trigger of triggers) {
-				entry.triggers.add(trigger)
-				if (trigger === INITIALIZATION_SOURCE) {
-					return // don't record sources for initialization
-				}
-			}
-		}
-		if (sources)
-			for (let source of sources)
-				entry.sources.add(source)
-	}
 
 	return class extends Persistable.as(VArray) {
 		version: number
@@ -92,14 +70,17 @@ export const Index = ({ Source }) => {
 		static indexingProcess: Promise<any>
 
 		static *indexEntry(id, indexRequest: IndexRequest) {
-			let { previousState, deleted, sources, triggers, version } = indexRequest
+			let { previousEntry, deleted, sources, triggers, version } = indexRequest
 			let operations: OperationsArray = []
+			previousEntry = yield previousEntry
+			let previousState = previousEntry && previousEntry.data
+			let previousVersion = previousEntry && previousEntry.version
+			let eventUpdateSources = []
 			try {
 				let toRemove = new Map()
 				// TODO: handle delta, for optimized index updaes
 				// this is for recording changed entities and removing the values that previously had been indexed
 				let previousEntries
-				previousState = yield previousState
 				let entity = Source.for(id)
 				try {
 					if (previousState === INVALIDATED_ENTRY) {
@@ -135,9 +116,6 @@ export const Index = ({ Source }) => {
 							}
 							indexRequest.previousVersion = previousEntity.version
 						}*/
-					}
-					if (previousState && previousState.then) {
-						previousState = yield previousState
 					}
 					if (previousState !== undefined) { // if no data, then presumably no references to clear
 						// use the same mapping function to determine values to remove
@@ -208,7 +186,7 @@ export const Index = ({ Source }) => {
 								})
 								operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
 							}
-							addUpdatedIndexEntry(key, sources, triggers)
+							eventUpdateSources.push({ key, sources, triggers })
 						}
 					}
 				}
@@ -217,7 +195,7 @@ export const Index = ({ Source }) => {
 						type: 'del',
 						key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
 					})
-					addUpdatedIndexEntry(key, sources, triggers)
+					eventUpdateSources.push({ key, sources, triggers })
 				}
 				if (Index.onIndexEntry) {
 					Index.onIndexEntry(this.name, id, previousEntries, entries)
@@ -228,11 +206,8 @@ export const Index = ({ Source }) => {
 			}
 			this.queue.delete(id)
 			const sourceWhenWritten = Source.whenWritten
-			if (operations.length > 0) {
-				yield this.submitWrites(operations, previousVersion, version)
-			}
-			if (updatedIndexEntries.size > 0) { // note that it is possible for zero index changes to occur, but the data to still change, when using references
-				this.sendUpdates()
+			if (operations.length > 0 || eventUpdateSources.length > 0) { // note that it is possible for zero index changes to occur, but the data to still change, when using references
+				yield this.submitWrites(operations, previousVersion || 0, version, eventUpdateSources)
 			}
 			if (indexRequest.resolveOnCompletion) {
 				if (sourceWhenWritten) {
@@ -244,6 +219,7 @@ export const Index = ({ Source }) => {
 			}
 		}
 		static pendingVersions = new Map()
+		static pendingEvents = new Map()
 
 		static updateEarliestPendingVersion() {
 			const processes = indexingState[1]
@@ -252,29 +228,32 @@ export const Index = ({ Source }) => {
 				let processVersion
 				let pid
 				if (offset != stateOffset && (processVersion = readUInt(indexingState, offset + 8)) !== 0 && (pid = readUInt(indexingState, offset)) !== 0) {
-					if (processVersion < this.earliestPendingVersion || processVersion === this.earliestPendingVersion && pid < process.pid) {
+					if (processVersion < this.earliestPendingVersionInOtherProcesses || processVersion === this.earliestPendingVersionInOtherProcesses && pid < process.pid) {
 						this.earliestPendingVersionInOtherProcesses = processVersion
 					}
 				}
 			}
 		}
-		static submitWrites(operations, previousVersion, version) {
+		static submitWrites(operations, previousVersion, version, updateEventSources) {
 			let committed
 			if (previousVersion < this.earliestPendingVersionInOtherProcesses) {
 				// previous version is earlier than all writes, proceed
 				committed = this.db.batch(operations).committed
 			} else {
 				// first, read an updated earliestPendingVersion to see if it is still before our pending write
-				this.earliestPendingVersionInOtherProcesses = version
+				this.earliestPendingVersionInOtherProcesses = (Date.now() - 1500000000000) * 256
 				this.updateEarliestPendingVersion()
-				if (previousVersion < this.earliestPendingVersion) {
+				if (previousVersion < this.earliestPendingVersionInOtherProcesses) {
 					// now previous version is earlier than all writes from other processes, proceed
 					committed = this.db.batch(operations).committed
 				} else {
+					if (!this.queuedWrites)
+						this.queuedWrites = []
 					this.queuedWrites.push({
 						previousVersion,
 						version,
-						operations
+						operations,
+						updateEventSources
 					})
 					if (!this.queuedRequestForWriteNotification) {
 						return this.queuedRequestForWriteNotification = this.sendRequestForWriteNotification().then(() => this.resumeWrites())
@@ -282,15 +261,18 @@ export const Index = ({ Source }) => {
 				}
 			}
 			committed.maxVersion = Math.max(committed.maxVersion || 0, version)
-			if (!this.pendingVersions.has(committed)) {
+			let pendingEvents = this.pendingEvents.get(committed)
+			if (!pendingEvents) {
 				this.pendingVersions.set(committed, version)
+				this.pendingEvents.set(committed, pendingEvents = [])
 				committed.then(() => {
 					this.pendingVersions.delete(committed)
+					this.pendingEvents.delete(committed)
 					let myEarliestPendingVersion = 0 // recompute this
 					for ([, version] of this.pendingVersions) {
 						myEarliestPendingVersion = Math.min(myEarliestPendingVersion || Infinity, version)
 					}
-					if (myEarliestPendingVersion === undefined && this.queue.size) {
+					if (myEarliestPendingVersion === 0 && this.queue.size) {
 						for (let [, { version }] of this.queue) {
 							myEarliestPendingVersion = Math.min(myEarliestPendingVersion || Infinity, version)
 						}
@@ -302,17 +284,19 @@ export const Index = ({ Source }) => {
 					const versionWord = Buffer.alloc(8)
 					writeUInt(versionWord, this.earliestPendingVersionInOtherProcesses)
 					versionWord.copy(indexingState, 8) // copy word for an atomic update
-					
+					this.sendUpdates(pendingEvents)
 				})
 			}
+			pendingEvents.push(...updateEventSources)
+			
 			return committed
 		}
 
 		static resumeWrites() {
 			const resumedWrites = this.queuedWrites
 			this.queuedWrites = []
-			for (const { operations, previousVersion, version} of resumedWrites) {
-				this.submitWrites(operations, previousVersion, version)
+			for (const { operations, previousVersion, version, updateEventSources } of resumedWrites) {
+				this.submitWrites(operations, previousVersion, version, updateEventSources)
 			}
 		}
 
@@ -354,6 +338,8 @@ export const Index = ({ Source }) => {
 					if (this.nice > 0)
 						yield this.delay(this.nice) // short delay for other processing to occur
 					for (let [id, indexRequest] of queue) {
+						sinceLastStateUpdate++
+						indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
 						if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * speedAdjustment) {
 							// we have process enough, commit our changes so far
 							this.onBeforeCommit && this.onBeforeCommit(id)
@@ -471,7 +457,30 @@ export const Index = ({ Source }) => {
 			}
 		}
 
-		static sendUpdates() {
+		static sendUpdates(eventSources) {
+			let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
+			// aggregate them by key so as to minimize the number of events we send
+			for ( const { key, triggers, sources } of eventSources) {
+				let entry = updatedIndexEntries.get(key)
+				if (!entry) {
+					updatedIndexEntries.set(key, entry = {
+						sources: new Set(),
+						triggers: new Set(),
+					})
+				}
+				if (triggers) {
+					for (let trigger of triggers) {
+						entry.triggers.add(trigger)
+						if (trigger === INITIALIZATION_SOURCE) {
+							return // don't record sources for initialization
+						}
+					}
+				}
+				if (sources)
+					for (let source of sources)
+						entry.sources.add(source)
+			}
+
 			let updatedIndexEntriesArray = Array.from(updatedIndexEntries).reverse()
 			updatedIndexEntries = new Map()
 			let indexedEntry
@@ -618,7 +627,7 @@ export const Index = ({ Source }) => {
 						if (processId === 0) { // empty slot, grab it for this process
 							writeUInt(indexingState, process.pid, stateOffset)
 							indexingState[1] = Math.max(indexingState[1], stateOffset / 16)
-							console.log('Registered indexing process at offset', stateOffset, indexingState[1], process.pid)
+							//console.log('Registered indexing process at offset', stateOffset, indexingState[1], process.pid)
 							// directly write to buffer, don't need to do a put
 							return indexingState
 						}
@@ -794,8 +803,7 @@ export const Index = ({ Source }) => {
 							indexRequest.triggers.add(trigger)
 				} else {
 					this.queue.set(id, indexRequest = {
-						previousState: previousEntry && previousEntry.data,
-						previousVersion: previousEntry ? previousEntry.version : -1,
+						previousEntry,
 						version: version,
 						now: Date.now(),
 						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
@@ -804,7 +812,6 @@ export const Index = ({ Source }) => {
 						indexRequest.previousValues = event.previousValues // need to have a shared map to update
 						indexRequest.by = by
 					}
-					history.push({ id, indexRequest })
 					this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				}
 				if (!version) {

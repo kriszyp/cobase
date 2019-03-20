@@ -1,4 +1,5 @@
 import * as fs from 'fs-extra'
+import * as path from 'path'
 import { Env, openDbi, Cursor } from 'node-lmdb'
 /*var identity = v => v
 let compressSync = identity
@@ -38,9 +39,11 @@ export function open(name, options): Database {
 	let db
 	let committingWrites
 	let scheduledWrites
+	let scheduledOperations
 	let sharedBuffersActive = new WeakValueMap()
 	let sharedBuffersToInvalidate = new WeakValueMap()
 	let shareId = 0
+    fs.ensureDirSync(path.dirname(location))
 	options = Object.assign({
 		path: location + EXTENSION,
 		noSubdir: true,
@@ -148,7 +151,7 @@ export function open(name, options): Database {
 					txn.renew()
 				}
 				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
-				if (result && (!options && options.noCopy)) {
+				if (result && !(options && options.noCopy)) {
 					// make a copy so we aren't referencing shared memory
 					result = Buffer.from(result)
 				}
@@ -172,20 +175,15 @@ export function open(name, options): Database {
 		put(id, value, ifValue) {
 			if (!scheduledWrites) {
 				scheduledWrites = new Map()
+				scheduledOperations = []
 			}
 			let key = id.toString('binary')
-			scheduledWrites.set(key, {
-				value,
-				ifValue
-			})
-			let whenSynced = this.scheduleCommit()
-			if (ifValue) {
-				const withResult = (unsuccessfulWrites) => !unsuccessfulWrites.has(id)
-				let whenSyncedWithResult = whenSynced.then(withResult)
-				whenSyncedWithResult.committed = whenSynced.committed.then(withResult)
-				return whenSyncedWithResult
-			}
-			return whenSynced
+			scheduledWrites.set(key, value)
+			let index = scheduledOperations.push([db, id, value, ifValue]) - 1
+			let syncResults = this.scheduleCommit()
+			return ifValue ?
+				new ConditionalWriteResult(syncResults, index) :
+				syncResults
 
 		},
 		putSync(id, value) {
@@ -233,10 +231,14 @@ export function open(name, options): Database {
 		remove(id, ifValue) {
 			if (!scheduledWrites) {
 				scheduledWrites = new Map()
+				scheduledOperations = []
 			}
-			scheduledWrites.set(id.toString('binary'), {
-				ifValue
-			})
+			scheduledWrites.set(id.toString('binary'))
+			let index = scheduledOperations.push([db, id, undefined, ifValue]) - 1
+			let syncResults = this.scheduleCommit()
+			return ifValue ?
+				new ConditionalWriteResult(syncResults, index) :
+				syncResults
 			return this.scheduleCommit()
 		},
 		iterable(options) {
@@ -341,12 +343,10 @@ export function open(name, options): Database {
 							this.pendingSync = null
 							if (scheduledWrites) {
 								// operations to perform, collect them as an array and start doing them
-								let operations = []
-								for (const [id, { value, ifValue }] of scheduledWrites) {
-									operations.push([db, Buffer.from(id, 'binary'), value, ifValue])
-								}
+								let operations = scheduledOperations
 								committingWrites = scheduledWrites
 								scheduledWrites = null
+								scheduledOperations = null
 								const doBatch = () => {
 									//console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
 									env.batchWrite(operations, AS_BINARY_ALLOW_NOT_FOUND, (error, results) => {
@@ -362,14 +362,7 @@ export function open(name, options): Database {
 											}
 										} else {
 											committingWrites = null // commits are done, can eliminate this now
-											// find any unsuccessful writes
-											const unsuccessfulWrites = new Set()
-											for (let i = 0, l = results.length; i < l; i++) {
-												if (results[i] === false) {
-													unsuccessfulWrites.add(operations[i][1].toString('binary'))
-												}
-											}
-											resolve(unsuccessfulWrites)
+											resolve(results)
 										}
 									})
 								}
@@ -397,9 +390,9 @@ export function open(name, options): Database {
 					// only schedule the follow up sync lazily, if the promise then is actually called
 					then: (onFulfilled, onRejected) =>
 						// schedule another commit after this one so the meta-data write can be flushed, even if it ends up just being a sync call
-						thisBatch.then(() => {
+						thisBatch.then((results) => {
 							this.scheduleCommit()
-							return this.pendingBatch.then(onFulfilled, onRejected)
+							return this.pendingBatch.finally(() => onFulfilled(results))
 						}),
 					// provide access to the transaction promise, since if availability of subsequent read is what is needed,
 					// the committed promise provides that (you don't have to wait for disk flush to access the committed data in memory)
@@ -418,8 +411,10 @@ export function open(name, options): Database {
 					let value = operation.value
 					if (!scheduledWrites) {
 						scheduledWrites = new Map()
+						scheduledOperations = []
 					}
 					scheduledWrites.set(operation.key.toString('binary'), { value })
+					scheduledOperations.push([db, operation.key, value])
 				} catch (error) {
 					if (error.message.startsWith('MDB_NOTFOUND')) {
 						// not an error
@@ -626,5 +621,31 @@ export function open(name, options): Database {
 		db.readTxn.reset()
 		error.message = 'In database ' + name + ': ' + error.message
 		throw error
+	}
+}
+
+class ConditionalWriteResult {
+	syncResults
+	index: number
+	constructor(syncResults, index) {
+		this.syncResults = syncResults
+		this.index = index
+	}
+	_synced
+	get synced() {
+		return this._synced || (this._synced = this.syncResults.then((writeResults) =>
+			writeResults[this.index] === 0)) // 0 is success
+	}
+	_committed
+	get committed() {
+		return this._committed || (this._committed = this.syncResults.committed.then((writeResults) =>
+			writeResults[this.index] === 0))
+	}
+	get written() {
+		// TODO: If we provide progress events, we can fulfill this as soon as this is written in the transaction
+		return this.committed
+	}
+	then(onFulfilled, onRejected) {
+		return this.synced.then(onFulfilled, onRejected)
 	}
 }
