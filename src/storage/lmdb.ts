@@ -131,13 +131,13 @@ export function open(name, options): Database {
 			if (scheduledWrites) {
 				idPrimitive = id.toString('binary')
 				if (scheduledWrites.has(idPrimitive)) {
-					return scheduledWrites.get(idPrimitive).value
+					return scheduledWrites.get(idPrimitive)
 				}
 			}
 			if (committingWrites) {
 				idPrimitive = idPrimitive || id.toString('binary')
 				if (committingWrites.has(id)) {
-					return committingWrites.get(idPrimitive).value
+					return committingWrites.get(idPrimitive)
 				}
 			}
 
@@ -168,6 +168,8 @@ export function open(name, options): Database {
 			}
 		},
 		notifyOnInvalidation(buffer, onInvalidation) {
+			if (!buffer)
+				return
 			let parentArrayBuffer = buffer.buffer // this is the internal ArrayBuffer with that references the external/shared memory
 			sharedBuffersActive.set(shareId++, parentArrayBuffer)
 			parentArrayBuffer.onInvalidation = onInvalidation
@@ -181,10 +183,8 @@ export function open(name, options): Database {
 			scheduledWrites.set(key, value)
 			let index = scheduledOperations.push([db, id, value, ifValue]) - 1
 			let syncResults = this.scheduleCommit()
-			return ifValue ?
-				new ConditionalWriteResult(syncResults, index) :
-				syncResults
-
+			return ifValue === undefined ? syncResults :
+				new ConditionalWriteResult(syncResults, index)
 		},
 		putSync(id, value) {
 			let txn
@@ -236,10 +236,8 @@ export function open(name, options): Database {
 			scheduledWrites.set(id.toString('binary'))
 			let index = scheduledOperations.push([db, id, undefined, ifValue]) - 1
 			let syncResults = this.scheduleCommit()
-			return ifValue ?
-				new ConditionalWriteResult(syncResults, index) :
-				syncResults
-			return this.scheduleCommit()
+			return ifValue === undefined ? syncResults :
+				new ConditionalWriteResult(syncResults, index)
 		},
 		iterable(options) {
 			let iterable = new ArrayLikeIterable()
@@ -274,7 +272,7 @@ export function open(name, options): Database {
 						let i = 0
 						while (!(finished = currentKey === null || (reverse ? currentKey.compare(endKey) <= 0 : currentKey.compare(endKey) >= 0)) && i++ < 100) {
 							try {
-								array.push(currentKey, options.values === false ? null : cursor.getCurrentBinaryUnsafe())
+								array.push(currentKey, options.values === false ? null : cursor.getCurrentBinary())
 							} catch(error) {
 								console.log('error uncompressing value for key', currentKey)
 							}
@@ -350,7 +348,6 @@ export function open(name, options): Database {
 								const doBatch = () => {
 									//console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
 									env.batchWrite(operations, AS_BINARY_ALLOW_NOT_FOUND, (error, results) => {
-										//console.log('finished batch', name, Date.now(), Date.now() - start)
 										if (error) {
 											console.log('error in batch', error)
 											try {
@@ -413,7 +410,7 @@ export function open(name, options): Database {
 						scheduledWrites = new Map()
 						scheduledOperations = []
 					}
-					scheduledWrites.set(operation.key.toString('binary'), { value })
+					scheduledWrites.set(operation.key.toString('binary'), value)
 					scheduledOperations.push([db, operation.key, value])
 				} catch (error) {
 					if (error.message.startsWith('MDB_NOTFOUND')) {
@@ -443,8 +440,8 @@ export function open(name, options): Database {
 				for (const id of bufferIds) {
 					let buffer = sharedBuffers.get(id)
 					let forceUnload = force || buffer.length < VALUE_OVERFLOW_THRESHOLD
-					if (buffer && typeof buffer.sharedReference === 'function') {
-						if (buffer.sharedReference(forceUnload || i) === false && !forceUnload) {
+					if (buffer && buffer.onInvalidation) {
+						if (buffer.onInvalidation(forceUnload || i) === false && !forceUnload) {
 							newSharedBuffersActive.set(id, buffer)
 						}
 						// else false is specifically indicating that the shared buffer is still valid, so keep it around in that case
@@ -552,14 +549,6 @@ export function open(name, options): Database {
 	function handleError(error, db, txn, retry) {
 		try {
 			if (db && db.readTxn) {
-				db.readTxn.renew()
-				try {
-					console.log('db.get(Buffer.from([1, 5])', name, db.readTxn.getBinaryUnsafe(db.db, Buffer.from([1, 5]), AS_BINARY))
-					db.readTxn.reset()
-				} catch(error){
-										db.readTxn.reset()
-
-				}
 				db.readTxn.abort()
 			}
 		} catch(error) {
@@ -601,7 +590,10 @@ export function open(name, options): Database {
 				db.sharedBuffersActiveTxn = env.beginTxn(READING_TNX)
 				db.sharedBuffersToInvalidateTxn = env.beginTxn(READING_TNX)
 			}
-			return retry()
+			console.log('Resized db, retrying last operations', retry)
+			let result = retry()
+			console.log('Finished retrying last operation')
+			return result
 		} else if (error.message.startsWith('MDB_PAGE_NOTFOUND') || error.message.startsWith('MDB_CURSOR_FULL') || error.message.startsWith('MDB_CORRUPTED') || error.message.startsWith('MDB_INVALID')) {
 			// the noSync setting means that we can have partial corruption and we need to be able to recover
 			if (db) {

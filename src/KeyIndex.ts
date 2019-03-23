@@ -206,13 +206,19 @@ export const Index = ({ Source }) => {
 			}
 			this.queue.delete(id)
 			const sourceWhenWritten = Source.whenWritten
-			if (operations.length > 0 || eventUpdateSources.length > 0) { // note that it is possible for zero index changes to occur, but the data to still change, when using references
-				yield this.submitWrites(operations, previousVersion || 0, version, eventUpdateSources)
+			let synced
+			if (operations.length > 0) {
+				synced = this.submitWrites(operations, previousVersion || 0)
+			} else {
+				// still need to update version and send event updates
+				synced = Promise.resolve()
+				synced.committed = Promise.resolve()
 			}
+			// update versions and send updates when promises resolve
+			this.whenWritesComplete(synced, version, eventUpdateSources)
+
 			if (indexRequest.resolveOnCompletion) {
-				if (sourceWhenWritten) {
-					yield sourceWhenWritten.committed
-				}
+				yield synced.committed
 				for (const resolve of indexRequest.resolveOnCompletion) {
 					resolve()
 				}
@@ -222,6 +228,7 @@ export const Index = ({ Source }) => {
 		static pendingEvents = new Map()
 
 		static updateEarliestPendingVersion() {
+			this.earliestPendingVersionInOtherProcesses = (Date.now() - 1500000000010) * 256
 			const processes = indexingState[1]
 			for (let i = 1; i < processes + 1; i++) {
 				let offset = i * 16
@@ -234,32 +241,33 @@ export const Index = ({ Source }) => {
 				}
 			}
 		}
-		static submitWrites(operations, previousVersion, version, updateEventSources) {
-			let committed
+		static submitWrites(operations, previousVersion) {
 			if (previousVersion < this.earliestPendingVersionInOtherProcesses) {
 				// previous version is earlier than all writes, proceed
-				committed = this.db.batch(operations).committed
+				return this.db.batch(operations)
 			} else {
 				// first, read an updated earliestPendingVersion to see if it is still before our pending write
-				this.earliestPendingVersionInOtherProcesses = (Date.now() - 1500000000000) * 256
 				this.updateEarliestPendingVersion()
 				if (previousVersion < this.earliestPendingVersionInOtherProcesses) {
 					// now previous version is earlier than all writes from other processes, proceed
-					committed = this.db.batch(operations).committed
+					return this.db.batch(operations)
 				} else {
 					if (!this.queuedWrites)
 						this.queuedWrites = []
 					this.queuedWrites.push({
 						previousVersion,
-						version,
 						operations,
-						updateEventSources
 					})
 					if (!this.queuedRequestForWriteNotification) {
-						return this.queuedRequestForWriteNotification = this.sendRequestForWriteNotification().then(() => this.resumeWrites())
+						this.queuedRequestForWriteNotification = this.sendRequestForWriteNotification().then(() => this.resumeWrites())
 					}
+					return this.queuedRequestForWriteNotification
 				}
 			}
+		}
+		static whenWritesComplete(synced, version, updateEventSources) {
+			let lastPendingVersion
+			let committed = synced.committed
 			committed.maxVersion = Math.max(committed.maxVersion || 0, version)
 			let pendingEvents = this.pendingEvents.get(committed)
 			if (!pendingEvents) {
@@ -273,18 +281,24 @@ export const Index = ({ Source }) => {
 						myEarliestPendingVersion = Math.min(myEarliestPendingVersion || Infinity, version)
 					}
 					if (myEarliestPendingVersion === 0 && this.queue.size) {
+						// just look at the first one in the queue
 						for (let [, { version }] of this.queue) {
 							myEarliestPendingVersion = Math.min(myEarliestPendingVersion || Infinity, version)
+							break
 						}
 					}
 					this.updateProcessMap(myEarliestPendingVersion, true)
-					this.earliestPendingVersionInOtherProcesses = myEarliestPendingVersion || (committed.maxVersion + 1)
 					this.updateEarliestPendingVersion()
+					lastPendingVersion = Math.min(myEarliestPendingVersion || (committed.maxVersion + 1), this.earliestPendingVersionInOtherProcesses)
 
-					const versionWord = Buffer.alloc(8)
-					writeUInt(versionWord, this.earliestPendingVersionInOtherProcesses)
-					versionWord.copy(indexingState, 8) // copy word for an atomic update
 					this.sendUpdates(pendingEvents)
+				})
+				synced.then(() => { // once the commit has been flushed to disk, write the updated version number
+					// update the global last version
+					lastIndexedVersion = lastPendingVersion - 1
+					const versionWord = Buffer.alloc(8)
+					writeUInt(versionWord, lastIndexedVersion)
+					versionWord.copy(indexingState, 8) // copy word for an atomic update
 				})
 			}
 			pendingEvents.push(...updateEventSources)
@@ -421,7 +435,7 @@ export const Index = ({ Source }) => {
 				this.state = 'ready'
 				return
 			}
-			this.updateProcessMap(lastIndexedVersion)
+			//this.updateProcessMap(lastIndexedVersion)
 
 			this.state = 'initializing queue'
 			for (let { id, version } of idsAndVersionsToReindex) {
@@ -435,26 +449,6 @@ export const Index = ({ Source }) => {
 
 		static delay(ms) {
 			return new Promise(resolve => setTimeout(resolve, ms))
-		}
-		static saveLatestVersion(finished) {
-			let indexedProgress = lastIndexedVersion
-			let nextIndexRequest = this.queue[0]
-			if (nextIndexRequest) {
-				// if there is an index request in the queue with an earlier version, make our last version right before that.
-				indexedProgress = Math.min(nextIndexRequest.version - 1, lastIndexedVersion)
-			}
-
-			if (!indexingState) {
-				this.getIndexingState()
-			}
-			const versionWord = Buffer.alloc(8)
-			writeUInt(versionWord, lastIndexedVersion)
-			versionWord.copy(indexingState, 8) // copy into global version too
-			if (finished) {
-				indexingState.fill(0, stateOffset + 8, stateOffset + 16) // clear the version number
-			} else {
-				versionWord.copy(indexingState, stateOffset + 8) // copy word for an atomic update
-			}
 		}
 
 		static sendUpdates(eventSources) {
@@ -595,15 +589,17 @@ export const Index = ({ Source }) => {
 
 		static getIndexingState(onlyTry?) {
 			const getOptions = {
-				sharedReference(forceUnload) {
-					if (forceUnload === true) {
-						indexingState = null
-					} else {
-						return false // if it is not forced, indicate that it is always up-to-date (we never overwrite this entry)
-					}
-				}
+				noCopy: true
 			}
 			indexingState = this.db.get(INDEXING_STATE, getOptions)
+			this.db.notifyOnInvalidation(indexingState, (forceUnload) => {
+				console.log('onInvalidation of indexingState')
+				if (forceUnload === true) {
+					indexingState = null
+				} else {
+					return false // if it is not forced, indicate that it is always up-to-date (we never overwrite this entry)
+				}
+			})
 			if (!indexingState && !onlyTry) {
 				this.initializeIndexingState()
 			}
@@ -620,6 +616,7 @@ export const Index = ({ Source }) => {
 					this.getIndexingState(true) // now get the shared reference to it again
 				}
 				lastIndexedVersion = readUInt(Buffer.from(indexingState.slice(8, 16))) || 1
+				console.log('initializeIndexingState', this.name, 'at version', lastIndexedVersion)
 				stateOffset = 16
 				if (indexingState[1] < 20) {
 					while (stateOffset < indexingState.length) {

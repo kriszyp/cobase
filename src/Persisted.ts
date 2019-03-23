@@ -13,7 +13,6 @@ import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
 import { registerClass, addProcess } from './util/process'
 import { DEFAULT_CONTEXT } from './RequestContext'
-import { runCompression, uncompressEntry, compressEntry, COMPRESSED_STATUS } from './util/compressor'
 import { encodeBlock as lz4Compress, decodeBlock as lz4Uncompress } from 'lz4'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
@@ -27,6 +26,9 @@ const INVALIDATED_STATE = 1
 const NO_COPY_OPTIONS = {
 	noCopy: true
 }
+const COMPRESSED_STATUS_24 = 254
+const COMPRESSED_STATUS_48 = 255
+
 let globalDoesInitialization
 
 global.cache = expirationStrategy // help with debugging
@@ -373,7 +375,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.info('Completely clearing', this.name)
 			options.clearOnStart = true
 		}
-		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name, options)
+		const db = this.db
 
 		const processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
 		let initializingProcess
@@ -423,6 +425,19 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		for (let Source of this.Sources || []) {
 			Source.notifies(this)
 		}
+		const options = {}
+		if (this.mapSize) {
+			options.mapSize = this.mapSize
+		}
+		if (this.useWritemap !== undefined) {
+			// useWriteMap provides better performance
+			options.useWritemap = this.useWritemap
+		}
+		if (clearOnStart) {
+			console.info('Completely clearing', this.name)
+			options.clearOnStart = true
+		}
+		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name, options)
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization && false
 		return when(this.getStructureVersion(), dbVersion => {
@@ -446,7 +461,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					//console.log('Connected to each process complete and finished initialization', this.name)
 				})
 			}
-if(false)
 			return this.doDataInitialization()
 		})
 	}
@@ -512,7 +526,7 @@ if(false)
 			console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
-			return when(this.resetAll(clearDb), () => db.scheduleCommit()).then(() => clearDb)
+			return when(false && this.resetAll(clearDb), () => db.scheduleCommit()).then(() => clearDb)
 		}
 	}
 
@@ -781,51 +795,51 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (cachedValueValid && conditional) {
 			return true
 		}
-		if (entryBuffer[0] === COMPRESSED_STATUS) {
+		return this.parseEntryValue(entryBuffer)
+	}
+
+	parseEntryValue(buffer) {
+		const version = readUInt(buffer)
+		let valueBuffer
+		if (buffer[0] >= COMPRESSED_STATUS_24) {
 			// uncompress from the shared memory
 			// TODO: Do this on-access
-			let uncompressedLength = entryBuffer.readUInt32BE(8)
+			let uncompressedLength = buffer.readUInt32BE(8)
 			let uncompressedBuffer = Buffer.allocUnsafe(uncompressedLength)
-			lz4Uncompress(entryBuffer.slice(12), uncompressedBuffer)
-			return this.parseEntryValue(entryBuffer, uncompressedBuffer)
-		} else if (entryBuffer.length > 2048 && false) {
+			lz4Uncompress(buffer.slice(12), uncompressedBuffer)
+			valueBuffer = uncompressedBuffer
+		} else if (buffer[0] === INVALIDATED_STATE) {
+			// stored as an invalidated version
+			return {
+				version,
+				data: INVALIDATED_ENTRY,
+				buffer: Buffer.from(buffer),
+			}
+		} else if (buffer.length > 2048) {
 			// use shared memory
-			let block = this.parseEntryValue(entryBuffer)
-			Class.db.notifyOnInvalidation(entryBuffer, (forceCopy) => {
+			let block = {
+				version,
+				data: parseLazy(buffer.slice(8), createParser()),
+				buffer: Buffer.from(buffer.slice(0, 8)),
+			}
+			this.constructor.db.notifyOnInvalidation(buffer, (forceCopy) => {
 				// TODO: if state byte indicates it is still fresh && !forceCopy:
 				// return false
 				// calling Buffer.from on ArrayBuffer returns NodeBuffer, calling again copies it
+				console.log('reassigning buffers')
 				block.data && reassignBuffers(block.data, Buffer.from(Buffer.from(this)), this)
 				this.onInvalidation = null // nothing more we can do at this point
 			})
 			return block
-		} else { // TODO: directly do INVALIDATED_STATE here
+		} else { 
 			// Do a memcpy of the memory so we aren't using a shared memory
-			return this.parseEntryValue(entryBuffer, Buffer.from(entryBuffer.slice(8)))
+			valueBuffer = Buffer.from(buffer.slice(8))
 		}
-	}
-
-	parseEntryValue(buffer, valueBuffer) {
-		if (buffer) {
-			const version = readUInt(buffer)
-			if (buffer.length > 8 && (buffer[0] === 0 || buffer[0] === COMPRESSED_STATUS)) {
-				const parser = createParser()
-				valueBuffer = valueBuffer || buffer.slice(8)
-				return {
-					version,
-					data: parseLazy(valueBuffer, parser),
-					buffer,
-				}
-			} else {
-				// stored as an invalidated version
-				return {
-					version,
-					data: INVALIDATED_ENTRY,
-					buffer,
-				}
-			}
-		} else {
-			return {}
+		const parser = createParser()
+		return {
+			version,
+			data: parseLazy(valueBuffer, parser),
+			buffer: Buffer.from(buffer.slice(0, 8)),
 		}
 	}
 
@@ -854,7 +868,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		} else if (version) {
 			this.version = Math.max(version, this.version || 0)
 			this.readyState = 'invalidated'
-		} else {
+		} else if (!this.readyState) {
 			this.updateVersion()
 			this.readyState = 'no-local-data'
 		}
@@ -894,7 +908,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	* Iterate through all instances to find instances since the given version
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
-		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
+		console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => {
 			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let db = this.db
@@ -1005,16 +1019,18 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					let compressedLength = lz4Compress(data.slice(8), compressedData, 12, compressedData.length)
 					if (compressedLength) {
 						data.copy(compressedData, 0, 0, 8)
-						compressedData[0] = COMPRESSED_STATUS
+						compressedData[0] = COMPRESSED_STATUS_24
 						compressedData.writeUInt32BE(data.length - 8, 8)
 						data = compressedData.slice(0, 12 + compressedLength)
 					} // else it didn't compress any smaller, bail out
 				}
-				let whenValueCommitted = this.whenValueCommitted = this.db.put(keyAsBuffer, data, Class.invalidatedHeader(version)).committed.then(result => {
+				let whenValueCommitted = this.whenValueCommitted = this.db.put(keyAsBuffer, data,
+						newToCache ? null : Class.invalidatedHeader && Class.invalidatedHeader(version)).committed.then(result => {
 					if (result === false) {
 						let newVersion = this.loadLocalData().version
 						if (newVersion < version) {
 							// this shouldn't happen
+							this.version = newVersion
 							console.warn('Entry was replaced with older version')
 							return
 						}
@@ -1230,9 +1246,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let promise
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
-				promise = this.db.remove(keyAsBuffer, previousHeader)
+				promise = this.db.remove(keyAsBuffer/*, previousHeader*/)
 			} else {
-				promise = this.db.put(keyAsBuffer, Class.invalidatedHeader(version), previousHeader)
+				promise = this.db.put(keyAsBuffer, Class.invalidatedHeader(version)/*, previousHeader*/)
 			}
 			if (event.previousValues) {
 				event.previousValues.set(this, promise.then((result) => {
@@ -1320,7 +1336,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				let lastVersion = this.lastVersion
 
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(ids => {
-					//console.log('getInstanceIdsAndVersionsSince for', this.name, ids.length)
+					console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
 					for (let { id, version } of ids) {
