@@ -90,6 +90,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// TODO: would like remove this once we have better invalidation of persisted entities
 		return false
 	}
+	get staysUpdated() {
+		return true
+	}
 
 	static get defaultInstance() {
 		return this._defaultInstance || (this._defaultInstance = new Variable())
@@ -598,6 +601,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			return event
 		}
 		this._initUpdate(event)
+		console.log('updated', this.id, Class.name, event.version, event.type, new Date(event.version/ 256 + 1500000000000))
 
 		if (event.type === 'discovered') // skip reset
 			Variable.prototype.updated.apply(this, arguments)
@@ -822,7 +826,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				data: parseLazy(buffer.slice(8), createParser()),
 				buffer: Buffer.from(buffer.slice(0, 8)),
 			}
-			this.constructor.db.notifyOnInvalidation(buffer, (forceCopy) => {
+			this.constructor.db.notifyOnInvalidation(buffer, function(forceCopy) {
 				// TODO: if state byte indicates it is still fresh && !forceCopy:
 				// return false
 				// calling Buffer.from on ArrayBuffer returns NodeBuffer, calling again copies it
@@ -856,20 +860,19 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			this.promise = null
 		if (data && data !== INVALIDATED_ENTRY) {
 			this.version = Math.max(version, this.version || 0)
-			if (this.version == version) {
-				this.readyState = 'up-to-date'
-				this[versionProperty] = version
-				this._cachedValue = data
-				expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
-			} else {
-				// if we have a newer version than the db, leav in invalidated state
-				this.readyState = 'invalidated'
-			}
+			console.log('Loaded with data', this.id, this.constructor.name, this.version)
+			this.readyState = 'up-to-date'
+			this[versionProperty] = version
+			this._cachedValue = data
+			this.invalidationVersion = null
+			expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
 		} else if (version) {
-			this.version = Math.max(version, this.version || 0)
+			this.invalidationVersion = this.version = Math.max(version, this.version || 0)
+			console.log('Loaded invalidated', this.id, this.constructor.name, this.version)
 			this.readyState = 'invalidated'
 		} else if (!this.readyState) {
 			this.updateVersion()
+			console.log('Loaded no-local-data', this.id, this.constructor.name, this.version)
 			this.readyState = 'no-local-data'
 		}
 		return entry
@@ -1024,18 +1027,26 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 						data = compressedData.slice(0, 12 + compressedLength)
 					} // else it didn't compress any smaller, bail out
 				}
+				console.log('Writing value',this.id, Class.name, version, new Date(version/ 256 + 1500000000000))
+				const invalidationVersion = this.invalidationVersion
 				let whenValueCommitted = this.whenValueCommitted = this.db.put(keyAsBuffer, data,
-						newToCache ? null : Class.invalidatedHeader && Class.invalidatedHeader(version)).committed.then(result => {
+						newToCache ? null :
+						(invalidationVersion && Class.invalidatedHeader) ? Class.invalidatedHeader(invalidationVersion) :
+						undefined).committed.then(result => {
+					this.invalidationVersion = null
 					if (result === false) {
 						let newVersion = this.loadLocalData().version
-						if (newVersion < version) {
+						if (newVersion < invalidationVersion) {
 							// this shouldn't happen
-							this.version = newVersion
-							console.warn('Entry was replaced with older version')
+							console.warn('Entry was replaced with older version', this.id, Class.name, new Date(newVersion/ 256 + 1500000000000), new Date(version/ 256 + 1500000000000))
+							this.invalidationVersion = this.version = newVersion
 							return
 						}
 						let event = new ReplacedEvent()
 						event.version = newVersion
+						if (this.loadLocalData().data == INVALIDATED_ENTRY) {
+							this.invalidationVersion = newVersion
+						}
 						event.sourceProcess = true // invalidated from another process
 						this.updated(event)
 					}
@@ -1145,6 +1156,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 		event = event || (newToCache ? new AddedEvent() : new ReplacedEvent())
 		event.source = this
 		this.assignPreviousValue(event)
+		this._initUpdate(event) // assign the version before the value is assigned
 		this.readyState = 'up-to-date'
 		let result = super.put(convertToBlocks(value), event)
 		if (newToCache) {
@@ -1189,6 +1201,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}
 			return this.cachedValue
 		}
+		console.log('Not in cache, performing getValue', this.id, this.constructor.name, 'cachedVersion', this.cachedVersion, 'version', this.version, this.readyState)
 		return super.getValue()
 	}
 
@@ -1244,6 +1257,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				))) {
 			// storing as a version alone to indicate invalidation
 			let promise
+				console.log('Invalidating entry',this.id, Class.name, new Date(version/ 256 + 1500000000000))
+			this.invalidationVersion = version
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
 				promise = this.db.remove(keyAsBuffer/*, previousHeader*/)

@@ -205,6 +205,11 @@ export const Index = ({ Source }) => {
 				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
 			this.queue.delete(id)
+			let earliestPendingVersion
+			for (const firstInQueue of this.queue) {
+				earliestPendingVersion = firstInQueue.version
+				break
+			}
 			const sourceWhenWritten = Source.whenWritten
 			let synced
 			if (operations.length > 0) {
@@ -215,7 +220,7 @@ export const Index = ({ Source }) => {
 				synced.committed = Promise.resolve()
 			}
 			// update versions and send updates when promises resolve
-			this.whenWritesComplete(synced, version, eventUpdateSources)
+			this.whenWritesComplete(synced, earliestPendingVersion, version, eventUpdateSources)
 
 			if (indexRequest.resolveOnCompletion) {
 				yield synced.committed
@@ -229,6 +234,9 @@ export const Index = ({ Source }) => {
 
 		static updateEarliestPendingVersion() {
 			this.earliestPendingVersionInOtherProcesses = (Date.now() - 1500000000010) * 256
+			if (!indexingState) {
+				this.getIndexingState()
+			}
 			const processes = indexingState[1]
 			for (let i = 1; i < processes + 1; i++) {
 				let offset = i * 16
@@ -242,7 +250,13 @@ export const Index = ({ Source }) => {
 			}
 		}
 		static submitWrites(operations, previousVersion) {
-			if (previousVersion < this.earliestPendingVersionInOtherProcesses) {
+			if (this.queuedWrites) {
+				// if we are in queued/paused mode, all operations go in the queue until we get the green light from the other processe
+				this.queuedWrites.push({
+					previousVersion,
+					operations,
+				})
+			} else if (previousVersion < this.earliestPendingVersionInOtherProcesses) {
 				// previous version is earlier than all writes, proceed
 				return this.db.batch(operations)
 			} else {
@@ -265,25 +279,29 @@ export const Index = ({ Source }) => {
 				}
 			}
 		}
-		static whenWritesComplete(synced, version, updateEventSources) {
+
+		static pendingCommits = []
+		static whenWritesComplete(synced, earliestPendingVersion, version, updateEventSources) {
 			let lastPendingVersion
 			let committed = synced.committed
 			committed.maxVersion = Math.max(committed.maxVersion || 0, version)
+
 			let pendingEvents = this.pendingEvents.get(committed)
-			if (!pendingEvents) {
+			if (this.pendingCommits.indexOf(committed) === -1) {
+				this.pendingCommits.push(committed)
+				committed.earliestVersion = earliestPendingVersion
 				this.pendingVersions.set(committed, version)
 				this.pendingEvents.set(committed, pendingEvents = [])
 				committed.then(() => {
+					this.pendingCommits.splice(this.pendingCommits.indexOf(committed), 1)
 					this.pendingVersions.delete(committed)
 					this.pendingEvents.delete(committed)
 					let myEarliestPendingVersion = 0 // recompute this
-					for ([, version] of this.pendingVersions) {
-						myEarliestPendingVersion = Math.min(myEarliestPendingVersion || Infinity, version)
-					}
-					if (myEarliestPendingVersion === 0 && this.queue.size) {
-						// just look at the first one in the queue
+					if (this.pendingCommits[0]) {
+						myEarliestPendingVersion = this.pendingCommits[0].earliestVersion
+					} else if (this.queue.size > 0) {
 						for (let [, { version }] of this.queue) {
-							myEarliestPendingVersion = Math.min(myEarliestPendingVersion || Infinity, version)
+							myEarliestPendingVersion = version
 							break
 						}
 					}
@@ -292,9 +310,20 @@ export const Index = ({ Source }) => {
 					lastPendingVersion = Math.min(myEarliestPendingVersion || (committed.maxVersion + 1), this.earliestPendingVersionInOtherProcesses)
 
 					this.sendUpdates(pendingEvents)
+					if (this.requestForWriteNotification) {
+						for (const notification of this.requestForWriteNotification) {
+							if (notification.version <= myEarliestPendingVersion || myEarliestPendingVersion == 0) {
+								notification.whenWritten()
+								this.requestForWriteNotification.splice(this.requestForWriteNotification.indexOf(notification), 1)
+							}
+						}
+					}
 				})
 				synced.then(() => { // once the commit has been flushed to disk, write the updated version number
 					// update the global last version
+					if (!indexingState) {
+						this.getIndexingState()
+					}
 					lastIndexedVersion = lastPendingVersion - 1
 					const versionWord = Buffer.alloc(8)
 					writeUInt(versionWord, lastIndexedVersion)
@@ -308,7 +337,7 @@ export const Index = ({ Source }) => {
 
 		static resumeWrites() {
 			const resumedWrites = this.queuedWrites
-			this.queuedWrites = []
+			this.queuedWrites = null
 			for (const { operations, previousVersion, version, updateEventSources } of resumedWrites) {
 				this.submitWrites(operations, previousVersion, version, updateEventSources)
 			}
@@ -712,6 +741,29 @@ export const Index = ({ Source }) => {
 				throw error
 			}
 		}
+		sendRequestForWriteNotification(pid, version) {
+			try {
+				return withTimeout(this.sendRequestToProcess(pid, {
+					whenWrittenVersion: version
+				}), 60000).catch(error => {
+					console.warn('Error on waiting for indexed', this.name, 'from process', pid, 'index request', request, error.toString())
+					return { indexed: false }
+				}).finally((indexed) => {
+					this.pendingRequests.delete(id + '-' + pid)
+					//console.log('sendRequestToIndex finished', id, this.name, indexed)
+				})
+			} catch(error) {
+				if (error.message.startsWith('No socket')) {
+					// clean up if the process/socket is dead
+					console.info('Cleaning up socket to old process', pid)
+					this.removeDeadProcessEntry(pid)
+					return { indexed: false }
+					// TODO: resumeIndex?
+				}
+				throw error
+			}
+
+		}
 
 		static removeDeadProcessEntry(pid)  {
 			if (!indexingState) {
@@ -739,6 +791,17 @@ export const Index = ({ Source }) => {
 		}
 
 		static receiveRequest({ id, version, previousVersion, hasPreviousState }) {
+			if (!id) {
+				if (!this.requestForWriteNotification) {
+					this.requestForWriteNotification = []
+				}
+				return new Promise(resolve => {
+					this.requestForWriteNotification.push({
+						version,
+						whenWritten: resolve
+					})
+				})
+			}
 			return this.whenUnblockedProcessing
 			const updateInQueue = this.queue.get(id);
 			if (updateInQueue) {

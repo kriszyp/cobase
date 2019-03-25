@@ -136,7 +136,7 @@ export function open(name, options): Database {
 			}
 			if (committingWrites) {
 				idPrimitive = idPrimitive || id.toString('binary')
-				if (committingWrites.has(id)) {
+				if (committingWrites.has(idPrimitive)) {
 					return committingWrites.get(idPrimitive)
 				}
 			}
@@ -346,8 +346,9 @@ export function open(name, options): Database {
 								scheduledWrites = null
 								scheduledOperations = null
 								const doBatch = () => {
-									//console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
+									console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
 									env.batchWrite(operations, AS_BINARY_ALLOW_NOT_FOUND, (error, results) => {
+										console.log('did batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
 										if (error) {
 											console.log('error in batch', error)
 											try {
@@ -581,9 +582,14 @@ export function open(name, options): Database {
 			const newSize = Math.ceil(env.info().mapSize * 1.3 / 0x200000 + 1) * 0x200000
 			console.log('Resizing database', name, 'to', newSize)
 			if (db) {
+				try {
 				db.resetSharedBuffers(true)
+				}catch (error) {
+					console.error(error)
+				}
 			}
 			env.resize(newSize)
+			console.log('Resized env, resetting read transactions')
 			if (db) {
 				db.readTxn = env.beginTxn(READING_TNX)
 				db.readTxn.reset()
