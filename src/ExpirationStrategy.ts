@@ -15,14 +15,13 @@ const DECAY_RATE = 1.7
 
 const DECAY_INTERVAL = 10000
 const DECAY_REMOVAL = 10
+const PRIORITY = Symbol('priority')
 const EMPTY_SLOT = {
-  set priority(priority) {
+  set [PRIORITY](priority) {
   },
-  get priority() {
+  get [PRIORITY]() {
     return -1
   },
-  clearCache() {
-  }
 }
 
 let offset = 0 // starting offset, shouldn't need to adjust
@@ -42,10 +41,10 @@ class ExpirationStrategy {
 		if (!isFinite(size)) {
 			size = 100
 		}
-		let lastPriority = entity.priority
+		let lastPriority = entity[PRIORITY]
 		if (lastPriority > -1) {
 			// remove from old slot if it is currently in cache
-			this.cache[entity.priority] = null
+			this.cache[entity[PRIORITY]] = null
 		}
 		// define new priority
 		// to prevent duplicate sizes from colliding, we add a revolving offset
@@ -56,13 +55,13 @@ class ExpirationStrategy {
 		// offset = (offset + 157) & 255
 		// calculate new priority/slot, placing large entries closer to expiration, smaller objects further from expiration
 		let adjustedSize = size / NOMINAL_SIZE
-		let priority = entity.priority = Math.floor(CACHE_ENTRIES / (1 +
+		let priority = entity[PRIORITY] = Math.floor(CACHE_ENTRIES / (1 +
 			(lastPriority > -1 ?
 				(adjustedSize + CACHE_ENTRIES / lastPriority) / 3 :
 				adjustedSize)))
 		while(entity) {
 			// iteratively place entries in cache, pushing old entries closer to the end of the queue
-			priority = entity.priority = Math.floor(priority / DECAY_RATE)
+			priority = entity[PRIORITY] = Math.floor(priority / DECAY_RATE)
 			if (priority == -1) {
 				return
 			}
@@ -71,19 +70,19 @@ class ExpirationStrategy {
 			entity = entityToMove
 			if (priority == 0 && entity) {
 				// moved out of the queue, clear it from the cache
-				entity.priority = -1 // keep priority a number type for more efficient class structure
-				return entity.clearCache()
+				entity[PRIORITY] = -1 // keep priority a number type for more efficient class structure
+				return
 			}
 		}
 	}
 	deleteEntry(entity) {
-		if (entity.priority > -1) {
+		if (entity[PRIORITY] > -1) {
 			// remove from old slot if it is currently in cache
-			this.cache[entity.priority] = null
+			this.cache[entity[PRIORITY]] = null
 		}
 	}
 	isCached(entity) {
-		return entity.priority > -1
+		return entity[PRIORITY] > -1
 	}
 	getSnapshot() {
 		let totalSize = 0
@@ -108,7 +107,6 @@ class ExpirationStrategy {
 		for (let i in this.cache) {
 			let entry = this.cache[i]
 			if (entry) {
-				entry.clearCache()
 				this.cache[i] = null
 			}
 		}

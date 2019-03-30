@@ -1,6 +1,6 @@
 import { spawn, currentContext, VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
 import { serialize, parse } from 'dpack'
-import { Persistable, INVALIDATED_ENTRY } from './Persisted'
+import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
@@ -73,17 +73,15 @@ export const Index = ({ Source }) => {
 			let { previousEntry, deleted, sources, triggers, version } = indexRequest
 			let operations: OperationsArray = []
 			previousEntry = yield previousEntry
-			let previousState = previousEntry && previousEntry.data
-			let previousVersion = previousEntry && previousEntry.version
+			let previousVersion = previousEntry && previousEntry[VERSION]
 			let eventUpdateSources = []
 			try {
 				let toRemove = new Map()
 				// TODO: handle delta, for optimized index updaes
 				// this is for recording changed entities and removing the values that previously had been indexed
 				let previousEntries
-				let entity = Source.for(id)
 				try {
-					if (previousState === INVALIDATED_ENTRY) {
+					if (previousEntry instanceof Invalidated) {
 						this.queue.delete(id)
 						return this.sendRequestToIndex()
 /*						// this is one of the trickiest conditions in multi-process indexing. This generally means that there was an update
@@ -117,10 +115,10 @@ export const Index = ({ Source }) => {
 							indexRequest.previousVersion = previousEntity.version
 						}*/
 					}
-					if (previousState !== undefined) { // if no data, then presumably no references to clear
+					if (previousEntry !== undefined) { // if no data, then presumably no references to clear
 						// use the same mapping function to determine values to remove
-						previousEntries = yield this.indexBy(previousState, id)
-						if (typeof previousEntries == 'object') {
+						previousEntries = yield this.indexBy(previousEntry, id)
+						if (typeof previousEntries == 'object' && previousEntries) {
 							if (!(previousEntries instanceof Array)) {
 								previousEntries = [previousEntries]
 							}
@@ -143,17 +141,17 @@ export const Index = ({ Source }) => {
 					let attempts = 0
 					let data
 					try {
-						data = yield entity.valueOf(INDEXING_MODE)
+						data = yield Source.get(id, INDEXING_MODE)
 					} catch(error) {
 						try {
 							// try again
-							data = yield entity.valueOf(INDEXING_MODE)
+							data = yield Source.get(id, INDEXING_MODE)
 						} catch(error) {
 							if (indexRequest.version !== version) return // if at any point it is invalidated, break out
-							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name, entity && entity.id)
+							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
 						}
 					}
-					yield entity.whenValueCommitted
+					//yield Source.whenValueCommitted
 					if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 					// let the indexBy define how we get the set of values to index
 					try {
@@ -513,7 +511,10 @@ export const Index = ({ Source }) => {
 					let indexEntryUpdate: IndexEntryUpdate = indexedEntry[1]
 					event.sources = indexEntryUpdate.sources
 					event.triggers = indexEntryUpdate.triggers
-					this.for(indexedEntry[0]).updated(event)
+					this.updated(event, {
+						id: indexedEntry[0],
+						constructor: this
+					})
 				} catch (error) {
 					console.error('Error sending index updates', error)
 				}
@@ -521,18 +522,30 @@ export const Index = ({ Source }) => {
 			this.instanceIds.updated()
 		}
 
-		transform() {
-			let keyPrefix = toBufferKey(this.id)
+		static get(id) {
+/*
+			// First: ensure that all the source instances are up-to-date
+			const context = currentContext
+			return when(this.constructor.whenUpdatedInContext(context), () => {
+				if (context)
+					context.setVersion(lastIndexedVersion)
+				return when(super.valueOf(true), (value) => {
+					expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
+					return value
+				})
+			})
+*/
+			let keyPrefix = toBufferKey(id)
 			let iterable = this.getIndexedValues({
 				start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
 				end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
 				recordApproximateSize: true,
 			})
-			return this.constructor.returnsAsyncIterables ? iterable : iterable.asArray
+			return this.returnsIterables ? iterable : iterable.asArray
 		}
 
-		getIndexedKeys() {
-			let keyPrefix = toBufferKey(this.id)
+		static getIndexedKeys(id) {
+			let keyPrefix = toBufferKey(id)
 			return this.getIndexedValues({
 				start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
 				end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
@@ -541,14 +554,14 @@ export const Index = ({ Source }) => {
 		}
 
 		// Get a range of indexed entries for this id (used by Reduced)
-		getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
-			const db: Database = this.constructor.db
+		static getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
+			const db: Database = this.db
 			let approximateSize = 0
 			return db.iterable(range).map(({ key, value }) => {
 				let [, sourceId] = fromBufferKey(key, true)
-				if (range.recordApproximateSize) {
-					this.approximateSize = approximateSize += key.length + (value && value.length || 10)
-				}
+				/*if (range.recordApproximateSize) {
+					let approximateSize = approximateSize += key.length + (value && value.length || 10)
+				}*/
 				return returnFullKeyValue ? {
 					key: sourceId,
 					value: value !== null ? value.length > 0 ? parse(value) : Source.for(sourceId) : value,
@@ -585,7 +598,7 @@ export const Index = ({ Source }) => {
 			})
 		}
 
-		// static returnsAsyncIterables = true // maybe at some point default this to on
+		// static returnsIterables = true // maybe at some point default this to on
 
 		static getInstanceIdsAndVersionsSince(version) {
 			// There is no version tracking with indices.
@@ -839,7 +852,7 @@ export const Index = ({ Source }) => {
 			let context = currentContext
 			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
 
-			let previousEntry = event.previousValues && event.previousValues.get(by)
+			let previousEntry = by && by.previousValue
 			let id = by && (typeof by === 'object' ? (by.constructor == this.Sources[0] && by.id) : by) // if we are getting an update from a source instance
 			if (this.otherProcesses && event.sourceProcess && 
 				!(id && this.queue.has(id)) && // if it is in our queue, we need to update the version number in our queue
@@ -868,10 +881,10 @@ export const Index = ({ Source }) => {
 						now: Date.now(),
 						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
 					})
-					if (indexRequest.previousState == INVALIDATED_ENTRY) {
+					/*if (indexRequest.previousState == INVALIDATED_ENTRY) {
 						indexRequest.previousValues = event.previousValues // need to have a shared map to update
 						indexRequest.by = by
-					}
+					}*/
 					this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				}
 				if (!version) {
@@ -933,10 +946,10 @@ export const Index = ({ Source }) => {
 						for (const sourceName in processingSourceVersions) {
 							sourceVersions[sourceName] = processingSourceVersions[sourceName]
 						}
-						const event = new IndexingCompletionEvent()
+						/*const event = new IndexingCompletionEvent()
 						event.sourceVersions = sourceVersions
 						event.sourceVersions[this.name] = lastIndexedVersion
-						super.updated(event, this)
+						super.updated(event, this)*/
 					})
 				this.whenProcessingComplete.version = lastIndexedVersion
 			}

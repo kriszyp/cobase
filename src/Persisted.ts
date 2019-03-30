@@ -28,6 +28,8 @@ const NO_COPY_OPTIONS = {
 }
 const COMPRESSED_STATUS_24 = 254
 const COMPRESSED_STATUS_48 = 255
+export const VERSION = Symbol('version')
+export const STATUS_BYTE = Symbol('statusByte')
 
 let globalDoesInitialization
 
@@ -86,10 +88,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.id = id
 	}
 
-	get checkSourceVersions() {
-		// TODO: would like remove this once we have better invalidation of persisted entities
-		return false
-	}
 	get staysUpdated() {
 		return true
 	}
@@ -113,16 +111,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			instancesById.set(id, instance)
 		}
 		return instance
-	}
-
-	// Defined as a convenience access to Class.for(id).valueOf()
-	static get(id) {
-		return this.for(id).valueOf()
-	}
-
-	// Defined as a convenience access to Class.for(id).put(value)
-	static set(id, value) {
-		return this.for(id).put(value)
 	}
 
 	static getByIds(ids) {
@@ -157,22 +145,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return when(getNext(), () => values)
 	}
 
-	assignPreviousValue(event) {
-		let previousValues = event.previousValues
-		if (!previousValues) {
-			previousValues = event.previousValues = new Map()
-		}
-		const isMultiProcess = true
-		if (!isMultiProcess && this.readyState === 'up-to-date' && this._cachedValue) {
-			return previousValues.set(this, this._cachedValue)
-		}
-		if (previousValues.has(this)) {
-			return previousValues.get(this)
-		} else {
-			let previousValue = this.loadLocalData()
-			previousValues.set(this, previousValue)
-			return previousValue
-		}
+	static assignPreviousValue(id, by) {
+		by.previousValue = this.getFromDB(id)
 	}
 
 	static index(propertyName: string, indexBy?: (value, sourceKey) => any) {
@@ -533,38 +507,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	set whenUpdateProcessed(promise) {
-		this._whenUpdateProcessed = promise = promise.then((event) => {
-			if (this._whenUpdateProcessed === promise) {
-				this.version = event.version
-				this._whenUpdateProcessed = null
-			}
-		}, (error) => {
-			if (this._whenUpdateProcessed === promise) {
-				this._whenUpdateProcessed = null
-			}
-		})
-	}
-	get whenUpdateProcessed() {
-		return this._whenUpdateProcessed
-	}
-
-	valueOf(mode) {
-		let context = currentContext
-		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
-			context.ifModifiedSince = undefined
-		}
-		const whenUpdateProcessed = this._whenUpdateProcessed
-		const withValue = typeof mode === 'object' ?
-			() => context ? context.executeWithin(() => when(super.valueOf(true), copy)) : when(super.valueOf(true), copy) :
-			() => {
-				this.repetitiveGets = true // direct calls without internal mode/flags mean it is more likely to be repeated (so we probably don't want to compress it)
-				return context ? context.executeWithin(() => super.valueOf(true)) : super.valueOf(true)
-			}
-		if (whenUpdateProcessed) {
-			return whenUpdateProcessed.then(withValue)
-		}
-		return when(this.constructor.whenUpdatedInContext(context), withValue)
+	getValue(mode) {
+		return this.constructor.get(this.id, mode)
 	}
 
 	gotValue(value) {
@@ -606,8 +550,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event.type === 'discovered') // skip reset
 			Variable.prototype.updated.apply(this, arguments)
 		else {
-			this.invalidateEntry(event)
-			event.whenWritten = Class.whenWritten
 			if (event.type == 'deleted') {
 				this.readyState = 'no-local-data'
 				this._cachedValue = undefined
@@ -620,18 +562,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				this.readyState = null
 			}
 		}
+		Class.updated(event, this) // main handling occurs here
 		// notify class listeners too
-		for (let listener of Class.listeners || []) {
-			listener.updated(event, this)
-		}
-		if (!context || !context.expectedVersions) {
-			context = DEFAULT_CONTEXT
-		}
-		context.expectedVersions[Class.name] = event.version
-		const whenUpdateProcessed = event.whenUpdateProcessed
-		if (whenUpdateProcessed) {
-			this.whenUpdateProcessed = whenUpdateProcessed
-		}
 		return event
 	}
 
@@ -642,27 +574,68 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	invalidateEntry(event) {
-		this._cachedValue = undefined
-		this.readyState = null
+	static writeEntry(event) {
 	}
 
-	static updated(event, by?) {
-		// this should be called by outside classes
+	static update(id, event) {
+		// this an easier way to manually call the updated process
+		return this.updated(new ReplacedEvent(), { id })
+	}
+
+	static updated(event = new ReplacedEvent(), by?) {
+		if (!event.visited) {
+			event.visited = new Set() // TODO: Would like to remove this at some point
+		}
+		if (event.visited.has(this)) {
+			return event
+		}
+		event.visited.add(this)
+		if (!event.source) {
+			event.source = this
+		}
+		let context = currentContext
+		if (context && !event.triggers && context.connectionId) {
+			event.triggers = [ context.connectionId ]
+		}
+
 		if (event && !event.version) {
 			event.version = getNextVersion()
 		}
-		let instance
-		for (let Source of this.Sources || []) {
-			if (by && by.constructor === Source) {
-				instance = this.for(by.id)
-				instance.updated(event, by)
-				return event // we don't need to do do the static listeners here, as the instance listener will handle that
+		let id = by && by.id
+		let nextBy = {
+			id,
+			constructor: this
+		}
+		if (event.type === 'added' || event.type === 'discovered') {
+			// if we are being notified of ourself being created, ignore it
+			this.instanceSetUpdated(event)
+		} else if (event.type === 'reload-entry') {
+			// do nothing
+		} else if (id) {
+			this.writeEntry(id, event, nextBy)
+			if (event.type === 'deleted') {
+				this.instanceSetUpdated(event)
 			}
 		}
-		for (let listener of this.listeners || []) {
-			listener.updated(event, by)
+		if (id) {
+			let instance
+			instance = this.instancesById.get(id)
+			if (instance)
+				instance.updated(event, nextBy)
 		}
+		for (let listener of this.listeners || []) {
+			listener.updated(event, nextBy)
+		}
+
+		if (!context || !context.expectedVersions) {
+			context = DEFAULT_CONTEXT
+		}
+		context.expectedVersions[this.name] = event.version
+		const whenUpdateProcessed = event.whenUpdateProcessed
+		if (whenUpdateProcessed) {
+			this.whenUpdateProcessed = whenUpdateProcessed
+		}
+
 		return event
 	}
 
@@ -786,96 +759,122 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	get approximateSize() {
 		return this.asDPack ? this.asDPack.length * this.dPackMultiplier : 100
 	}
-
-	loadLocalData(conditional?) {
-		let Class = this.constructor as PersistedType
-		let db = Class.db
-		let key = toBufferKey(this.id)
-		let entryBuffer = db.get(key, NO_COPY_OPTIONS)
-		if (!entryBuffer)
-			return {}
-		const version = readUInt(entryBuffer)
-		const cachedValueValid = entryBuffer[0] !== INVALIDATED_ENTRY && version === this[versionProperty] && this._cachedValue
-		if (cachedValueValid && conditional) {
-			return true
+	static get transitions() {
+		return this._transitions || (this._transitions = new Map())
+	}
+	static get(id, mode) {
+		let context = currentContext
+		/*
+		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
+			context.ifModifiedSince = undefined
+		}*/
+		let entry = this.getFromDB(id)
+		if (typeof mode === 'object') {
+			entry = copy(entry)
 		}
-		return this.parseEntryValue(entryBuffer)
+		return entry
 	}
 
-	parseEntryValue(buffer) {
+	static is(id, value, event) {
+		if (!event) {
+			let entry = this.getFromDB(id)
+			event = entry ? new ReplacedEvent() : new AddedEvent()
+		}
+		return this.updated(event, {
+			id,
+			write: (keyAsBuffer, version) => {
+				var buffer = this.serializeEntryValue(version, value)
+				return this.db.put(keyAsBuffer, buffer)
+			}
+		})
+	}
+
+
+
+	static getFromDB(id, conditional?) {
+		let transition = this.transitions.get(id) // if we are transitioning, return the transition result
+		if (transition) {
+			if (transition.invalidating) {
+				return new Invalidated(transition.newVersion, transition)
+			} else {
+				return transition.result
+			}
+		}
+		let db = this.db
+		// TODO: only read from DB if context specifies to look for a newer version
+		let key = toBufferKey(id)
+		let entryBuffer = db.get(key, NO_COPY_OPTIONS)
+		if (!entryBuffer)
+			return
+		const version = readUInt(entryBuffer)
+		if (entryBuffer[0] === INVALIDATED_STATE) {
+			return new Invalidated(version)
+		}
+		let valueCache = this._valueCache
+		if (valueCache) {
+			let value = valueCache.get(id)
+			if (value && value[VERSION] === version) {
+				expirationStrategy.useEntry(value, 100/*value[bufferSymbol].length*/)
+				return value
+			}
+		} else {
+			this._valueCache = valueCache = new WeakValueMap()
+		}
+		let value = this.parseEntryValue(entryBuffer)
+		valueCache.set(id, value)
+		if (value)
+			expirationStrategy.useEntry(value, 100/*value[bufferSymbol].length*/)
+		return value
+	}
+
+	static parseEntryValue(buffer) {
 		const version = readUInt(buffer)
-		let valueBuffer
-		if (buffer[0] >= COMPRESSED_STATUS_24) {
+		let valueBuffer, data
+		let statusByte = buffer[0]
+		if (statusByte >= COMPRESSED_STATUS_24) {
 			// uncompress from the shared memory
 			// TODO: Do this on-access
 			let uncompressedLength = buffer.readUInt32BE(8)
 			let uncompressedBuffer = Buffer.allocUnsafe(uncompressedLength)
 			lz4Uncompress(buffer.slice(12), uncompressedBuffer)
 			valueBuffer = uncompressedBuffer
-		} else if (buffer[0] === INVALIDATED_STATE) {
+		} else if (statusByte === INVALIDATED_STATE) {
 			// stored as an invalidated version
-			return {
-				version,
-				data: INVALIDATED_ENTRY,
-				buffer: Buffer.from(buffer),
-			}
+			return new Invalidated(version)
 		} else if (buffer.length > 2048) {
 			// use shared memory
-			let block = {
-				version,
-				data: parseLazy(buffer.slice(8), createParser()),
-				buffer: Buffer.from(buffer.slice(0, 8)),
-			}
-			this.constructor.db.notifyOnInvalidation(buffer, function(forceCopy) {
+			valueBuffer = buffer.slice(8)
+			this.db.notifyOnInvalidation(buffer, function(forceCopy) {
 				// TODO: if state byte indicates it is still fresh && !forceCopy:
 				// return false
 				// calling Buffer.from on ArrayBuffer returns NodeBuffer, calling again copies it
 				console.log('reassigning buffers')
-				block.data && reassignBuffers(block.data, Buffer.from(Buffer.from(this)), this)
+				data && reassignBuffers(data, Buffer.from(Buffer.from(this)), this)
 				this.onInvalidation = null // nothing more we can do at this point
 			})
-			return block
 		} else { 
 			// Do a memcpy of the memory so we aren't using a shared memory
 			valueBuffer = Buffer.from(buffer.slice(8))
 		}
-		const parser = createParser()
-		return {
-			version,
-			data: parseLazy(valueBuffer, parser),
-			buffer: Buffer.from(buffer.slice(0, 8)),
+		data = parseLazy(valueBuffer, createParser())
+		let type = typeof data
+		if (type === 'object') {
+			// nothing to change
+			if (!data) {
+				return null // can't assign version to null
+			}
+		} else if (type === 'number') {
+			data = new Number(data)
+		} else if (type === 'string') {
+			data = new String(data)
+		} else if (type === 'boolean') {
+			data = new Boolean(data)
+		} else {
+			return data // can't assign a version to undefined
 		}
-	}
-
-	loadLatestLocalData() {
-		let isSync
-		let entry = this.loadLocalData(true)
-		if (entry === true) // verified we have latest from db, don't change anything
-			return
-
-		const { version, data, buffer } = entry
-		if (isSync === undefined)
-			isSync = true
-		else
-			this.promise = null
-		if (data && data !== INVALIDATED_ENTRY) {
-			this.version = Math.max(version, this.version || 0)
-			console.log('Loaded with data', this.id, this.constructor.name, this.version)
-			this.readyState = 'up-to-date'
-			this[versionProperty] = version
-			this._cachedValue = data
-			this.invalidationVersion = null
-			expirationStrategy.useEntry(this, this.dPackMultiplier * buffer.length)
-		} else if (version) {
-			this.invalidationVersion = this.version = Math.max(version, this.version || 0)
-			console.log('Loaded invalidated', this.id, this.constructor.name, this.version)
-			this.readyState = 'invalidated'
-		} else if (!this.readyState) {
-			this.updateVersion()
-			console.log('Loaded no-local-data', this.id, this.constructor.name, this.version)
-			this.readyState = 'no-local-data'
-		}
-		return entry
+		data[VERSION] = version
+		data[STATUS_BYTE] = statusByte
+		return data
 	}
 
 	static getInstanceIds(range: IterableOptions) {
@@ -898,11 +897,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return db.iterable({
 			start: Buffer.from([2])
 		}).map(({ key, value }) => {
-			let entry = this.prototype.parseEntryValue(value)
+			let entry = this.parseEntryValue(value)
 			return {
 				key: fromBufferKey(key),
-				value: entry && entry.data,
-				version: entry && entry.version,
+				value: entry,
+				version: entry && entry[VERSION],
 			}
 		}).asArray
 	}
@@ -925,7 +924,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				start: Buffer.from([10])
 			}).map(({ key, value }) => {
 				try {
-					const { version } = this.prototype.parseEntryValue(value)
+					const version = readUInt(value)
 					return version > sinceVersion ? {
 						id: fromBufferKey(key),
 						version
@@ -953,123 +952,15 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (id > 0 && typeof id === 'string' || !id) {
 			throw new Error('Id should be a number or non-numeric string: ' + id)
 		}
-
-		event || (event = new DeletedEvent())
-		let entity = this.for(id)
-		entity.assignPreviousValue(event)
-		// TODO: Don't need to delete for cached entries, as it will be done in the event handler
-		this.dbPut(id) // do the db level delete
-		expirationStrategy.deleteEntry(entity)
-		this.instancesById.delete(id)
-		entity.updated(event)
+		
+		return this.updated(event || (event = new DeletedEvent()), { id })
 	}
 
-	get [valueProperty]() {
-		return this._cachedValue
+	setValue(value) {
+		this.constructor.is(this.id, value)
 	}
 
-	set [valueProperty](value) {
-		this._cachedValue = value
-		let newToCache = this.readyState == 'no-local-data'
-		if (newToCache) {
-			this.readyState = 'loading-local-data'
-		}
-		if (this.constructor.returnsAsyncIterables) {
-			value = when(value, value => {
-				let resolutions = []
-				function resolveData(data) {
-					if (typeof data === 'object' && !(data instanceof Array)) {
-						if (data[Symbol.asyncIterator]) {
-							let asArray = data.asArray
-							if (asArray.then)
-								resolutions.push(data.asArray)
-						} else {
-							for (let key of data) {
-								resolveData(data[key])
-							}
-						}
-					}
-				}
-				resolveData(value)
-				if (resolutions.length > 0) {
-					return (resolutions.length > 1 ? Promise.all(resolutions) : resolutions[0]).then(() => value)
-				}
-				return value
-			})
-		}
-		let result = when(value, value => {
-			if (!value) {
-				if (newToCache) {
-					this.readyState = 'no-local-data'
-					// object not found, this basically results in a 404, no reason to store or keep anything
-					return
-				}
-				//console.warn('Setting empty value', value, 'for', this.id, this.constructor.name)
-				this.readyState = 'invalidated'
-			}
-			let data = ''
-			let result
-
-			let Class = this.constructor as PersistedType
-			if (this.shouldPersist !== false) {
-				let db = Class.db
-				let version = this[versionProperty]
-				this._cachedValue = value
-				data = this.serializeEntryValue(version, value, 20/*blocks*/)
-				const keyAsBuffer = toBufferKey(this.id)
-				if (!this.repetitiveGets && data.length > 1024) {
-					let compressedData = Buffer.allocUnsafe(data.length - 100)
-					let compressedLength = lz4Compress(data.slice(8), compressedData, 12, compressedData.length)
-					if (compressedLength) {
-						data.copy(compressedData, 0, 0, 8)
-						compressedData[0] = COMPRESSED_STATUS_24
-						compressedData.writeUInt32BE(data.length - 8, 8)
-						data = compressedData.slice(0, 12 + compressedLength)
-					} // else it didn't compress any smaller, bail out
-				}
-				console.log('Writing value',this.id, Class.name, version, new Date(version/ 256 + 1500000000000))
-				const invalidationVersion = this.invalidationVersion
-				let whenValueCommitted = this.whenValueCommitted = this.db.put(keyAsBuffer, data,
-						newToCache ? null :
-						(invalidationVersion && Class.invalidatedHeader) ? Class.invalidatedHeader(invalidationVersion) :
-						undefined).committed.then(result => {
-					this.invalidationVersion = null
-					if (result === false) {
-						let newVersion = this.loadLocalData().version
-						if (newVersion < invalidationVersion) {
-							// this shouldn't happen
-							console.warn('Entry was replaced with older version', this.id, Class.name, new Date(newVersion/ 256 + 1500000000000), new Date(version/ 256 + 1500000000000))
-							this.invalidationVersion = this.version = newVersion
-							return
-						}
-						let event = new ReplacedEvent()
-						event.version = newVersion
-						if (this.loadLocalData().data == INVALIDATED_ENTRY) {
-							this.invalidationVersion = newVersion
-						}
-						event.sourceProcess = true // invalidated from another process
-						this.updated(event)
-					}
-					if (whenValueCommitted == this.whenValueCommitted) {
-						this.whenValueCommitted = null
-					}
-				})
-				
-				if (newToCache) {
-					// fire an updated, if it is a new object
-					let event = new DiscoveredEvent()
-					event.triggers = [ INITIALIZATION_SOURCE ]
-					event.source = this
-					event.version = version
-					Class.instanceSetUpdated(event)
-					Class.updated(event, this)
-				}
-			}
-			expirationStrategy.useEntry(this, this.dPackMultiplier * (data || '').length)
-		})
-	}
-
-	serializeEntryValue(version, object, blocks) {
+	static serializeEntryValue(version, object, blocks) {
 		var start = 256//((4 + blocks / 1.3) >> 0) * 8
 		var buffer
 		if (object === INVALIDATED_ENTRY) {
@@ -1096,42 +987,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		return buffer.slice(startOfHeader)
 	}
-
-	static dbPut(key, value?, version?, compress?) {
-		if (typeof value != 'object' && value) {
-			value = Buffer.from(value.toString())
-		}
-		const db = this.db
-		this.lastVersion = Math.max(this.lastVersion || 0, version || getNextVersion())
-		const keyAsBuffer = toBufferKey(key)
-		this.whenWritten = db.put(keyAsBuffer, value)
-		if (compress) {
-			compressEntry(db, keyAsBuffer, value)
-		}
-		// queue up a write of the last version number
-		if (!this.queuedVersionWrite) {
-			this.queuedVersionWrite = true
-			setTimeout(() => {
-				db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
-				this.queuedVersionWrite = false
-			}, 200)
-		}
-	}
-
-	/*gotValue(value) {
-		let context = currentContext
-		if (context && this.cachedVersion > -1) {
-			context.expectedVersions[this.name] = this.cachedVersion
-		}
-	}*/
-
-	clearCache() {
-		this._cachedValue = undefined
-		this.cachedVersion = -1
-		if (this.readyState === 'up-to-date' || this.readyState === 'invalidated') {
-			this.readyState = undefined
-		}
-	}
 }
 
 export class Persisted extends KeyValued(MakePersisted(Variable), {
@@ -1143,26 +998,16 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	static resetAll(clearDb): any {
 	}
 
-	getValue() {
-		this.loadLatestLocalData()
-		return super.getValue()
+	static set(id, value, event) {
+		return this.is(id, value, event)
 	}
+
 	patch(properties) {
 		return this.then((value) =>
 			when(this.put(value = Object.assign(value ? copy(value) : {}, properties)), () => value))
 	}
 	put(value, event) {
-		let newToCache = !this.getValue()
-		event = event || (newToCache ? new AddedEvent() : new ReplacedEvent())
-		event.source = this
-		this.assignPreviousValue(event)
-		this._initUpdate(event) // assign the version before the value is assigned
-		this.readyState = 'up-to-date'
-		let result = super.put(convertToBlocks(value), event)
-		if (newToCache) {
-			this.constructor.instanceSetUpdated(event)
-		}
-		return result
+		return this.constructor.is(this.id, value, event)
 	}
 	static DB = lmdb
 	static syncVersion = 10
@@ -1171,7 +1016,6 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 export default Persisted
 export const Persistable = MakePersisted(Transform)
 interface PersistedType extends Function {
-	dbPut(id, value?, version?, compress?): void
 	otherProcesses: any[]
 	instanceSetUpdated(event): any
 	updated(event, by): any
@@ -1188,25 +1032,125 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static Sources: any[]
 	static fetchAllIds: () => {}[]
 
-	getValue() {
-		let context = currentContext
-		this.loadLatestLocalData()
-		if (this.cachedVersion > -1 && this.cachedVersion >= this.version && this.readyState === 'up-to-date') {
-			// it is live, so we can shortcut and just return the cached value
-			if (context) {
-				context.setVersion(this.cachedVersion)
-				if (context.ifModifiedSince >= this.cachedVersion) {
+	static get(id, mode) {
+		let context = currentContext		
+		return when(this.whenUpdatedInContext(context), () => {
+			let entry = this.getFromDB(id)
+			if (entry) {
+				if (entry instanceof Invalidated) {
+					let oldTransition = this.transitions.get(id)
+					console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
+					let transition = this.runTransform(id, entry[VERSION], false, mode)
+					if (oldTransition && oldTransition.result && oldTransition.result.abort) {
+						// if it is still in progress, we can abort it and replace the result
+						oldTransition.replaceWith = transition.result
+						oldTransition.result.abort()
+					}
+					this.transitions.set(id, transition)
+					return transition.result
+				}
+				// TODO: copy this to super/Persisted.get
+				if (context && context.ifModifiedSince >= this.cachedVersion) {
 					return NOT_MODIFIED
 				}
+				return entry
 			}
-			return this.cachedValue
+			let version = getNextVersion()
+			let transition = this.runTransform(id, version, true, mode)
+			when(transition.result, (result) => {
+				if (result !== undefined && !transition.invalidating) {
+					let event = new DiscoveredEvent()
+					event.triggers = [ INITIALIZATION_SOURCE ]
+					event.source = this
+					event.version = version
+					this.instanceSetUpdated(event)
+					this.updated(event, {
+						id,
+						constructor: this
+					})
+				}
+			})
+			this.transitions.set(id, transition)
+			return transition.result
+		})
+	}
+	static runTransform(id, fromVersion, isNew, mode) {
+		let transition = {
+			fromVersion
 		}
-		console.log('Not in cache, performing getValue', this.id, this.constructor.name, 'cachedVersion', this.cachedVersion, 'version', this.version, this.readyState)
-		return super.getValue()
+		let hasPromises
+		let inputData = this.Sources ? this.Sources.map(source => {
+			let data = source.get(id)
+			if (data && data.then) {
+				hasPromises = true
+			}
+			return data
+		}) : []
+		try {
+			transition.result = when(when(hasPromises ? Promise.all(inputData) : inputData, inputData => {
+				if (inputData.length > 0 && inputData[0] === undefined) // first input is undefined, we pass through
+					return
+				return this.prototype.transform.apply({ id }, inputData.map(copy))
+			}), result => {
+				if (transition.invalidating) {
+					if (transition.replaceWith) {
+						console.log('replaceWith')
+						return transition.replaceWith
+					}
+					return result
+				} // else normal transform path
+				const conditionalHeader = isNew ? null :
+						this.createHeader(transition.fromVersion)
+				let committed
+				console.log('conditional header for writing transform ' + (result ? 'write' : 'delete'), id, this.name, conditionalHeader)
+				if (result === undefined) {
+					committed = this.db.remove(toBufferKey(id), conditionalHeader).committed
+				} else {
+					result = convertToBlocks(result)
+					transition.result = result
+					let buffer = this.serializeEntryValue(transition.fromVersion, result)
+					if (typeof mode == 'object' && buffer.length > 1024) {
+						let compressedData = Buffer.allocUnsafe(buffer.length - 100)
+						let compressedLength = lz4Compress(buffer.slice(8), compressedData, 12, compressedData.length)
+						if (compressedLength) {
+							buffer.copy(compressedData, 0, 0, 8)
+							compressedData[0] = COMPRESSED_STATUS_24
+							compressedData.writeUInt32BE(buffer.length - 8, 8)
+							buffer = compressedData.slice(0, 12 + compressedLength)
+						} // else it didn't compress any smaller, bail out
+					}
+					committed = this.db.put(toBufferKey(id), buffer, conditionalHeader).committed
+				}
+				committed.then((successfulWrite) => {
+					if (this.transitions.get(id) == transition)
+						this.transitions.delete(id)
+					if (!successfulWrite) {
+						console.log('unsuccessful write of transform, data changed, updating', id, this.name, this.db.get(toBufferKey(id)))
+						this.updated(new ReloadEntryEvent(), { id })
+					}
+				})
+				return result
+			}, (error) => {
+				if (error.__CANCEL__) {
+					return transition.replaceWith
+				}
+				if (this.transitions.get(id) === transition && !transition.invalidating)
+					this.transitions.delete(id)
+				throw error
+			})
+		} catch (error) {
+			if (this.transitions.get(id) === transition && !transition.invalidating)
+				this.transitions.delete(id)
+			throw error
+		}
+		return transition
 	}
 
+	getValue() {
+		return this.constructor.get(this.id)
+	}
 	is(value, event) {
-		// we skip loadLocalData and pretend it wasn't in the cache... not clear if
+		// we skip getFromDB and pretend it wasn't in the cache... not clear if
 		// that is how we want is() to behave or not
 		event = event || new ReplacedEvent()
 		event.triggers = [ INITIALIZATION_SOURCE ]
@@ -1233,66 +1177,118 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					continue
 				}
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
-				this.db.put(toBufferKey(id), this.invalidatedHeader(version))
+				this.db.put(toBufferKey(id), this.createHeader(version))
 			}
 			//console.info('Finished reseting', this.name)
 		}.bind(this)))
 	}
 
-	invalidateEntry(event) {
-		const Class = this.constructor as PersistedType
-		const keyAsBuffer = toBufferKey(this.id)
+	static writeEntry(id, event, by) {
+		const keyAsBuffer = toBufferKey(id)
 		let previousEntry
-		if (Class.updateWithPrevious) {
-			previousEntry = this.assignPreviousValue(event)
+		let previousVersion, previousStatusByte
+		if (this.updateWithPrevious) {
+			previousEntry = by.previousValue = this.getFromDB(id)
+			if (previousEntry) {
+				previousVersion = previousEntry[VERSION]
+				previousStatusByte = previousEntry[STATUS_BYTE]
+			}
 		}
-		let previousHeader = previousEntry && previousEntry.buffer && previousEntry.buffer.slice(0, 8)
-		this._cachedValue = undefined
-		this.cachedVersion = undefined
-		let version = this.version
+		let version = event.version
+		let transition = this.transitions.get(id)
+		console.log('writeEntry previous transition', id, this.name, transition)
+
+		if (transition) {
+			if (transition.invalidating) {
+				previousVersion = transition.newVersion
+				previousStatusByte = INVALIDATED_STATE
+			} else if (transition.result && transition.result.then) {
+				// still resolving but this gives us the immediate version
+				previousVersion = transition.fromVersion
+				previousStatusByte = INVALIDATED_STATE
+			}// else the previousEntry should have correct version and status
+			transition.invalidating = true
+			transition.newVersion = version
+		} else {
+			this.transitions.set(id, transition = {
+				invalidating: true,
+				newVersion: version
+			})
+		}
+		let valueCache = this._valueCache
+		if (valueCache) {
+			let value = valueCache.get(id)
+			if (value !== undefined) {
+				expirationStrategy.deleteEntry(value)
+				valueCache.delete(id)
+			}
+		}
+
 		if (this.shouldPersist !== false &&
 			!(event && event.sourceProcess && // if it came from another process we can count on it to have written the update, check to make sure it is running against this table
-				(Class.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
-					Class.otherProcesses.some(otherProcessId => otherProcessId < process.pid) // otherwise, defer to the lowest number process to handle it
+				(this.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
+					this.otherProcesses.some(otherProcessId => otherProcessId < process.pid) // otherwise, defer to the lowest number process to handle it
 				))) {
 			// storing as a version alone to indicate invalidation
-			let promise
-				console.log('Invalidating entry',this.id, Class.name, new Date(version/ 256 + 1500000000000))
-			this.invalidationVersion = version
-			if (event && event.type === 'deleted') {
+			let db = this.db
+			let written
+				console.log('Invalidating entry', id, this.name, new Date(version/ 256 + 1500000000000), this.createHeader(version))
+			if (by.write) {
+				written = by.write(keyAsBuffer, version)
+			} else if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
-				promise = this.db.remove(keyAsBuffer/*, previousHeader*/)
+				written = db.remove(keyAsBuffer)
 			} else {
-				promise = this.db.put(keyAsBuffer, Class.invalidatedHeader(version)/*, previousHeader*/)
+				let conditionalHeader = previousVersion && this.createHeader(previousVersion)
+				if (conditionalHeader) {
+					conditionalHeader[0] = previousStatusByte
+				}
+				console.log('conditional header for invaliding entry ', id, this.name, conditionalHeader)
+				written = db.put(keyAsBuffer, this.createHeader(version), conditionalHeader)
 			}
-			if (event.previousValues) {
-				event.previousValues.set(this, promise.then((result) => {
+			if (!event.whenWritten)
+				event.whenWritten = written
+			if (by.previousValue) {
+				by.previousValue = written.committed.then((result) => {
 					if (result === false) {
-						let newVersion = this.loadLocalData().version
+						console.log('Value had changed during invalidation', id, this.name)
+						let newVersion = readUInt(db.get(keyAsBuffer, NO_COPY_OPTIONS))
 						if (newVersion > version) {
 							return {} // don't do anything further, db is ahead of us, and we should take no indexing action
 						} else {
 							// it was no longer the same as what we read, re-run, as we have a more recent update
-							this.invalidateEntry(event)
-							return event.previousValues.get(this)
+							this.writeEntry(id, event, by)
+							return by.previousValue
 						}
 					}
 					return previousEntry
-				}))
+				})
 			}
+			const finished = (result) => {
+				console.log('writeEntry finished with', id, this.name, result)
+				if (this.transitions.get(id) === transition && transition.newVersion === version) {
+					this.transitions.delete(id)
+				}
+				this.lastVersion = Math.max(this.lastVersion, version)
+				if (!this.queuedVersionWrite) {
+					this.queuedVersionWrite = true
+					setTimeout(() => {
+						db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
+						this.queuedVersionWrite = false
+					}, 200)
+				}
+
+			}
+			written.committed.then(finished, finished)
 		}
 	}
 
-	static invalidatedHeader(version) {
+	static createHeader(version) {
 		const buffer = Buffer.allocUnsafe(8)
 		writeUInt(buffer, version)
 		buffer[0] = INVALIDATED_STATE
 		buffer[1] = 0
 		return buffer
-	}
-
-	getTransform() {
-		return checkInputTransform
 	}
 
 	static _version: number
@@ -1363,7 +1359,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 							event.triggers = [ INITIALIZATION_SOURCE ]
 							inMemoryInstance.updated(event)
 						} else {
-							this.db.put(toBufferKey(id), this.invalidatedHeader(version))
+							this.db.put(toBufferKey(id), this.createHeader(version))
 						}
 					}
 					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
@@ -1452,16 +1448,11 @@ class DiscoveredEvent extends AddedEvent {
 }
 DiscoveredEvent.prototype.type = 'discovered'
 
-const checkInputTransform = {
-	apply(instance, args) {
-		// if the main input is undefined, treat as deleted object and pass on the undefined without running the transform
-		if (args[0] === undefined && args.length > 0) {
-			return
-		}
-		let result = instance.transform.apply(instance, args)
-		return when(result, convertToBlocks)
-	}
+class ReloadEntryEvent extends ReplacedEvent {
+	type
 }
+ReloadEntryEvent.prototype.type = 'reload-entry'
+
 function convertToBlocks(value) {
 	// convert to partitioned blocks
 	if (value && typeof value === 'object' && !isBlock(value)) {
@@ -1501,3 +1492,11 @@ function writeUInt(buffer, number, offset?) {
 function readUInt(buffer, offset?) {
 	return buffer.readUIntBE((offset || 0) + 2, 6)
 }
+
+export class Invalidated {
+	constructor(version) {
+		this[VERSION] = version
+	}
+	[VERSION]: number
+}
+Invalidated.prototype[STATUS_BYTE] = INVALIDATED_STATE

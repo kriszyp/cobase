@@ -127,20 +127,6 @@ export function open(name, options): Database {
 			return this.get(id, asBuffer)
 		},
 		get(id, options) {
-			let idPrimitive
-			if (scheduledWrites) {
-				idPrimitive = id.toString('binary')
-				if (scheduledWrites.has(idPrimitive)) {
-					return scheduledWrites.get(idPrimitive)
-				}
-			}
-			if (committingWrites) {
-				idPrimitive = idPrimitive || id.toString('binary')
-				if (committingWrites.has(idPrimitive)) {
-					return committingWrites.get(idPrimitive)
-				}
-			}
-
 			let txn
 			try {
 				const writeTxn = this.writeTxn
@@ -175,12 +161,9 @@ export function open(name, options): Database {
 			parentArrayBuffer.onInvalidation = onInvalidation
 		},
 		put(id, value, ifValue) {
-			if (!scheduledWrites) {
-				scheduledWrites = new Map()
+			if (!scheduledOperations) {
 				scheduledOperations = []
 			}
-			let key = id.toString('binary')
-			scheduledWrites.set(key, value)
 			let index = scheduledOperations.push([db, id, value, ifValue]) - 1
 			let syncResults = this.scheduleCommit()
 			return ifValue === undefined ? syncResults :
@@ -229,11 +212,9 @@ export function open(name, options): Database {
 			}
 		},
 		remove(id, ifValue) {
-			if (!scheduledWrites) {
-				scheduledWrites = new Map()
+			if (!scheduledOperations) {
 				scheduledOperations = []
 			}
-			scheduledWrites.set(id.toString('binary'))
 			let index = scheduledOperations.push([db, id, undefined, ifValue]) - 1
 			let syncResults = this.scheduleCommit()
 			return ifValue === undefined ? syncResults :
@@ -335,31 +316,29 @@ export function open(name, options): Database {
 				// pendingBatch promise represents the completion of the transaction
 				let thisBatch = this.pendingBatch = new Promise((resolve, reject) => {
 					when(this.currentBatch, () => {
-						setTimeout(() => {
+						let timeout = setTimeout(this.runNextBatch = () => {
+							this.runNextBatch = null
+							clearTimeout(timeout)
 							let currentBatch = this.currentBatch = this.pendingBatch
 							this.pendingBatch = null
 							this.pendingSync = null
-							if (scheduledWrites) {
+							if (scheduledOperations) {
 								// operations to perform, collect them as an array and start doing them
 								let operations = scheduledOperations
-								committingWrites = scheduledWrites
-								scheduledWrites = null
 								scheduledOperations = null
 								const doBatch = () => {
-									console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
+									//console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
 									env.batchWrite(operations, AS_BINARY_ALLOW_NOT_FOUND, (error, results) => {
-										console.log('did batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
+										//console.log('did batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
 										if (error) {
 											console.log('error in batch', error)
 											try {
 												// see if we can recover from recoverable error (like full map with a resize)
 												handleError(error, this, null, doBatch)
 											} catch(error) {
-												committingWrites = null // commits are done, can eliminate this now
 												reject(error)
 											}
 										} else {
-											committingWrites = null // commits are done, can eliminate this now
 											resolve(results)
 										}
 									})
@@ -397,6 +376,10 @@ export function open(name, options): Database {
 					committed: this.pendingBatch
 				}
 			}
+			if (scheduledOperations && scheduledOperations.length > 1000 && this.runNextBatch) {
+				// past a certain threshold, run it immediately
+				this.runNextBatch()
+			}
 			return this.pendingSynced
 		},
 		batch(operations) {
@@ -407,11 +390,9 @@ export function open(name, options): Database {
 					throw new Error('non-buffer key')
 				try {
 					let value = operation.value
-					if (!scheduledWrites) {
-						scheduledWrites = new Map()
+					if (!scheduledOperations) {
 						scheduledOperations = []
 					}
-					scheduledWrites.set(operation.key.toString('binary'), value)
 					scheduledOperations.push([db, operation.key, value])
 				} catch (error) {
 					if (error.message.startsWith('MDB_NOTFOUND')) {
