@@ -750,8 +750,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 		this.updated(event, { id })
 		let transition = this.transitions.get(id)
-		transition.invalidating = false
-		transition.result = value
+		if (transition) { // non cache entities won't have a transition
+			transition.invalidating = false
+			transition.result = value
+		}
 		let buffer = this.serializeEntryValue(event.version, value)
 		return this.db.put(toBufferKey(id), buffer)
 	}
@@ -1006,7 +1008,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			if (entry) {
 				if (entry instanceof Invalidated) {
 					let oldTransition = this.transitions.get(id)
-					console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
+					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
 					let transition = this.runTransform(id, entry[VERSION], false, mode)
 					if (oldTransition && oldTransition.result && oldTransition.result.abort) {
 						// if it is still in progress, we can abort it and replace the result
@@ -1041,6 +1043,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			return transition.result
 		})
 	}
+	static whenValueCommitted: Promise<any>
 	static runTransform(id, fromVersion, isNew, mode) {
 		let transition = {
 			fromVersion
@@ -1069,7 +1072,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				const conditionalHeader = isNew ? null :
 						this.createHeader(transition.fromVersion)
 				let committed
-				console.log('conditional header for writing transform ' + (result ? 'write' : 'delete'), id, this.name, conditionalHeader)
+				//console.log('conditional header for writing transform ' + (result ? 'write' : 'delete'), id, this.name, conditionalHeader)
 				if (result === undefined) {
 					if (conditionalHeader === null) {
 						// already gone, nothing to do
@@ -1093,6 +1096,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					}
 					committed = this.db.put(toBufferKey(id), buffer, conditionalHeader).committed
 				}
+				this.whenValueCommitted = committed
 				committed.then((successfulWrite) => {
 					if (this.transitions.get(id) == transition)
 						this.transitions.delete(id)
