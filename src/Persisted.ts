@@ -503,7 +503,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
-			return when(false && this.resetAll(clearDb), () => db.scheduleCommit()).then(() => clearDb)
+			return when(this.resetAll(clearDb), () => db.scheduleCommit()).then(() => clearDb)
 		}
 	}
 
@@ -528,40 +528,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 
 		let Class = this.constructor as PersistedType
-		if (event.type === 'added') {
-			// if we are being notified of ourself being created, ignore it
-			Class.instanceSetUpdated(event)
-			if (this.readyState === 'loading-local-data') {
-				return event
-			}
-			if (this.cachedVersion > -1) {
-				return event
-			}
-		}
-		if (event.version < this.version) {
-			// if we receive an update from another process that is _older_ than the current version, that means it occurred
-			// before our last update, but arrived (over IPC) after our last update, and should be completely ignored,
-			// as version updates must be purely monotonic
-			return event
-		}
-		this._initUpdate(event)
-		console.log('updated', this.id, Class.name, event.version, event.type, new Date(event.version/ 256 + 1500000000000))
-
-		if (event.type === 'discovered') // skip reset
-			Variable.prototype.updated.apply(this, arguments)
-		else {
-			if (event.type == 'deleted') {
-				this.readyState = 'no-local-data'
-				this._cachedValue = undefined
-				this._cachedVersion = undefined
-				Class.instanceSetUpdated(event)
-			}
-			super.updated(event, by)
-			if (event.sourceProcess) {
-				// if it came from another process, we should re-read it before assuming it has been invalidated
-				this.readyState = null
-			}
-		}
+		super.updated(event, by)
 		Class.updated(event, this) // main handling occurs here
 		// notify class listeners too
 		return event
@@ -606,16 +573,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			id,
 			constructor: this
 		}
-		if (event.type === 'added' || event.type === 'discovered') {
-			// if we are being notified of ourself being created, ignore it
+		if (event.type === 'discovered' || event.type === 'added' || event.type === 'deleted') {
 			this.instanceSetUpdated(event)
-		} else if (event.type === 'reload-entry') {
+		}
+		if (event.type === 'reload-entry' || event.type === 'discovered' ) {
+			// if we are being notified of ourself being created, ignore it
 			// do nothing
 		} else if (id) {
 			this.writeEntry(id, event, nextBy)
-			if (event.type === 'deleted') {
-				this.instanceSetUpdated(event)
-			}
 		}
 		if (id) {
 			let instance
@@ -780,13 +745,15 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			let entry = this.getFromDB(id)
 			event = entry ? new ReplacedEvent() : new AddedEvent()
 		}
-		return this.updated(event, {
-			id,
-			write: (keyAsBuffer, version) => {
-				var buffer = this.serializeEntryValue(version, value)
-				return this.db.put(keyAsBuffer, buffer)
-			}
-		})
+		event.triggers = [ INITIALIZATION_SOURCE ]
+		event.source = { constructor: this }
+
+		this.updated(event, { id })
+		let transition = this.transitions.get(id)
+		transition.invalidating = false
+		transition.result = value
+		let buffer = this.serializeEntryValue(event.version, value)
+		return this.db.put(toBufferKey(id), buffer)
 	}
 
 
@@ -1104,7 +1071,12 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				let committed
 				console.log('conditional header for writing transform ' + (result ? 'write' : 'delete'), id, this.name, conditionalHeader)
 				if (result === undefined) {
-					committed = this.db.remove(toBufferKey(id), conditionalHeader).committed
+					if (conditionalHeader === null) {
+						// already gone, nothing to do
+						committed = Promise.resolve(true)
+					} else {
+						committed = this.db.remove(toBufferKey(id), conditionalHeader).committed
+					}
 				} else {
 					result = convertToBlocks(result)
 					transition.result = result
@@ -1152,13 +1124,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	is(value, event) {
 		// we skip getFromDB and pretend it wasn't in the cache... not clear if
 		// that is how we want is() to behave or not
-		event = event || new ReplacedEvent()
-		event.triggers = [ INITIALIZATION_SOURCE ]
-		event.source = this
-		this.updated(event, this)
-		this.cachedVersion = this.version
-		this.cachedValue = convertToBlocks(value)
-		this.readyState = 'up-to-date'
+		this.constructor.is(this.id, value, event)
 		return this
 	}
 
@@ -1166,7 +1132,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		//console.log('reseting', this.name)
 		return Promise.resolve(spawn(function*() {
 			let version = this.startVersion = getNextVersion()
-			let allIds = yield this.fetchAllIds ? this.fetchAllIds() : []
+			let allIds = [] //yield this.fetchAllIds ? this.fetchAllIds() : []
 			if (clearDb) {
 				this.clearAllData()
 			}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them
@@ -1196,7 +1162,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		}
 		let version = event.version
 		let transition = this.transitions.get(id)
-		console.log('writeEntry previous transition', id, this.name, transition)
+		//console.log('writeEntry previous transition', id, this.name, transition)
 
 		if (transition) {
 			if (transition.invalidating) {
@@ -1232,9 +1198,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			// storing as a version alone to indicate invalidation
 			let db = this.db
 			let written
-				console.log('Invalidating entry', id, this.name, new Date(version/ 256 + 1500000000000), this.createHeader(version))
+				//console.log('Invalidating entry', id, this.name, new Date(version/ 256 + 1500000000000), this.createHeader(version))
 			if (by.write) {
-				written = by.write(keyAsBuffer, version)
+				written = by.write(keyAsBuffer, version, transition)
 			} else if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
 				written = db.remove(keyAsBuffer)
@@ -1243,7 +1209,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				if (conditionalHeader) {
 					conditionalHeader[0] = previousStatusByte
 				}
-				console.log('conditional header for invaliding entry ', id, this.name, conditionalHeader)
+				//console.log('conditional header for invaliding entry ', id, this.name, conditionalHeader)
 				written = db.put(keyAsBuffer, this.createHeader(version), conditionalHeader)
 			}
 			if (!event.whenWritten)
@@ -1265,7 +1231,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				})
 			}
 			const finished = (result) => {
-				console.log('writeEntry finished with', id, this.name, result)
+				//console.log('writeEntry finished with', id, this.name, result)
 				if (this.transitions.get(id) === transition && transition.newVersion === version) {
 					this.transitions.delete(id)
 				}

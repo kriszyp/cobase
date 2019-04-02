@@ -83,7 +83,7 @@ export const Index = ({ Source }) => {
 				try {
 					if (previousEntry instanceof Invalidated) {
 						this.queue.delete(id)
-						return this.sendRequestToIndex()
+						return this.sendRequestToIndex(id, indexRequest)
 /*						// this is one of the trickiest conditions in multi-process indexing. This generally means that there was an update
 						// event that occurred on entity that was already updated in another process, but that other process had not resolved
 						// the update yet. After we send the indexing request to the other processes, if any concurrently indexing process
@@ -243,6 +243,7 @@ export const Index = ({ Source }) => {
 				if (offset != stateOffset && (processVersion = readUInt(indexingState, offset + 8)) !== 0 && (pid = readUInt(indexingState, offset)) !== 0) {
 					if (processVersion < this.earliestPendingVersionInOtherProcesses || processVersion === this.earliestPendingVersionInOtherProcesses && pid < process.pid) {
 						this.earliestPendingVersionInOtherProcesses = processVersion
+						this.earliestProcess = pid
 					}
 				}
 			}
@@ -254,6 +255,7 @@ export const Index = ({ Source }) => {
 					previousVersion,
 					operations,
 				})
+				return this.queuedRequestForWriteNotification
 			} else if (previousVersion < this.earliestPendingVersionInOtherProcesses) {
 				// previous version is earlier than all writes, proceed
 				return this.db.batch(operations)
@@ -271,7 +273,7 @@ export const Index = ({ Source }) => {
 						operations,
 					})
 					if (!this.queuedRequestForWriteNotification) {
-						this.queuedRequestForWriteNotification = this.sendRequestForWriteNotification().then(() => this.resumeWrites())
+						this.queuedRequestForWriteNotification = this.sendRequestToWrite(this.earliestProcess, previousVersion).then(() => this.resumeWrites())
 					}
 					return this.queuedRequestForWriteNotification
 				}
@@ -281,7 +283,7 @@ export const Index = ({ Source }) => {
 		static pendingCommits = []
 		static whenWritesComplete(synced, earliestPendingVersion, version, updateEventSources) {
 			let lastPendingVersion
-			let committed = synced.committed
+			let committed = synced.committed || synced
 			committed.maxVersion = Math.max(committed.maxVersion || 0, version)
 
 			let pendingEvents = this.pendingEvents.get(committed)
@@ -311,7 +313,7 @@ export const Index = ({ Source }) => {
 					if (this.requestForWriteNotification) {
 						for (const notification of this.requestForWriteNotification) {
 							if (notification.version <= myEarliestPendingVersion || myEarliestPendingVersion == 0) {
-								notification.whenWritten()
+								notification.whenWritten({ written: true })
 								this.requestForWriteNotification.splice(this.requestForWriteNotification.indexOf(notification), 1)
 							}
 						}
@@ -720,50 +722,36 @@ export const Index = ({ Source }) => {
 			}
  		}
 		static pendingRequests = new Map()
-		static sendRequestToIndex(pid, id, indexRequest) {
-			try {
-				//console.log('sendRequestToIndex', id, this.name, 'version', indexRequest.version, 'previousVersion', indexRequest.previousVersion)
-				if (!this.sendRequestToProcess) {
-					return { indexed: false }
-				}
-				const request = {
-					id,
-					version: indexRequest.version,
-					previousVersion: indexRequest.previousVersion,
-					hasPreviousState: indexRequest.previousState !== INVALIDATED_ENTRY,
-				}
-				this.pendingRequests.set(id + '-' + pid, {
-					pid,
-					request
-				})
-				return withTimeout(this.sendRequestToProcess(pid, request), 60000).catch(error => {
-					console.warn('Error on waiting for indexed', this.name, 'from process', pid, 'index request', request, error.toString())
-					return { indexed: false }
-				}).finally((indexed) => {
-					this.pendingRequests.delete(id + '-' + pid)
-					//console.log('sendRequestToIndex finished', id, this.name, indexed)
-				})
-			} catch(error) {
-				if (error.message.startsWith('No socket')) {
-					// clean up if the process/socket is dead
-					console.info('Cleaning up socket to old process', pid)
-					this.removeDeadProcessEntry(pid)
-					return { indexed: false }
-					// TODO: resumeIndex?
-				}
-				throw error
+		static sendRequestToIndex(id, indexRequest) {
+			console.log('sendRequestToIndex', id, this.name, 'version', indexRequest.version, 'previousVersion', indexRequest.previousVersion)
+			if (!this.sendRequestToProcess) {
+				return { indexed: false }
 			}
+			const request = {
+				id,
+				version: indexRequest.version,
+				previousVersion: indexRequest.previousVersion,
+				waitFor: 'index',
+			}
+			this.pendingRequests.set(id, {
+				request
+			})
+			return withTimeout(this.sendRequestToAllProcesses(request), 60000).catch(error => {
+				console.warn('Error on waiting for indexed', this.name, 'index request', request, error.toString())
+				return { indexed: false }
+			}).finally((indexed) => {
+				this.pendingRequests.delete(id)
+				//console.log('sendRequestToIndex finished', id, this.name, indexed)
+			})
 		}
-		sendRequestForWriteNotification(pid, version) {
+		static sendRequestToWrite(pid, version) {
 			try {
 				return withTimeout(this.sendRequestToProcess(pid, {
-					whenWrittenVersion: version
+					version,
+					waitFor: 'write',
 				}), 60000).catch(error => {
-					console.warn('Error on waiting for indexed', this.name, 'from process', pid, 'index request', request, error.toString())
+					console.warn('Error on waiting for writing index', this.name, 'from process', pid, 'index request', version, error.toString())
 					return { indexed: false }
-				}).finally((indexed) => {
-					this.pendingRequests.delete(id + '-' + pid)
-					//console.log('sendRequestToIndex finished', id, this.name, indexed)
 				})
 			} catch(error) {
 				if (error.message.startsWith('No socket')) {
@@ -803,8 +791,8 @@ export const Index = ({ Source }) => {
 			return super.cleanupDeadProcessReference(pid, initializingProcess)
 		}
 
-		static receiveRequest({ id, version, previousVersion, hasPreviousState }) {
-			if (!id) {
+		static receiveRequest({ id, version, previousVersion, waitFor }) {
+			if (waitFor == 'write') {
 				if (!this.requestForWriteNotification) {
 					this.requestForWriteNotification = []
 				}
@@ -815,20 +803,16 @@ export const Index = ({ Source }) => {
 					})
 				})
 			}
-			return this.whenUnblockedProcessing
 			const updateInQueue = this.queue.get(id);
 			if (updateInQueue) {
-				if ((updateInQueue.previousVersion || 0) <= previousVersion || !hasPreviousState) {
-					// we have an earlier starting point, keep ours
-					if (updateInQueue.version < version) {
-						// update our version number to be the latest
-						updateInQueue.version = version
-					}
-					//console.log('receiveRequest', id, this.name, 'version', version, 'previousVersion', previousVersion, 'will handle')
-					return new Promise(resolve =>
-						(updateInQueue.resolveOnCompletion || (updateInQueue.resolveOnCompletion = [])).push(resolve))
-						.then(() => ({ indexed: true })) // reply when we have finished indexing this
+				if (updateInQueue.version < version) {
+					// update our version number to be the latest
+					updateInQueue.version = version
 				}
+				//console.log('receiveRequest', id, this.name, 'version', version, 'previousVersion', previousVersion, 'will handle')
+				return new Promise(resolve =>
+					(updateInQueue.resolveOnCompletion || (updateInQueue.resolveOnCompletion = [])).push(resolve))
+					.then(() => ({ indexed: true })) // reply when we have finished indexing this
 			}
 			//console.log('receiveRequest', id, this.name, 'version', version, 'previousVersion', previousVersion, 'but not handling')
 

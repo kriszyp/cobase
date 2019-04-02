@@ -171,6 +171,14 @@ function attachClass(stream, Class, processId) {
 		stream.write(message)
 		return new Promise((resolve, reject) => waitingRequests.set(requestId, { resolve, reject }))
 	}
+	Class.sendRequestToAllProcesses = (message) => {
+		message.className = Class.name
+		return Promise.all(streams.map(stream => {
+			const requestId = message.requestId = nextRequestId++
+			stream.write(message)
+			return new Promise((resolve, reject) => waitingRequests.set(requestId, { resolve, reject }))
+		}))
+	}
 	stream.setMaxListeners(100) // we are going to be adding a lot here
 	stream.on('close', () => {
 		Class.stopNotifies(updater)
