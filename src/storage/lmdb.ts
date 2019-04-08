@@ -331,7 +331,6 @@ export function open(name, options): Database {
 									env.batchWrite(operations, AS_BINARY_ALLOW_NOT_FOUND, (error, results) => {
 										//console.log('did batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
 										if (error) {
-											console.log('error in batch', error)
 											try {
 												// see if we can recover from recoverable error (like full map with a resize)
 												handleError(error, this, null, doBatch)
@@ -349,8 +348,6 @@ export function open(name, options): Database {
 								// if no operations are queued, we just do a sync, not transaction necessary
 								// TODO: Ideally we'd like this to be only an fdatasync/FlushFileBuffers call, and the map already asyncrhonously flushing for the metadata
 								this.sync((error) => {
-									if (Date.now() - start > 100)
-										console.log('finished sync', name, Date.now(), Date.now() - start)
 									if (error)
 										reject(error)
 									else
@@ -418,7 +415,6 @@ export function open(name, options): Database {
 			let newSharedBuffersActive = new WeakValueMap();
 			[sharedBuffersToInvalidate, sharedBuffersActive].forEach((sharedBuffers, i) => {
 				let bufferIds = sharedBuffers._keysAsArray()
-				console.log('bufferIds',i,bufferIds)
 				for (const id of bufferIds) {
 					let buffer = sharedBuffers.get(id)
 					let forceUnload = force || buffer.length < VALUE_OVERFLOW_THRESHOLD
@@ -577,9 +573,7 @@ export function open(name, options): Database {
 				db.sharedBuffersActiveTxn = env.beginTxn(READING_TNX)
 				db.sharedBuffersToInvalidateTxn = env.beginTxn(READING_TNX)
 			}
-			console.log('Resized db, retrying last operations', retry)
 			let result = retry()
-			console.log('Finished retrying last operation')
 			return result
 		} else if (error.message.startsWith('MDB_PAGE_NOTFOUND') || error.message.startsWith('MDB_CURSOR_FULL') || error.message.startsWith('MDB_CORRUPTED') || error.message.startsWith('MDB_INVALID')) {
 			// the noSync setting means that we can have partial corruption and we need to be able to recover

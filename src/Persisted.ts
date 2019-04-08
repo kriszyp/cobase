@@ -28,6 +28,7 @@ const NO_COPY_OPTIONS = {
 }
 const COMPRESSED_STATUS_24 = 254
 const COMPRESSED_STATUS_48 = 255
+const AS_SOURCE = {}
 export const VERSION = Symbol('version')
 export const STATUS_BYTE = Symbol('statusByte')
 
@@ -505,6 +506,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
 			return when(this.resetAll(clearDb), () => db.scheduleCommit()).then(() => clearDb)
 		}
+	}
+
+	valueOf(mode) {
+		return super.valueOf(mode || true)
 	}
 
 	getValue(mode) {
@@ -1050,7 +1055,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		}
 		let hasPromises
 		let inputData = this.Sources ? this.Sources.map(source => {
-			let data = source.get(id)
+			let data = source.get(id, AS_SOURCE)
 			if (data && data.then) {
 				hasPromises = true
 			}
@@ -1136,7 +1141,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		//console.log('reseting', this.name)
 		return Promise.resolve(spawn(function*() {
 			let version = this.startVersion = getNextVersion()
-			let allIds = [] //yield this.fetchAllIds ? this.fetchAllIds() : []
+			let allIds = yield this.fetchAllIds ? this.fetchAllIds() : []
 			if (clearDb) {
 				this.clearAllData()
 			}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them

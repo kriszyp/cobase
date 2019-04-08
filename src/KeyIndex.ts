@@ -439,9 +439,10 @@ export const Index = ({ Source }) => {
 				}).map(({ key, value }) => {
 					let [, sourceId] = fromBufferKey(key, true)
 					if (setOfIds.has(sourceId)) {
-						db.removeSync(key)
+						db.remove(key)
 					}
 				}).asArray
+				yield db.scheduleSync()
 			} else {
 				this.state = 'ready'
 				return
@@ -495,7 +496,7 @@ export const Index = ({ Source }) => {
 					let indexEntryUpdate: IndexEntryUpdate = indexedEntry[1]
 					event.sources = indexEntryUpdate.sources
 					event.triggers = indexEntryUpdate.triggers
-					this.updated(event, {
+					super.updated(event, { // send downstream
 						id: indexedEntry[0],
 						constructor: this
 					})
