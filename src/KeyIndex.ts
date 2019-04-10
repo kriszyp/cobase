@@ -161,7 +161,7 @@ export const Index = ({ Source }) => {
 					eventUpdateSources.push({ key, sources, triggers })
 				}
 				if (Index.onIndexEntry) {
-					Index.onIndexEntry(this.name, id, previousEntries, entries)
+					Index.onIndexEntry(this.name, id, version, previousEntries, entries)
 				}
 			} catch(error) {
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
@@ -231,6 +231,7 @@ export const Index = ({ Source }) => {
 					// now previous version is earlier than all writes from other processes, proceed
 					return this.db.batch(operations)
 				} else {
+					console.log('sendRequestToWrite batch', previousVersion)
 					if (!this.queuedWrites)
 						this.queuedWrites = []
 					this.queuedWrites.push({
@@ -306,6 +307,7 @@ export const Index = ({ Source }) => {
 		}
 
 		static resumeWrites() {
+			console.log('resumeWrites batch')
 			const resumedWrites = this.queuedWrites
 			this.queuedWrites = null
 			for (const { operations, previousVersion, version, updateEventSources } of resumedWrites) {
@@ -358,7 +360,18 @@ export const Index = ({ Source }) => {
 							// delete from our queue
 							this.queue.delete(id)
 							// delegate to other process
-							indexingInOtherProcess.push(this.sendRequestToIndex(id, indexRequest))
+							indexingInOtherProcess.push(this.sendRequestToIndex(id, indexRequest).then(( { indexed }) => {
+								if (indexed) {
+								} else  {
+									let newEntry = Source.getFromDB(id)
+									if (newEntry instanceof Invalidated) {
+										console.log('no process confirmed sendRequestToIndex, still invalidated, indexing locally', id)
+										let event = new ReplacedEvent()
+										event.version = indexRequest.version
+										super.updated(event, { id })
+									}
+								}
+							}))
 							if (this.queue.size == 0) {
 								// if our queue is empty, need to update our process map
 								this.whenWritesCommitted()
@@ -702,7 +715,8 @@ export const Index = ({ Source }) => {
  		}
 		static pendingRequests = new Map()
 		static sendRequestToIndex(id, indexRequest) {
-			console.log('sendRequestToIndex', id, this.name, 'version', indexRequest.version, 'previousVersion', indexRequest.previousVersion)
+
+			//console.log('sendRequestToIndex', id, this.name, 'version', indexRequest.version, 'previousVersion', indexRequest.previousVersion)
 			if (!this.sendRequestToProcess) {
 				return { indexed: false }
 			}
@@ -715,7 +729,11 @@ export const Index = ({ Source }) => {
 			this.pendingRequests.set(id, {
 				request
 			})
-			return withTimeout(this.sendRequestToAllProcesses(request), 60000).catch(error => {
+			return withTimeout(this.sendRequestToAllProcesses(request), 60000).then(responses => {
+				return {
+					indexed: responses.some(({ indexed }) => indexed)
+				}
+			}, error => {
 				console.warn('Error on waiting for indexed', this.name, 'index request', request, error.toString())
 				return { indexed: false }
 			}).finally((indexed) => {
@@ -834,6 +852,7 @@ export const Index = ({ Source }) => {
 				this.updateProcessMap(version)
 				// queue up processing the event
 				let indexRequest = this.queue.get(id)
+
 				if (indexRequest) {
 					// put it at that end so version numbers are in order, but don't alter the previous state or version, that is still what we will be diffing from
 					this.queue.delete(id)

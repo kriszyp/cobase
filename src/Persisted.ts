@@ -12,13 +12,13 @@ import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
 import { registerClass, addProcess } from './util/process'
-import { DEFAULT_CONTEXT } from './RequestContext'
+import { DEFAULT_CONTEXT, RequestContext } from './RequestContext'
 import { encodeBlock as lz4Compress, decodeBlock as lz4Uncompress } from 'lz4'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
-const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 2]) // table metadata 2
+const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 3]) // table metadata 2
 const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
 const INITIALIZATION_SOURCE = 'is-initializing'
 export const INVALIDATED_ENTRY = { state: 'invalidated'}
@@ -374,7 +374,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				this.otherProcesses.splice(this.otherProcesses.indexOf(process.pid))
 			}
 		})
-		this.lastVersion = +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
+		let versionBuffer = db.get(LAST_VERSION_IN_DB_KEY)
+		this.lastVersion = versionBuffer ? readUInt(versionBuffer) : 0
 		let stateDPack = db.getSync(DB_VERSION_KEY)
 		let didReset
 		let state = stateDPack && parse(stateDPack)
@@ -445,7 +446,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static doDataInitialization() {
 		//console.log('start data initialization', this.name)
-		this.lastVersion = Math.max(this.lastVersion, +this.db.getSync(LAST_VERSION_IN_DB_KEY) || 0) // re-retrieve this, it could have changed since we got a lock
+		const versionBuffer = this.db.get(LAST_VERSION_IN_DB_KEY)
+		this.lastVersion = Math.max(this.lastVersion, versionBuffer ? readUInt(versionBuffer) : 0) // re-retrieve this, it could have changed since we got a lock
 		const whenFinished = () => {
 			try {
 				this.db.remove(INITIALIZING_PROCESS_KEY)
@@ -615,7 +617,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			startVersion: version,
 			dbVersion: this.version
 		}))
-		this.db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
+		let versionBuffer = Buffer.allocUnsafe(8)
+		writeUInt(versionBuffer, this.lastVersion)
+		this.db.put(LAST_VERSION_IN_DB_KEY, versionBuffer)
 		return version
 	}
 
@@ -888,7 +892,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this.ready.then(() => {
 			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let db = this.db
-			this.lastVersion = this.lastVersion || +db.getSync(LAST_VERSION_IN_DB_KEY) || 0
+			let versionBuffer = db.get(LAST_VERSION_IN_DB_KEY)
+			this.lastVersion = this.lastVersion || (versionBuffer ? readUInt(versionBuffer) : 0)
 			let isFullReset = this.startVersion > sinceVersion
 			if (this.lastVersion && this.lastVersion <= sinceVersion && !isFullReset) {
 				return []
@@ -1015,10 +1020,12 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					let oldTransition = this.transitions.get(id)
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
 					let transition = this.runTransform(id, entry[VERSION], false, mode)
-					if (oldTransition && oldTransition.result && oldTransition.result.abort) {
+					if (oldTransition && oldTransition.abortables) {
 						// if it is still in progress, we can abort it and replace the result
 						oldTransition.replaceWith = transition.result
-						oldTransition.result.abort()
+						for (let abortable of oldTransition.abortables) {
+							abortable()
+						}
 					}
 					this.transitions.set(id, transition)
 					return transition.result
@@ -1051,7 +1058,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static whenValueCommitted: Promise<any>
 	static runTransform(id, fromVersion, isNew, mode) {
 		let transition = {
-			fromVersion
+			fromVersion,
+			abortables: []
 		}
 		let hasPromises
 		let inputData = this.Sources ? this.Sources.map(source => {
@@ -1065,7 +1073,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			transition.result = when(when(hasPromises ? Promise.all(inputData) : inputData, inputData => {
 				if (inputData.length > 0 && inputData[0] === undefined) // first input is undefined, we pass through
 					return
-				return this.prototype.transform.apply({ id }, inputData.map(copy))
+				let context = currentContext
+				let transformContext = context ? context.newContext() : new RequestContext(null, null)
+				transformContext.abortables = transition.abortables
+				return transformContext.executeWithin(() => this.prototype.transform.apply({ id }, inputData.map(copy)))
 			}), result => {
 				if (transition.invalidating) {
 					if (transition.replaceWith) {
@@ -1103,10 +1114,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				}
 				this.whenValueCommitted = committed
 				committed.then((successfulWrite) => {
-					if (this.transitions.get(id) == transition)
+					if (this.transitions.get(id) === transition && !transition.invalidating)
 						this.transitions.delete(id)
 					if (!successfulWrite) {
-						console.log('unsuccessful write of transform, data changed, updating', id, this.name, this.db.get(toBufferKey(id)))
+						//console.log('unsuccessful write of transform, data changed, updating', id, this.name, this.db.get(toBufferKey(id)))
 						this.updated(new ReloadEntryEvent(), { id })
 					}
 				})
@@ -1208,9 +1219,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let db = this.db
 			let written
 				//console.log('Invalidating entry', id, this.name, new Date(version/ 256 + 1500000000000), this.createHeader(version))
-			if (by.write) {
-				written = by.write(keyAsBuffer, version, transition)
-			} else if (event && event.type === 'deleted') {
+				let conditionalHeader
+			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
 				written = db.remove(keyAsBuffer)
 			} else {
@@ -1221,15 +1231,22 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				//console.log('conditional header for invaliding entry ', id, this.name, conditionalHeader)
 				written = db.put(keyAsBuffer, this.createHeader(version), conditionalHeader)
 			}
+			
+			// TODO: Determine when the writes are submitted and just update this buffer over and over
+			let versionBuffer = Buffer.allocUnsafe(8)
+			writeUInt(versionBuffer, this.lastVersion = Math.max(this.lastVersion, version))
+			db.put(LAST_VERSION_IN_DB_KEY, versionBuffer)
 			if (!event.whenWritten)
 				event.whenWritten = written
 			if (by.previousValue) {
 				by.previousValue = written.committed.then((result) => {
 					if (result === false) {
-						console.log('Value had changed during invalidation', id, this.name)
+//						console.log('Value had changed during invalidation', id, this.name, version)
+						this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
 						let newVersion = readUInt(db.get(keyAsBuffer, NO_COPY_OPTIONS))
 						if (newVersion > version) {
-							return {} // don't do anything further, db is ahead of us, and we should take no indexing action
+							// don't do anything further, db is ahead of us, and we should take no indexing action
+							return new Invalidated(newVersion)
 						} else {
 							// it was no longer the same as what we read, re-run, as we have a more recent update
 							this.writeEntry(id, event, by)
@@ -1244,15 +1261,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				if (this.transitions.get(id) === transition && transition.newVersion === version) {
 					this.transitions.delete(id)
 				}
-				this.lastVersion = Math.max(this.lastVersion, version)
-				if (!this.queuedVersionWrite) {
-					this.queuedVersionWrite = true
-					setTimeout(() => {
-						db.put(LAST_VERSION_IN_DB_KEY, Buffer.from(this.lastVersion.toString()))
-						this.queuedVersionWrite = false
-					}, 200)
-				}
-
+				this.versionBuffer = null
 			}
 			written.committed.then(finished, finished)
 		}
