@@ -21,6 +21,7 @@ const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
 const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 3]) // table metadata 2
 const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
 const INITIALIZATION_SOURCE = 'is-initializing'
+const SHARED_MEMORY_THRESHOLD = 1024
 export const INVALIDATED_ENTRY = { state: 'invalidated'}
 const INVALIDATED_STATE = 1
 const NO_COPY_OPTIONS = {
@@ -564,9 +565,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			return event
 		}
 		event.visited.add(this)
-		if (!event.source) {
-			event.source = this
-		}
 		let context = currentContext
 		if (context && !event.triggers && context.connectionId) {
 			event.triggers = [ context.connectionId ]
@@ -579,6 +577,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let nextBy = {
 			id,
 			constructor: this
+		}
+		if (!event.source) {
+			event.source = nextBy
 		}
 		if (event.type === 'discovered' || event.type === 'added' || event.type === 'deleted') {
 			this.instanceSetUpdated(event)
@@ -755,7 +756,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			event = entry ? new ReplacedEvent() : new AddedEvent()
 		}
 		event.triggers = [ INITIALIZATION_SOURCE ]
-		event.source = { constructor: this }
+		event.source = { constructor: this, id }
 
 		this.updated(event, { id })
 		let transition = this.transitions.get(id)
@@ -792,7 +793,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (valueCache) {
 			let value = valueCache.get(id)
 			if (value && value[VERSION] === version) {
-				expirationStrategy.useEntry(value, 100/*value[bufferSymbol].length*/)
+				expirationStrategy.useEntry(value, entryBuffer.length >> (entryBuffer.buffer.onInvalidation ? 2 : 0))
 				return value
 			}
 		} else {
@@ -801,7 +802,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let value = this.parseEntryValue(entryBuffer)
 		valueCache.set(id, value)
 		if (value)
-			expirationStrategy.useEntry(value, 100/*value[bufferSymbol].length*/)
+			expirationStrategy.useEntry(value, entryBuffer.length >> (entryBuffer.buffer.onInvalidation ? 2 : 0))
 		return value
 	}
 
@@ -812,21 +813,30 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (statusByte >= COMPRESSED_STATUS_24) {
 			// uncompress from the shared memory
 			// TODO: Do this on-access
-			let uncompressedLength = buffer.readUInt32BE(8)
+			let uncompressedLength, prefixSize
+			if (statusByte == COMPRESSED_STATUS_24) {
+				uncompressedLength = buffer.readUInt32BE(8)
+				prefixSize = 12
+			} else if (statusByte == COMPRESSED_STATUS_48) {
+				uncompressedLength = readUInt(buffer, 8)
+				prefixSize = 16
+			} else {
+				throw new Error('Unknown status byte ' + statusByte)
+			}
 			let uncompressedBuffer = Buffer.allocUnsafe(uncompressedLength)
-			lz4Uncompress(buffer.slice(12), uncompressedBuffer)
+			lz4Uncompress(buffer.slice(prefixSize), uncompressedBuffer)
 			valueBuffer = uncompressedBuffer
 		} else if (statusByte === INVALIDATED_STATE) {
 			// stored as an invalidated version
 			return new Invalidated(version)
-		} else if (buffer.length > 2048) {
+		} else if (buffer.length > SHARED_MEMORY_THRESHOLD) {
 			// use shared memory
 			valueBuffer = buffer.slice(8)
 			this.db.notifyOnInvalidation(buffer, function(forceCopy) {
 				// TODO: if state byte indicates it is still fresh && !forceCopy:
+				// TODO: Move this into cobase and search through cached blocks to find ones that need reassignment
 				// return false
 				// calling Buffer.from on ArrayBuffer returns NodeBuffer, calling again copies it
-				console.log('reassigning buffers')
 				data && reassignBuffers(data, Buffer.from(Buffer.from(this)), this)
 				this.onInvalidation = null // nothing more we can do at this point
 			})
@@ -1042,7 +1052,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				if (result !== undefined && !transition.invalidating) {
 					let event = new DiscoveredEvent()
 					event.triggers = [ INITIALIZATION_SOURCE ]
-					event.source = this
+					event.source = { constructor: this, id }
 					event.version = version
 					this.instanceSetUpdated(event)
 					this.updated(event, {
@@ -1100,14 +1110,23 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					result = convertToBlocks(result)
 					transition.result = result
 					let buffer = this.serializeEntryValue(transition.fromVersion, result)
+					//console.log('compressing', this.name, buffer.length, typeof mode == 'object' && buffer.length > 1024)
 					if (typeof mode == 'object' && buffer.length > 1024) {
 						let compressedData = Buffer.allocUnsafe(buffer.length - 100)
-						let compressedLength = lz4Compress(buffer.slice(8), compressedData, 12, compressedData.length)
+						let uncompressedLength = buffer.length - 8
+						let longSize = uncompressedLength >= 0x1000000
+						let prefixSize = longSize ? 16 : 12
+						let compressedLength = lz4Compress(buffer.slice(8), compressedData, prefixSize, compressedData.length)
 						if (compressedLength) {
 							buffer.copy(compressedData, 0, 0, 8)
-							compressedData[0] = COMPRESSED_STATUS_24
-							compressedData.writeUInt32BE(buffer.length - 8, 8)
-							buffer = compressedData.slice(0, 12 + compressedLength)
+							if (longSize) {
+								writeUInt(buffer, uncompressedLength, 8)
+								compressedData[0] = COMPRESSED_STATUS_48
+							} else {
+								compressedData[0] = COMPRESSED_STATUS_24
+								compressedData.writeUInt32BE(uncompressedLength, 8)
+							}
+							buffer = compressedData.slice(0, prefixSize + compressedLength)
 						} // else it didn't compress any smaller, bail out
 					}
 					committed = this.db.put(toBufferKey(id), buffer, conditionalHeader).committed

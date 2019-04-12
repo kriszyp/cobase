@@ -365,10 +365,10 @@ export const Index = ({ Source }) => {
 								} else  {
 									let newEntry = Source.getFromDB(id)
 									if (newEntry instanceof Invalidated) {
-										console.log('no process confirmed sendRequestToIndex, still invalidated, indexing locally', id)
+										console.log('no process confirmed sendRequestToIndex, still invalidated, indexing locally', this.name, id)
 										let event = new ReplacedEvent()
 										event.version = indexRequest.version
-										super.updated(event, { id })
+										this.updated(event, { id })
 									}
 								}
 							}))

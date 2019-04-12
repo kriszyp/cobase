@@ -121,7 +121,7 @@ function attachClass(stream, Class, processId) {
 			// TODO: debounce
 			//console.log('sending update event', className, process.pid)
 			let id = by && by.id
-			if (id && by === event.source) {
+			if (id && event.source && by.constructor === event.source.constructor && !event.sourceProcess) {
 				try {
 					const eventToSerialize = Object.assign({}, event, {
 						instanceId: id,
@@ -221,8 +221,14 @@ function onMessage(message, stream) {
 				if (message.type) {
 					const event = new UpdateEvent()
 					event.sourceProcess = stream.pid
-					event.source = { id: instanceId, remote: true }
+					event.source = target
 					Object.assign(event, message)
+					if (message.sources) {
+						event.sources = message.sources.map(source => ({
+							id: source.id,
+							constructor: classMap.get(source.typeName)
+						}))
+					}
 					target.updated(event)
 				} else if (message.pid) {
 					attachClass(stream, target, message.pid)

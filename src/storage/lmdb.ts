@@ -566,7 +566,6 @@ export function open(name, options): Database {
 				}
 			}
 			env.resize(newSize)
-			console.log('Resized env, resetting read transactions')
 			if (db) {
 				db.readTxn = env.beginTxn(READING_TNX)
 				db.readTxn.reset()
