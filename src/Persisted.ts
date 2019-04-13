@@ -29,6 +29,7 @@ const NO_COPY_OPTIONS = {
 }
 const COMPRESSED_STATUS_24 = 254
 const COMPRESSED_STATUS_48 = 255
+const COMPRESSION_THRESHOLD = 1500
 const AS_SOURCE = {}
 export const VERSION = Symbol('version')
 export const STATUS_BYTE = Symbol('statusByte')
@@ -719,10 +720,45 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return promisedResult
 	}
-	static runCompression() {
-		runCompression(this.db)
+	static compressEntry(buffer, headerSize) {
+		//console.log('compressing', this.name, buffer.length, typeof mode == 'object' && buffer.length > 1024)
+		let compressedData = Buffer.allocUnsafe(buffer.length - 100)
+		let uncompressedLength = buffer.length - headerSize
+		let longSize = uncompressedLength >= 0x1000000
+		let prefixSize = (longSize ? 8 : 4) + headerSize
+		let compressedLength = lz4Compress(headerSize ? buffer.slice(headerSize) : buffer, compressedData, prefixSize, compressedData.length)
+		if (compressedLength) {
+			if (headerSize)
+				buffer.copy(compressedData, 0, 0, headerSize)
+			if (longSize) {
+				writeUInt(buffer, uncompressedLength, headerSize)
+				compressedData[0] = COMPRESSED_STATUS_48
+			} else {
+				compressedData.writeUInt32BE(uncompressedLength, headerSize)
+				compressedData[0] = COMPRESSED_STATUS_24
+			}
+			buffer = compressedData.slice(0, prefixSize + compressedLength)
+		} // else it didn't compress any smaller, bail out
+		return buffer
 	}
 
+	static uncompressEntry(buffer, statusByte, headerSize) {
+		// uncompress from the shared memory
+		// TODO: Do this on-access
+		let uncompressedLength, prefixSize
+		if (statusByte == COMPRESSED_STATUS_24) {
+			uncompressedLength = buffer.readUIntBE(headerSize + 1, 3)
+			prefixSize = headerSize + 4
+		} else if (statusByte == COMPRESSED_STATUS_48) {
+			uncompressedLength = readUInt(buffer, headerSize)
+			prefixSize = headerSize + 8
+		} else {
+			throw new Error('Unknown status byte ' + statusByte)
+		}
+		let uncompressedBuffer = Buffer.allocUnsafe(uncompressedLength)
+		lz4Uncompress(buffer.slice(prefixSize), uncompressedBuffer)
+		return uncompressedBuffer			
+	}
 })
 
 const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Base {
@@ -764,7 +800,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			transition.invalidating = false
 			transition.result = value
 		}
-		let buffer = this.serializeEntryValue(event.version, value)
+		let buffer = this.serializeEntryValue(value, event.version, true)
 		return this.db.put(toBufferKey(id), buffer)
 	}
 
@@ -811,21 +847,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let valueBuffer, data
 		let statusByte = buffer[0]
 		if (statusByte >= COMPRESSED_STATUS_24) {
-			// uncompress from the shared memory
-			// TODO: Do this on-access
-			let uncompressedLength, prefixSize
-			if (statusByte == COMPRESSED_STATUS_24) {
-				uncompressedLength = buffer.readUInt32BE(8)
-				prefixSize = 12
-			} else if (statusByte == COMPRESSED_STATUS_48) {
-				uncompressedLength = readUInt(buffer, 8)
-				prefixSize = 16
-			} else {
-				throw new Error('Unknown status byte ' + statusByte)
-			}
-			let uncompressedBuffer = Buffer.allocUnsafe(uncompressedLength)
-			lz4Uncompress(buffer.slice(prefixSize), uncompressedBuffer)
-			valueBuffer = uncompressedBuffer
+			valueBuffer = this.uncompressEntry(buffer, statusByte, 8)
 		} else if (statusByte === INVALIDATED_STATE) {
 			// stored as an invalidated version
 			return new Invalidated(version)
@@ -949,9 +971,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		this.constructor.is(this.id, value)
 	}
 
-	static serializeEntryValue(version, object, blocks) {
-		var start = 256//((4 + blocks / 1.3) >> 0) * 8
-		var buffer
+	static serializeEntryValue(object, version, canCompress) {
+		let start = 256//((4 + blocks / 1.3) >> 0) * 8
+		let buffer
 		if (object === INVALIDATED_ENTRY) {
 			buffer = Buffer.allocUnsafe(8)
 			start = 8
@@ -960,21 +982,33 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				startOffset: start
 			})
 		}
-		var sizeTableBuffer = buffer.sizeTable
-		let startOfHeader = start - 8 - (sizeTableBuffer ? sizeTableBuffer.length : 0)
+		let sizeTableBuffer = buffer.sizeTable
+		let headerSize = version ? 8 : 0
+		let startOfHeader = start - headerSize - (sizeTableBuffer ? sizeTableBuffer.length : 0)
 		if (startOfHeader < 0) {
 			console.error('Allocated header space was insufficient, concatenating buffers')
-			let header = Buffer.alloc(8)
-			writeUInt(header, version)
+			let header
+			if (version) {
+				header = Buffer.alloc(8)
+				writeUInt(header, version)
+			} else {
+				header = Buffer.alloc(0)
+			}
 			return Buffer.concat([header, sizeTableBuffer, buffer.slice(start)])
 		}
-		buffer[startOfHeader] = 0
-		buffer[startOfHeader + 1] = 0
-		writeUInt(buffer, version, startOfHeader)
+		if (version) {
+			buffer[startOfHeader] = 0
+			buffer[startOfHeader + 1] = 0
+			writeUInt(buffer, version, startOfHeader)
+		}
 		if (sizeTableBuffer) {
 			sizeTableBuffer.copy(buffer, startOfHeader + 8)
 		}
-		return buffer.slice(startOfHeader)
+		buffer = buffer.slice(startOfHeader)
+		if (canCompress && buffer.length > COMPRESSION_THRESHOLD) {
+			return this.compressEntry(buffer, 8)
+		}
+		return buffer
 	}
 }
 
@@ -1109,26 +1143,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				} else {
 					result = convertToBlocks(result)
 					transition.result = result
-					let buffer = this.serializeEntryValue(transition.fromVersion, result)
-					//console.log('compressing', this.name, buffer.length, typeof mode == 'object' && buffer.length > 1024)
-					if (typeof mode == 'object' && buffer.length > 1024) {
-						let compressedData = Buffer.allocUnsafe(buffer.length - 100)
-						let uncompressedLength = buffer.length - 8
-						let longSize = uncompressedLength >= 0x1000000
-						let prefixSize = longSize ? 16 : 12
-						let compressedLength = lz4Compress(buffer.slice(8), compressedData, prefixSize, compressedData.length)
-						if (compressedLength) {
-							buffer.copy(compressedData, 0, 0, 8)
-							if (longSize) {
-								writeUInt(buffer, uncompressedLength, 8)
-								compressedData[0] = COMPRESSED_STATUS_48
-							} else {
-								compressedData[0] = COMPRESSED_STATUS_24
-								compressedData.writeUInt32BE(uncompressedLength, 8)
-							}
-							buffer = compressedData.slice(0, prefixSize + compressedLength)
-						} // else it didn't compress any smaller, bail out
-					}
+					let buffer = this.serializeEntryValue(result, transition.fromVersion, typeof mode === 'object')
 					committed = this.db.put(toBufferKey(id), buffer, conditionalHeader).committed
 				}
 				this.whenValueCommitted = committed

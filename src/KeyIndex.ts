@@ -19,6 +19,8 @@ const DEFAULT_INDEXING_DELAY = 60
 const INITIALIZATION_SOURCE = 'is-initializing'
 const INDEXING_STATE_SIZE = 3584 // good size for ensuring that it is an (and only one) overflow page in LMDB, and won't be moved
 const INITIALIZATION_SOURCE_SET = new Set([INITIALIZATION_SOURCE])
+const COMPRESSION_THRESHOLD = 1500
+const COMPRESSED_STATUS_24 = 254
 export interface IndexRequest {
 	previousEntry?: any
 	pendingProcesses?: number[]
@@ -142,6 +144,9 @@ export const Index = ({ Source }) => {
 						if (isChanged || value.length === 0 || this.alwaysUpdate) {
 							if (isChanged) {
 								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
+								if (value.length > COMPRESSION_THRESHOLD) {
+									value = this.compressEntry(value, 0)
+								}
 								operations.push({
 									type: 'put',
 									key: fullKey,
@@ -551,6 +556,14 @@ export const Index = ({ Source }) => {
 			}, true).map(({ key, value }) => key)
 		}
 
+		static parseEntryValue(buffer) {
+			let statusByte = buffer[0]
+			if (statusByte >= COMPRESSED_STATUS_24) {
+				buffer = this.uncompressEntry(buffer, statusByte, 0)
+			}
+			return parse(buffer)
+		}
+
 		// Get a range of indexed entries for this id (used by Reduced)
 		static getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
 			const db: Database = this.db
@@ -562,8 +575,8 @@ export const Index = ({ Source }) => {
 				}*/
 				return returnFullKeyValue ? {
 					key: sourceId,
-					value: value !== null ? value.length > 0 ? parse(value) : Source.for(sourceId) : value,
-				} : value.length > 0 ? parse(value) : Source.for(sourceId)
+					value: value !== null ? value.length > 0 ? this.parseEntryValue(value) : Source.for(sourceId) : value,
+				} : value.length > 0 ? this.parseEntryValue(value) : Source.for(sourceId)
 			})
 		}
 		/**
