@@ -136,11 +136,7 @@ export function open(name, options): Database {
 					txn = this.readTxn
 					txn.renew()
 				}
-				let result = txn.getBinaryUnsafe(db, id, AS_BINARY)
-				if (result && !(options && options.noCopy)) {
-					// make a copy so we aren't referencing shared memory
-					result = Buffer.from(result)
-				}
+				let result = (options && options.noCopy) ? txn.getBinaryUnsafe(db, id, AS_BINARY) : txn.getBinary(db, id, AS_BINARY)
 				
 				if (!writeTxn) {
 					txn.reset()
@@ -327,7 +323,6 @@ export function open(name, options): Database {
 								let operations = scheduledOperations
 								scheduledOperations = null
 								const doBatch = () => {
-									//console.log('do batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
 									env.batchWrite(operations, AS_BINARY_ALLOW_NOT_FOUND, (error, results) => {
 										//console.log('did batch', name, operations.length/*map(o => o[1].toString('binary')).join(',')*/)
 										if (error) {
@@ -565,7 +560,13 @@ export function open(name, options): Database {
 					console.error(error)
 				}
 			}
-			env.resize(newSize)
+
+			env.close()
+			env = new Env()
+			options.mapSize = newSize
+			env.open(options)
+			openDB()
+			console.log('Resized database', name, 'to', newSize)
 			if (db) {
 				db.readTxn = env.beginTxn(READING_TNX)
 				db.readTxn.reset()
@@ -576,9 +577,6 @@ export function open(name, options): Database {
 			return result
 		} else if (error.message.startsWith('MDB_PAGE_NOTFOUND') || error.message.startsWith('MDB_CURSOR_FULL') || error.message.startsWith('MDB_CORRUPTED') || error.message.startsWith('MDB_INVALID')) {
 			// the noSync setting means that we can have partial corruption and we need to be able to recover
-			if (db) {
-				db.close()
-			}
 			try {
 				env.close()
 			} catch (error) {}

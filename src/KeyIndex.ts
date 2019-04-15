@@ -1,5 +1,5 @@
 import { spawn, currentContext, VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
-import { serialize, parse } from 'dpack'
+import { serialize, parse, parseLazy, createParser } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
@@ -137,13 +137,17 @@ export const Index = ({ Source }) => {
 						// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
 						let removedValue = toRemove.get(key)
 						// a value of '' is treated as a reference to the source object, so should always be treated as a change
-						let value = entry.value === undefined ? EMPTY_BUFFER : serialize(entry.value)
+						let dpackStart = this._dpackStart
+						let value = entry.value === undefined ? EMPTY_BUFFER : serialize(entry.value, {
+							startOffset: dpackStart
+						})
 						if (removedValue !== undefined)
 							toRemove.delete(key)
-						let isChanged = removedValue === undefined || !value.equals(removedValue)
+						let isChanged = removedValue === undefined || !value.slice(dpackStart).equals(removedValue)
 						if (isChanged || value.length === 0 || this.alwaysUpdate) {
 							if (isChanged) {
 								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
+								value = this.setupSizeTable(value, dpackStart, 0)
 								if (value.length > COMPRESSION_THRESHOLD) {
 									value = this.compressEntry(value, 0)
 								}
@@ -561,7 +565,7 @@ export const Index = ({ Source }) => {
 			if (statusByte >= COMPRESSED_STATUS_24) {
 				buffer = this.uncompressEntry(buffer, statusByte, 0)
 			}
-			return parse(buffer)
+			return parseLazy(buffer, createParser())
 		}
 
 		// Get a range of indexed entries for this id (used by Reduced)
@@ -645,6 +649,10 @@ export const Index = ({ Source }) => {
 				noCopy: true
 			}
 			indexingState = this.db.get(INDEXING_STATE, getOptions)
+			if (indexingState && indexingState.buffer.byteLength > 4000) {
+				debugger
+				throw new Error('Indexing state is not shared, can not continue')
+			}
 			this.db.notifyOnInvalidation(indexingState, (forceUnload) => {
 				console.log('onInvalidation of indexingState')
 				if (forceUnload === true) {
@@ -852,7 +860,7 @@ export const Index = ({ Source }) => {
 			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
 
 			let previousEntry = by && by.previousValue
-			let id = by && (typeof by === 'object' ? (by.constructor == this.Sources[0] && by.id) : by) // if we are getting an update from a source instance
+			let id = by && (typeof by === 'object' ? by.id : by) // if we are getting an update from a source instance
 			if (this.otherProcesses && event.sourceProcess && 
 				!(id && this.queue.has(id)) && // if it is in our queue, we need to update the version number in our queue
 				(this.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this

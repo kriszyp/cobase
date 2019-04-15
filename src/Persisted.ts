@@ -759,6 +759,20 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		lz4Uncompress(buffer.slice(prefixSize), uncompressedBuffer)
 		return uncompressedBuffer			
 	}
+
+	static _dpackStart = 8
+	static setupSizeTable(buffer, start, headerSize) {
+		let sizeTableBuffer = buffer.sizeTable
+		let startOfSizeTable = start - (sizeTableBuffer ? sizeTableBuffer.length : 0)
+		if (sizeTableBuffer) {
+			if (startOfSizeTable - headerSize < 0) {
+				this._dpackStart = sizeTableBuffer.length + headerSize
+				return Buffer.concat([Buffer.alloc(headerSize), sizeTableBuffer, buffer.slice(start)])
+			}
+			sizeTableBuffer.copy(buffer, startOfSizeTable)
+		}
+		return buffer.slice(startOfSizeTable - headerSize)
+	}
 })
 
 const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Base {
@@ -972,39 +986,20 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	static serializeEntryValue(object, version, canCompress) {
-		let start = 256//((4 + blocks / 1.3) >> 0) * 8
+		let start = this._dpackStart
 		let buffer
 		if (object === INVALIDATED_ENTRY) {
 			buffer = Buffer.allocUnsafe(8)
-			start = 8
 		} else {
 			buffer = serialize(object, {
 				startOffset: start
 			})
+			buffer = this.setupSizeTable(buffer, start, 8)
 		}
-		let sizeTableBuffer = buffer.sizeTable
-		let headerSize = version ? 8 : 0
-		let startOfHeader = start - headerSize - (sizeTableBuffer ? sizeTableBuffer.length : 0)
-		if (startOfHeader < 0) {
-			console.error('Allocated header space was insufficient, concatenating buffers')
-			let header
-			if (version) {
-				header = Buffer.alloc(8)
-				writeUInt(header, version)
-			} else {
-				header = Buffer.alloc(0)
-			}
-			return Buffer.concat([header, sizeTableBuffer, buffer.slice(start)])
-		}
-		if (version) {
-			buffer[startOfHeader] = 0
-			buffer[startOfHeader + 1] = 0
-			writeUInt(buffer, version, startOfHeader)
-		}
-		if (sizeTableBuffer) {
-			sizeTableBuffer.copy(buffer, startOfHeader + 8)
-		}
-		buffer = buffer.slice(startOfHeader)
+
+		buffer[0] = 0
+		buffer[1] = 0
+		writeUInt(buffer, version, 0)
 		if (canCompress && buffer.length > COMPRESSION_THRESHOLD) {
 			return this.compressEntry(buffer, 8)
 		}
