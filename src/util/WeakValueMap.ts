@@ -34,5 +34,8 @@ try {
 	WeakValueMap.getStatus = function() {
 		return 'WeakValueMap failed to load'
 	}
+	WeakValueMap.prototype._keysAsArray = function() {
+		return Array.from(this.keys())
+	}
 }
 export default WeakValueMap

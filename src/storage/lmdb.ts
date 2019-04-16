@@ -97,8 +97,6 @@ export function open(name, options): Database {
 			let txn
 			let committed
 			try {
-				if (!noSync)
-					this.scheduleSync()
 				this.transactions++
 				txn = this.writeTxn = env.beginTxn()
 				result = execute()
@@ -193,7 +191,6 @@ export function open(name, options): Database {
 				txn.del(db, id)
 				if (!this.writeTxn) {
 					txn.commit()
-					return this.scheduleSync()
 				}
 				return true // object found and deleted
 			} catch(error) {
@@ -343,9 +340,9 @@ export function open(name, options): Database {
 								// if no operations are queued, we just do a sync, not transaction necessary
 								// TODO: Ideally we'd like this to be only an fdatasync/FlushFileBuffers call, and the map already asyncrhonously flushing for the metadata
 								this.sync((error) => {
-									if (error)
+									if (error) {
 										reject(error)
-									else
+									} else
 										resolve()
 								})
 							}
@@ -440,58 +437,6 @@ export function open(name, options): Database {
 				console.warn(error)
 			}
 		},
-		syncAverage: 100,
-		scheduleSync() {
-			let pendingBatch
-			if (this.onDemandSync)
-				return this.onDemandSync
-			let scheduledMs = this.syncAverage * 100 // with no demand, we schedule syncs very slowly
-			let currentTimeout
-			const schedule = () => pendingBatch = new Promise((resolve, reject) => {
-				when(this.currentBatch, () => {
-					//console.log('scheduling sync for', scheduledMs)
-					currentTimeout = setTimeout(() => {
-						currentTimeout = null
-						let currentBatch = this.currentBatch = this.onDemandSync
-						this.onDemandSync = null
-						let start = Date.now()
-						//console.log('syncing', Date.now())
-						this.sync((error) => {
-							let elapsed = Date.now() - start
-							//if (elapsed > 500)
-						//		console.log('finished sync', name, elapsed, Date.now())
-							this.syncAverage = this.syncAverage / 1.1 + elapsed
-
-							if (error) {
-								console.error(error)
-							}
-							if (currentBatch == this.currentBatch) {
-								this.currentBatch = null
-							}
-							resolve()
-							setTimeout(() => {}, 1) // this is to deal with https://github.com/Venemo/node-lmdb/issues/138
-						})
-					}, scheduledMs).unref()
-				})
-			})
-			schedule()
-			let immediateMode
-
-			return this.onDemandSync = {
-				then: (callback, errback) => { // this is a semi-lazy promise, we speed up the sync if we detect that someone is demanding a callback
-					if (!immediateMode) {
-						immediateMode = true
-						scheduledMs = this.syncAverage
-						if (currentTimeout) {
-							// reschedule for sooner if it is waiting for the timeout to finish
-							clearTimeout(currentTimeout)
-							schedule()
-						}
-					}
-					return pendingBatch.then(callback, errback)
-				}
-			}
-		},
 		sync(callback) {
 			return env.sync(callback || function(error) {
 				if (error) {
@@ -561,11 +506,7 @@ export function open(name, options): Database {
 				}
 			}
 
-			env.close()
-			env = new Env()
-			options.mapSize = newSize
-			env.open(options)
-			openDB()
+			env.resize(newSize)
 			console.log('Resized database', name, 'to', newSize)
 			if (db) {
 				db.readTxn = env.beginTxn(READING_TNX)

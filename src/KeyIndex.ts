@@ -456,15 +456,16 @@ export const Index = ({ Source }) => {
 				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
 				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 				// clear out all the items that we are indexing, since we don't have their previous state
+				let result
 				yield db.iterable({
 					start: Buffer.from([2])
 				}).map(({ key, value }) => {
 					let [, sourceId] = fromBufferKey(key, true)
 					if (setOfIds.has(sourceId)) {
-						db.remove(key)
+						result = db.remove(key)
 					}
 				}).asArray
-				yield db.scheduleSync()
+				yield result // just need to wait for last one to finish (guarantees all others are finished)
 			} else {
 				this.state = 'ready'
 				return
@@ -861,7 +862,8 @@ export const Index = ({ Source }) => {
 
 			let previousEntry = by && by.previousValue
 			let id = by && (typeof by === 'object' ? by.id : by) // if we are getting an update from a source instance
-			if (this.otherProcesses && event.sourceProcess && 
+			if (by && by.constructor === this || // our own instances can notify us of events, ignore them
+				this.otherProcesses && event.sourceProcess && 
 				!(id && this.queue.has(id)) && // if it is in our queue, we need to update the version number in our queue
 				(this.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
 					this.otherProcesses.some(otherProcessId => otherProcessId < process.pid))) { // otherwise, defer to the lowest number process to handle it

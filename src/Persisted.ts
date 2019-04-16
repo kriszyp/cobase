@@ -13,7 +13,13 @@ import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
 import { registerClass, addProcess } from './util/process'
 import { DEFAULT_CONTEXT, RequestContext } from './RequestContext'
-import { encodeBlock as lz4Compress, decodeBlock as lz4Uncompress } from 'lz4'
+let lz4Compress, lz4Uncompress
+try {
+	lz4Compress = require('lz4').encodeBlock
+	lz4Uncompress = require('lz4').decodeBlock
+} catch(error) {
+	lz4Compress = () => 0 // compression always fails if not loaded
+}
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
@@ -1272,7 +1278,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					if (result === false) {
 //						console.log('Value had changed during invalidation', id, this.name, version)
 						this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
-						let newVersion = readUInt(db.get(keyAsBuffer, NO_COPY_OPTIONS))
+						let existingBuffer = db.get(keyAsBuffer, NO_COPY_OPTIONS)
+						let newVersion = existingBuffer ? readUInt(existingBuffer) : 0
 						if (newVersion > version) {
 							// don't do anything further, db is ahead of us, and we should take no indexing action
 							return new Invalidated(newVersion)
