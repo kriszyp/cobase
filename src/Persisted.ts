@@ -1,8 +1,8 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
 import { createSerializer, serialize, parse, parseLazy, createParser, asBlock, isBlock, copy, reassignBuffers } from 'dpack'
-import * as lmdb from './storage/lmdb'
+import * as lmdb from 'lmdb-store'
 import when from './util/when'
-import WeakValueMap from './util/WeakValueMap'
+import { WeakValueMap } from 'lmdb-store/util/WeakValueMap'
 import ExpirationStrategy from './ExpirationStrategy'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
@@ -37,6 +37,8 @@ const COMPRESSED_STATUS_24 = 254
 const COMPRESSED_STATUS_48 = 255
 const COMPRESSION_THRESHOLD = 1500
 const AS_SOURCE = {}
+const EXTENSION = '.mdpack'
+
 export const VERSION = Symbol('version')
 export const STATUS_BYTE = Symbol('statusByte')
 
@@ -384,7 +386,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		})
 		let versionBuffer = db.get(LAST_VERSION_IN_DB_KEY)
 		this.lastVersion = versionBuffer ? readUInt(versionBuffer) : 0
-		let stateDPack = db.getSync(DB_VERSION_KEY)
+		let stateDPack = db.get(DB_VERSION_KEY)
 		let didReset
 		let state = stateDPack && parse(stateDPack)
 		if (state) {
@@ -424,7 +426,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.info('Completely clearing', this.name)
 			options.clearOnStart = true
 		}
-		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name, options)
+		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name + EXTENSION, options)
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization && false
 		return when(this.getStructureVersion(), dbVersion => {
@@ -984,7 +986,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			throw new Error('Id should be a number or non-numeric string: ' + id)
 		}
 		
-		return this.updated(event || (event = new DeletedEvent()), { id })
+		return this.updated(event || (event = new DeletedEvent()), { id }).whenWritten
 	}
 
 	setValue(value) {
