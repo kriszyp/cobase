@@ -873,7 +873,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		} else if (statusByte === INVALIDATED_STATE) {
 			// stored as an invalidated version
 			return new Invalidated(version)
-		} else if (buffer.length > SHARED_MEMORY_THRESHOLD) {
+		} else if (false && buffer.length > SHARED_MEMORY_THRESHOLD) {
 			// use shared memory
 			valueBuffer = buffer.slice(8)
 			this.db.notifyOnInvalidation(buffer, function(forceCopy) {
