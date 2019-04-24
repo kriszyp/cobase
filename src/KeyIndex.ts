@@ -1,5 +1,5 @@
 import { spawn, currentContext, VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
-import { serialize, parse, parseLazy, createParser } from 'dpack'
+import { serialize, parse, parseLazy, createParser, asBlock } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
@@ -138,7 +138,7 @@ export const Index = ({ Source }) => {
 						let removedValue = toRemove.get(key)
 						// a value of '' is treated as a reference to the source object, so should always be treated as a change
 						let dpackStart = this._dpackStart
-						let value = entry.value === undefined ? EMPTY_BUFFER : serialize(entry.value, {
+						let value = entry.value === undefined ? EMPTY_BUFFER : serialize(asBlock(entry.value), {
 							startOffset: dpackStart
 						})
 						if (removedValue !== undefined)
@@ -183,20 +183,19 @@ export const Index = ({ Source }) => {
 				break
 			}
 			const sourceWhenWritten = Source.whenWritten
-			let synced
+			let committed
 			if (operations.length > 0) {
-				synced = this.submitWrites(operations, previousVersion || 0)
+				committed = this.submitWrites(operations, previousVersion || 0)
 			} else {
 				// still need to update version and send event updates
-				synced = Promise.resolve()
-				synced.committed = Promise.resolve()
+				committed = Promise.resolve()
 			}
-			this.lastWriteSync = synced
+			this.lastWriteSync = committed
 			// update versions and send updates when promises resolve
-			this.whenWritesComplete(synced, earliestPendingVersion, version, eventUpdateSources)
+			this.whenWritesComplete(committed, earliestPendingVersion, version, eventUpdateSources)
 
 			if (indexRequest.resolveOnCompletion) {
-				yield synced.committed
+				yield committed
 				for (const resolve of indexRequest.resolveOnCompletion) {
 					resolve()
 				}
@@ -259,9 +258,8 @@ export const Index = ({ Source }) => {
 		}
 
 		static pendingCommits = []
-		static whenWritesComplete(synced, earliestPendingVersion, version, updateEventSources) {
+		static whenWritesComplete(committed, earliestPendingVersion, version, updateEventSources) {
 			let lastPendingVersion
-			let committed = synced.committed || synced
 			committed.maxVersion = Math.max(committed.maxVersion || 0, version)
 
 			let pendingEvents = this.pendingEvents.get(committed)
@@ -275,8 +273,7 @@ export const Index = ({ Source }) => {
 					let myEarliestPendingVersion = this.whenWritesCommitted()
 					lastPendingVersion = Math.min(myEarliestPendingVersion || (committed.maxVersion + 1), this.earliestPendingVersionInOtherProcesses)
 					this.sendUpdates(pendingEvents)
-				})
-				synced.then(() => { // once the commit has been flushed to disk, write the updated version number
+					// once the commit has been flushed to disk, write the updated version number
 					// update the global last version
 					if (!indexingState) {
 						this.getIndexingState()
@@ -814,7 +811,7 @@ export const Index = ({ Source }) => {
 			if (waitFor == 'write') {
 				if (this.queue.size === 0) {
 					// if nothing in queue, wait for last write and return
-					return when(this.lastWriteSync && this.lastWriteSync.committed, () => ({ written: true }))
+					return when(this.lastWriteSync, () => ({ written: true }))
 				}
 				if (!this.requestForWriteNotification) {
 					this.requestForWriteNotification = []

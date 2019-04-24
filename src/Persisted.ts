@@ -516,7 +516,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
-			return when(this.resetAll(clearDb), () => db.scheduleCommit()).then(() => clearDb)
+			return when(this.resetAll(clearDb), () => clearDb)
 		}
 	}
 
@@ -1141,13 +1141,13 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						// already gone, nothing to do
 						committed = Promise.resolve(true)
 					} else {
-						committed = this.db.remove(toBufferKey(id), conditionalHeader).committed
+						committed = this.db.remove(toBufferKey(id), conditionalHeader)
 					}
 				} else {
 					result = convertToBlocks(result)
 					transition.result = result
 					let buffer = this.serializeEntryValue(result, transition.fromVersion, typeof mode === 'object')
-					committed = this.db.put(toBufferKey(id), buffer, conditionalHeader).committed
+					committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
 				}
 				this.whenValueCommitted = committed
 				committed.then((successfulWrite) => {
@@ -1193,6 +1193,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			if (clearDb) {
 				this.clearAllData()
 			}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them
+			let committed
 			for (let id of allIds) {
 				if (this.instancesById.get(id)) {
 					// instance already in memory
@@ -1200,8 +1201,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					continue
 				}
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
-				this.db.put(toBufferKey(id), this.createHeader(version))
+				committed = this.db.put(toBufferKey(id), this.createHeader(version))
 			}
+			return committed
 			//console.info('Finished reseting', this.name)
 		}.bind(this)))
 	}
@@ -1276,7 +1278,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			if (!event.whenWritten)
 				event.whenWritten = written
 			if (by.previousValue) {
-				by.previousValue = written.committed.then((result) => {
+				by.previousValue = written.then((result) => {
 					if (result === false) {
 //						console.log('Value had changed during invalidation', id, this.name, version)
 						this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
@@ -1301,7 +1303,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				}
 				this.versionBuffer = null
 			}
-			written.committed.then(finished, finished)
+			written.then(finished, finished)
 		}
 	}
 
