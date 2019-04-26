@@ -51,7 +51,7 @@ class InstanceIds extends Transform.as(VArray) {
 	cachedValue: any
 	cachedVersion: any
 	transform() {
-		return when(this.Class.resetProcess, () => this.Class.getInstanceIds())
+		return when(when(this.Class.resetProcess, () => this.Class.whenWritten), () => this.Class.getInstanceIds())
 	}
 	getValue() {
 		return when(super.getValue(true), ids => {
@@ -77,6 +77,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	_versions: any
 	version: number
 	static useWeakMap = true
+	static whenWritten: Promise<any>
 	static dbFolder = 'cachedb'
 	static db: Database
 	db: Database
@@ -460,7 +461,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.lastVersion = Math.max(this.lastVersion, versionBuffer ? readUInt(versionBuffer) : 0) // re-retrieve this, it could have changed since we got a lock
 		const whenFinished = () => {
 			try {
-				this.db.remove(INITIALIZING_PROCESS_KEY)
+				this.db.removeSync(INITIALIZING_PROCESS_KEY)
 				//console.log('finished data initialization', this.name)
 			} catch (error) {
 				console.warn(error.toString())
@@ -487,7 +488,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		const db = this.db
 		if (index > -1) {
 			this.otherProcesses.splice(index, 1)
-			db.remove(Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff]))
+			db.removeSync(Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff]))
 		}
 		if (initializingProcess == pid) {
 			let doInit
@@ -623,13 +624,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static updateDBVersion() {
 		let version = this.startVersion
-		this.db.put(DB_VERSION_KEY, serialize({
+		this.db.putSync(DB_VERSION_KEY, serialize({
 			startVersion: version,
 			dbVersion: this.version
 		}))
 		let versionBuffer = Buffer.allocUnsafe(8)
 		writeUInt(versionBuffer, this.lastVersion)
-		this.db.put(LAST_VERSION_IN_DB_KEY, versionBuffer)
+		this.db.putSync(LAST_VERSION_IN_DB_KEY, versionBuffer)
 		return version
 	}
 
@@ -823,7 +824,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			transition.result = value
 		}
 		let buffer = this.serializeEntryValue(value, event.version, true)
-		return this.db.put(toBufferKey(id), buffer)
+		return this.whenWritten = this.db.put(toBufferKey(id), buffer)
 	}
 
 
@@ -943,7 +944,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
 		console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
-		return this.ready.then(() => {
+		return this.ready.then(() => this.whenWritten).then(() => {
 			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let db = this.db
 			let versionBuffer = db.get(LAST_VERSION_IN_DB_KEY)
@@ -1141,13 +1142,13 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						// already gone, nothing to do
 						committed = Promise.resolve(true)
 					} else {
-						committed = this.db.remove(toBufferKey(id), conditionalHeader)
+						this.whenWritten = committed = this.db.remove(toBufferKey(id), conditionalHeader)
 					}
 				} else {
 					result = convertToBlocks(result)
 					transition.result = result
 					let buffer = this.serializeEntryValue(result, transition.fromVersion, typeof mode === 'object')
-					committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
+					this.whenWritten = committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
 				}
 				this.whenValueCommitted = committed
 				committed.then((successfulWrite) => {
@@ -1201,7 +1202,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					continue
 				}
 				const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
-				committed = this.db.put(toBufferKey(id), this.createHeader(version))
+				this.whenWritten = committed = this.db.put(toBufferKey(id), this.createHeader(version))
 			}
 			return committed
 			//console.info('Finished reseting', this.name)
@@ -1270,6 +1271,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				//console.log('conditional header for invaliding entry ', id, this.name, conditionalHeader)
 				written = db.put(keyAsBuffer, this.createHeader(version), conditionalHeader)
 			}
+			this.whenWritten = written
 			
 			// TODO: Determine when the writes are submitted and just update this buffer over and over
 			let versionBuffer = Buffer.allocUnsafe(8)
@@ -1383,7 +1385,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 							event.triggers = [ INITIALIZATION_SOURCE ]
 							inMemoryInstance.updated(event)
 						} else {
-							this.db.put(toBufferKey(id), this.createHeader(version))
+							this.whenWritten = this.db.put(toBufferKey(id), this.createHeader(version))
 						}
 					}
 					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
