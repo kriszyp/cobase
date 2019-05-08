@@ -35,9 +35,10 @@ const NO_COPY_OPTIONS = {
 }
 const COMPRESSED_STATUS_24 = 254
 const COMPRESSED_STATUS_48 = 255
-const COMPRESSION_THRESHOLD = 1500
+const COMPRESSION_THRESHOLD = 1024
 const AS_SOURCE = {}
 const EXTENSION = '.mdpack'
+const DB_FORMAT_VERSION = 0
 
 export const VERSION = Symbol('version')
 export const STATUS_BYTE = Symbol('statusByte')
@@ -352,18 +353,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this._doesInitialization = flag
 	}
 	static initializeDB() {
-		const options = {}
-		if (this.mapSize) {
-			options.mapSize = this.mapSize
-		}
-		if (this.useWritemap !== undefined) {
-			// useWriteMap provides better performance
-			options.useWritemap = this.useWritemap
-		}
-		if (clearOnStart) {
-			console.info('Completely clearing', this.name)
-			options.clearOnStart = true
-		}
 		const db = this.db
 
 		const processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
@@ -391,7 +380,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let didReset
 		let state = stateDPack && parse(stateDPack)
 		if (state) {
-			this.dbVersion = state.dbVersion
+			this.dbVersion = state.dbVersion ^ (DB_FORMAT_VERSION << 12)
 			this.startVersion = state.startVersion
 		}
 		return initializingProcess
@@ -419,10 +408,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
 		}
-		if (this.useWritemap !== undefined) {
-			// useWriteMap provides better performance
-			options.useWritemap = this.useWritemap
-		}
+		// useWriteMap provides better performance
+		options.useWritemap = this.useWritemap == null ? true : this.useWritemap
 		if (clearOnStart) {
 			console.info('Completely clearing', this.name)
 			options.clearOnStart = true
@@ -431,7 +418,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization && false
 		return when(this.getStructureVersion(), dbVersion => {
-			console.log("db version", this.name, dbVersion)
+			//console.log("db version", this.name, dbVersion)
 			this.version = dbVersion
 			let initializingProcess = this.initializeDB()
 			const db = this.db
@@ -514,7 +501,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (this.dbVersion == this.version) {
 			// update to date
 		} else {
-			console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
+			//console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
 			return when(this.resetAll(clearDb), () => clearDb)
@@ -626,7 +613,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let version = this.startVersion
 		this.db.putSync(DB_VERSION_KEY, serialize({
 			startVersion: version,
-			dbVersion: this.version
+			dbVersion: this.version ^ (DB_FORMAT_VERSION << 12)
 		}))
 		let versionBuffer = Buffer.allocUnsafe(8)
 		writeUInt(versionBuffer, this.lastVersion)
@@ -943,7 +930,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	* Iterate through all instances to find instances since the given version
 	**/
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
-		console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
+		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => this.whenWritten).then(() => {
 			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let db = this.db
@@ -1128,7 +1115,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}), result => {
 				if (transition.invalidating) {
 					if (transition.replaceWith) {
-						console.log('replaceWith')
 						return transition.replaceWith
 					}
 					return result
@@ -1188,9 +1174,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static resetAll(clearDb) {
 		//console.log('reseting', this.name)
-		return Promise.resolve(spawn(function*() {
+		return Promise.resolve(async function() {
 			let version = this.startVersion = getNextVersion()
-			let allIds = yield this.fetchAllIds ? this.fetchAllIds() : []
+			let allIds = await this.fetchAllIds ? this.fetchAllIds() : []
 			if (clearDb) {
 				this.clearAllData()
 			}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them
@@ -1206,7 +1192,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}
 			return committed
 			//console.info('Finished reseting', this.name)
-		}.bind(this)))
+		}.bind(this))
 	}
 
 	static writeEntry(id, event, by) {

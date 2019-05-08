@@ -1,4 +1,4 @@
-import { spawn, currentContext, VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
+import { currentContext, VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
 import { serialize, parse, parseLazy, createParser, asBlock } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
@@ -71,7 +71,7 @@ export const Index = ({ Source }) => {
 		static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
 		static indexingProcess: Promise<any>
 
-		static *indexEntry(id, indexRequest: IndexRequest) {
+		static async indexEntry(id, indexRequest: IndexRequest) {
 			let { previousEntry, deleted, sources, triggers, version } = indexRequest
 			let operations: OperationsArray = []
 			let previousVersion = previousEntry && previousEntry[VERSION]
@@ -84,7 +84,7 @@ export const Index = ({ Source }) => {
 				try {
 					if (previousEntry !== undefined) { // if no data, then presumably no references to clear
 						// use the same mapping function to determine values to remove
-						previousEntries = yield this.indexBy(previousEntry, id)
+						previousEntries = await this.indexBy(previousEntry, id)
 						if (typeof previousEntries == 'object' && previousEntries) {
 							if (!(previousEntries instanceof Array)) {
 								previousEntries = [previousEntries]
@@ -108,21 +108,21 @@ export const Index = ({ Source }) => {
 					let attempts = 0
 					let data
 					try {
-						data = yield Source.get(id, INDEXING_MODE)
+						data = await Source.get(id, INDEXING_MODE)
 					} catch(error) {
 						try {
 							// try again
-							data = yield Source.get(id, INDEXING_MODE)
+							data = await Source.get(id, INDEXING_MODE)
 						} catch(error) {
 							if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
 						}
 					}
-					yield Source.whenValueCommitted
+					await Source.whenValueCommitted
 					if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 					// let the indexBy define how we get the set of values to index
 					try {
-						entries = data === undefined ? data : yield this.indexBy(data, id)
+						entries = data === undefined ? data : await this.indexBy(data, id)
 					} catch(error) {
 						if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 						console.warn('Error indexing value', error, 'for', this.name, id)
@@ -195,7 +195,7 @@ export const Index = ({ Source }) => {
 			this.whenWritesComplete(committed, earliestPendingVersion, version, eventUpdateSources)
 
 			if (indexRequest.resolveOnCompletion) {
-				yield committed
+				await committed
 				for (const resolve of indexRequest.resolveOnCompletion) {
 					resolve()
 				}
@@ -333,11 +333,11 @@ export const Index = ({ Source }) => {
 
 		static reset() {
 			this.rebuildIndex()
-			return spawn(this.resumeIndex())
+			return this.resumeIndex()
 		}
 
 		static queue = new Map<any, IndexRequest>()
-		static *processQueue() {
+		static async processQueue() {
 			this.state = 'processing'
 			if (this.onStateChange) {
 				this.onStateChange({ processing: true, started: true })
@@ -358,10 +358,10 @@ export const Index = ({ Source }) => {
 				let sinceLastStateUpdate = 0
 				do {
 					if (this.nice > 0)
-						yield this.delay(this.nice) // short delay for other processing to occur
+						await this.delay(this.nice) // short delay for other processing to occur
 					for (let [id, indexRequest] of queue) {
 						let { previousEntry } = indexRequest
-						previousEntry = indexRequest.previousEntry = yield previousEntry
+						previousEntry = indexRequest.previousEntry = await previousEntry
 						if (previousEntry instanceof Invalidated) {
 							// delete from our queue
 							this.queue.delete(id)
@@ -386,14 +386,14 @@ export const Index = ({ Source }) => {
 						}
 
 						sinceLastStateUpdate++
-						indexingInProgress.push(spawn(this.indexEntry(id, indexRequest)))
+						indexingInProgress.push(this.indexEntry(id, indexRequest))
 						if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * speedAdjustment) {
 							// we have process enough, commit our changes so far
 							this.onBeforeCommit && this.onBeforeCommit(id)
 							let indexingStarted = indexingInProgress
 							indexingInProgress = []
 							sinceLastStateUpdate = 0
-							yield Promise.all(indexingStarted)
+							await Promise.all(indexingStarted)
 							let processedEntries = indexingStarted.length
 							//this.saveLatestVersion(false)
 							cpuUsage = process.cpuUsage()
@@ -407,12 +407,12 @@ export const Index = ({ Source }) => {
 							if (Math.random() > 0.95)
 								console.log('processed', processedEntries, 'for', this.name, 'in', seconds + billionths/1000000000, 'secs, waiting', this.nice/ 1000) */
 							if (this.nice > 0)
-								yield this.delay(Math.round(this.nice * 1000 / (queue.size + 1000))) // short delay for other processing to occur
+								await this.delay(Math.round(this.nice * 1000 / (queue.size + 1000))) // short delay for other processing to occur
 						}
 					}
 					this.state = 'waiting on other processes'
 					this.state = 'processing'
-					yield Promise.all(indexingInProgress) // then wait for all indexing to finish everything
+					await Promise.all(indexingInProgress) // then wait for all indexing to finish everything
 				} while (queue.size > 0)
 				if (initialQueueSize > 100) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
@@ -426,16 +426,14 @@ export const Index = ({ Source }) => {
 			}
 		}
 
-		static *resumeIndex() {
+		static async resumeIndex() {
 			// TODO: if it is over half the index, just rebuild
-			console.log('resumeIndex', this.name)
 			this.state = 'initializing'
 			const db: Database = this.db
-			console.log('resumeIndex', this.name, 'starting from', lastIndexedVersion)
 			sourceVersions[Source.name] = lastIndexedVersion
 			this.queue.clear()
 			let idsAndVersionsToReindex
-			idsAndVersionsToReindex = yield Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
+			idsAndVersionsToReindex = await Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
 			this.initializing = false
 			let min = Infinity
 			let max = 0
@@ -450,11 +448,11 @@ export const Index = ({ Source }) => {
 				this.updateDBVersion()
 			} else if (idsAndVersionsToReindex.length > 0) {
 				this.state = 'resuming'
-				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
+				//console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
 				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 				// clear out all the items that we are indexing, since we don't have their previous state
 				let result
-				yield db.iterable({
+				await db.iterable({
 					start: Buffer.from([2])
 				}).map(({ key, value }) => {
 					let [, sourceId] = fromBufferKey(key, true)
@@ -462,7 +460,7 @@ export const Index = ({ Source }) => {
 						result = db.remove(key)
 					}
 				}).asArray
-				yield result // just need to wait for last one to finish (guarantees all others are finished)
+				await result // just need to wait for last one to finish (guarantees all others are finished)
 			} else {
 				this.state = 'ready'
 				return
@@ -476,7 +474,7 @@ export const Index = ({ Source }) => {
 				this.queue.set(id, new InitializingIndexRequest(version))
 			}
 			this.state = 'processing'
-			yield this.requestProcessing(DEFAULT_INDEXING_DELAY)
+			await this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}
 
 		static delay(ms) {
@@ -671,11 +669,9 @@ export const Index = ({ Source }) => {
 				// we setup the indexing state buffer
 				if (!indexingState || indexingState.length !== INDEXING_STATE_SIZE) {
 					db.putSync(INDEXING_STATE, Buffer.alloc(INDEXING_STATE_SIZE))
-					console.log('wrote the INDEXING_STATE', this.name)
 					this.getIndexingState(true) // now get the shared reference to it again
 				}
 				lastIndexedVersion = readUInt(Buffer.from(indexingState.slice(8, 16))) || 1
-				console.log('initializeIndexingState', this.name, 'at version', lastIndexedVersion)
 				stateOffset = 16
 				if (indexingState[1] < 20) {
 					while (stateOffset < indexingState.length) {
@@ -715,7 +711,7 @@ export const Index = ({ Source }) => {
 		}
 		static initializeData() {
 			return when(super.initializeData(), () => {
-				return spawn(this.resumeIndex())
+				return this.resumeIndex()
 			})
 		}
 		static myEarliestPendingVersion = 0 // have we registered our process, and at what version
@@ -946,7 +942,7 @@ export const Index = ({ Source }) => {
 				this.state = 'pending'
 				this.whenProcessingComplete = Promise.all(this.Sources.map(Source =>
 					Source.whenProcessingComplete)).then(() =>
-					spawn(this.processQueue())).then(() => {
+					this.processQueue()).then(() => {
 						this.state = 'ready'
 						this.whenProcessingComplete = null
 						currentlyProcessing.delete(this)
