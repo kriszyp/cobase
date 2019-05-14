@@ -91,7 +91,9 @@ export const Index = ({ Source }) => {
 							}
 							for (let entry of previousEntries) {
 								let previousValue = entry.value
-								previousValue = previousValue === undefined ? EMPTY_BUFFER : serialize(previousValue)
+								previousValue = previousValue === undefined ? EMPTY_BUFFER : serialize(previousValue, {
+									shared: this.getSharedStructure()
+								})
 								toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 							}
 						} else if (previousEntries != undefined) {
@@ -139,7 +141,8 @@ export const Index = ({ Source }) => {
 						// a value of '' is treated as a reference to the source object, so should always be treated as a change
 						let dpackStart = this._dpackStart
 						let value = entry.value === undefined ? EMPTY_BUFFER : serialize(asBlock(entry.value), {
-							startOffset: dpackStart
+							startOffset: dpackStart,
+							shared: this.getSharedStructure()
 						})
 						if (removedValue !== undefined)
 							toRemove.delete(key)
@@ -452,7 +455,7 @@ export const Index = ({ Source }) => {
 				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 				// clear out all the items that we are indexing, since we don't have their previous state
 				let result
-				await db.iterable({
+				db.getRange({
 					start: Buffer.from([2])
 				}).map(({ key, value }) => {
 					let [, sourceId] = fromBufferKey(key, true)
@@ -561,14 +564,14 @@ export const Index = ({ Source }) => {
 			if (statusByte >= COMPRESSED_STATUS_24) {
 				buffer = this.uncompressEntry(buffer, statusByte, 0)
 			}
-			return parseLazy(buffer, createParser())
+			return parseLazy(buffer, { shared: this.getSharedStructure() })
 		}
 
 		// Get a range of indexed entries for this id (used by Reduced)
 		static getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
 			const db: Database = this.db
 			let approximateSize = 0
-			return db.iterable(range).map(({ key, value }) => {
+			return db.getRange(range).map(({ key, value }) => {
 				let [, sourceId] = fromBufferKey(key, true)
 				/*if (range.recordApproximateSize) {
 					let approximateSize = approximateSize += key.length + (value && value.length || 10)
@@ -641,22 +644,11 @@ export const Index = ({ Source }) => {
 		}
 
 		static getIndexingState(onlyTry?) {
-			const getOptions = {
-				noCopy: true
-			}
-			indexingState = this.db.get(INDEXING_STATE, getOptions)
+			this.db.get(INDEXING_STATE, buffer => indexingState = buffer)
 			if (indexingState && indexingState.buffer.byteLength > 4000) {
 				debugger
 				throw new Error('Indexing state is not shared, can not continue')
 			}
-			this.db.notifyOnInvalidation(indexingState, (forceUnload) => {
-				console.log('onInvalidation of indexingState')
-				if (forceUnload === true) {
-					indexingState = null
-				} else {
-					return false // if it is not forced, indicate that it is always up-to-date (we never overwrite this entry)
-				}
-			})
 			if (!indexingState && !onlyTry) {
 				this.initializeIndexingState()
 			}
@@ -691,6 +683,14 @@ export const Index = ({ Source }) => {
 				stateOffset = 16
 				writeUInt(indexingState, process.pid, stateOffset)
 				indexingState[1] = 1
+			})
+			db.on('remap', (forceUnload) => {
+				console.log('onInvalidation of indexingState')
+				//if (forceUnload === true) {
+				indexingState = null
+				//} else {
+				//	return false // if it is not forced, indicate that it is always up-to-date (we never overwrite this entry)
+				//}
 			})
 		}
 		static initializeDB() {
@@ -974,7 +974,7 @@ export const Index = ({ Source }) => {
 			}
 			let lastKey
 			return when(this.whenProcessingComplete, () =>
-				db.iterable(options).map(({ key }) => fromBufferKey(key, true)[0]).filter(key => {
+				db.getRange(options).map(({ key }) => fromBufferKey(key, true)[0]).filter(key => {
 					if (key !== lastKey) { // skip multiple entries under one key
 						lastKey = key
 						return true

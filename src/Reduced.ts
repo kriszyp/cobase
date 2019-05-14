@@ -62,7 +62,7 @@ export class Reduced extends Cached {
 			}, true)[Symbol.iterator]()
 		} else {
 			// mid-node, use our own nodes/ranges here
-			iterator = db.iterable({
+			iterator = db.getRange({
 				start: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeStartKey]),
 				end: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level - 1]), indexBufferKey, SEPARATOR_BYTE, rangeEndKey]),
 				reverse: false,
@@ -144,7 +144,7 @@ export class Reduced extends Cached {
 				const indexBufferKey = toBufferKey(this.id)
 				const Class = this.constructor
 				const db = Class.db
-				const iterator = db.iterable({
+				const iterator = db.getRange({
 					start: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, Buffer.from([1])]),
 					end: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([level]), indexBufferKey, SEPARATOR_BYTE, Buffer.from([255])]),
 					reverse: false,
@@ -182,7 +182,7 @@ export class Reduced extends Cached {
 			}
 			for (let i = 1; i < level; i++) {
 				let sourceKeyBuffer = toBufferKey(sourceKey)
-				let [ nodeToInvalidate ] = await db.iterable({
+				let [ nodeToInvalidate ] = await db.getRange({
 					start: Buffer.concat([REDUCED_INDEX_PREFIX_BYTE, Buffer.from([i]), toBufferKey(this.id), SEPARATOR_BYTE, sourceKeyBuffer, Buffer.from([255])]),
 					values: false,
 					reverse: true,
