@@ -733,7 +733,7 @@ export const Index = ({ Source }) => {
 
 			//console.log('sendRequestToIndex', id, this.name, 'version', indexRequest.version, 'previousVersion', indexRequest.previousVersion)
 			if (!this.sendRequestToProcess) {
-				return { indexed: false }
+				return Promise.resolve({ indexed: false })
 			}
 			const request = {
 				id,

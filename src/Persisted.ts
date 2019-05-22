@@ -323,6 +323,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				count++
 			}
 			this.sharedStructureBuffer = null
+			this.sharedStructureVersion = 0
 		})
 		console.info('Cleared the database', this.name, 'of', count, 'entries, rebuilding')
 	}
@@ -386,44 +387,44 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static getSharedStructure() {
+		if (this.sharedStructure === false)
+			return null
 		let db = this.db
 		if (this.sharedStructureBuffer && readUInt(this.sharedStructureBuffer) === this.sharedStructureVersion ||
 			this.sharedStructureVersion === 271828182845904 && !db.get(SHARED_STRUCTURE_KEY)) {
 			// we have the latest structure, use it
 			return this.sharedStructure
 		}
-		db.get(SHARED_STRUCTURE_KEY, buffer => this.sharedStructureBuffer = buffer) // get the shared memory copy
 		if (!this._remapListener)
 			this._remapListener = db.on('remap', () => {
 				this.sharedStructureBuffer = null
 			})
-		this.sharedStructureVersion = this.sharedStructureBuffer ? readUInt(this.sharedStructureBuffer) : 271828182845904
+		db.get(SHARED_STRUCTURE_KEY, buffer => {
+			this.sharedStructureBuffer = buffer // get the shared memory copy
+			this.sharedStructureVersion = this.sharedStructureBuffer ? readUInt(this.sharedStructureBuffer) : 271828182845904
 
-		this.sharedStructure = createSharedStructure(this.sharedStructureBuffer && this.sharedStructureBuffer.slice(8), {
-			onUpdate: () => {
-				// create the new shared buffer (at least tentatively, assuming the transaction goes through)
-				var newSharedBuffer = Buffer.concat([Buffer.alloc(8), this.sharedStructure.serialized])
-				writeUInt(newSharedBuffer, this.sharedStructureVersion + 1)
-				db.transaction(() => {
-					// we have to do this synchronously so we know immediately if there were any changes from other processes
-					if (this.sharedStructureBuffer ? !(this.sharedStructureVersion === readUInt(this.sharedStructureBuffer)) :
-						db.get(SHARED_STRUCTURE_KEY)) {
-						// The serialize should be able to re-retrieve the shared buffer and recover from this
-						throw new Error('Shared structure has changed')
-					}
-					// invalidate the old one, directly writing to shared memory
-					if (this.sharedStructureBuffer)
-						writeUInt(this.sharedStructureBuffer, 0)
-					// and now write the new one
-					db.putSync(SHARED_STRUCTURE_KEY, this.sharedStructureBuffer = newSharedBuffer)
-					this.sharedStructureVersion++
-				})
-			}
+			this.sharedStructure = createSharedStructure(this.sharedStructureBuffer && this.sharedStructureBuffer.slice(8), {
+				onUpdate: () => {
+					// create the new shared buffer (at least tentatively, assuming the transaction goes through)
+					var newSharedBuffer = Buffer.concat([Buffer.alloc(8), this.sharedStructure.serialized])
+					writeUInt(newSharedBuffer, this.sharedStructureVersion + 1)
+					db.transaction(() => {
+						// we have to do this synchronously so we know immediately if there were any changes from other processes
+						if (this.sharedStructureBuffer ? !(this.sharedStructureVersion === readUInt(this.sharedStructureBuffer)) :
+							db.get(SHARED_STRUCTURE_KEY)) {
+							// The serialize should be able to re-retrieve the shared buffer and recover from this
+							throw new Error('Shared structure has changed')
+						}
+						// invalidate the old one, directly writing to shared memory
+						if (this.sharedStructureBuffer)
+							writeUInt(this.sharedStructureBuffer, 0)
+						// and now write the new one
+						db.putSync(SHARED_STRUCTURE_KEY, this.sharedStructureBuffer = newSharedBuffer)
+						this.sharedStructureVersion++
+					})
+				}
+			})
 		})
-		if (this.sharedStructureVersion !== (this.sharedStructureBuffer ? readUInt(this.sharedStructureBuffer) : 271828182845904)) {
-			// it changed while we parsed! try again
-			return this.getSharedStructure()
-		}
 		return this.sharedStructure
 	}
 
@@ -442,6 +443,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		global[this.name] = this
 		for (let Source of this.Sources || []) {
+			if (Source.start)
+				Source.start()
 			Source.notifies(this)
 		}
 		const options = {}
@@ -862,7 +865,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let transition = this.transitions.get(id) // if we are transitioning, return the transition result
 		if (transition) {
 			if (transition.invalidating) {
-				return new Invalidated(transition.newVersion, transition)
+				return new Invalidated(transition.newVersion)
 			} else {
 				return transition.result
 			}
@@ -870,7 +873,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let db = this.db
 		// TODO: only read from DB if context specifies to look for a newer version
 		let key = toBufferKey(id)
-		let version
 		let size
 		let entry = db.get(key, entryBuffer => {
 			if (!entryBuffer)
@@ -878,20 +880,20 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			size = entryBuffer.length
 			return this.copyAndParseValue(entryBuffer)
 		})
-		if (typeof entry !== 'function')
+		if (!entry || !entry.getData)
 			return entry
 
 		let valueCache = this._valueCache
 		if (valueCache) {
 			let value = valueCache.get(id)
-			if (value && value[VERSION] === version) {
+			if (value && value[VERSION] === entry.version) {
 				expirationStrategy.useEntry(value, size/* >> (entryBuffer.buffer.onInvalidation ? 2 : 0)*/)
 				return value
 			}
 		} else {
 			this._valueCache = valueCache = new WeakValueMap()
 		}
-		let value = entry()
+		let value = entry.getData()
 		valueCache.set(id, value)
 		if (value)
 			expirationStrategy.useEntry(value, size/* >> (entryBuffer.buffer.onInvalidation ? 2 : 0)*/)
@@ -923,30 +925,32 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			valueBuffer = Buffer.from(buffer.slice(8))
 		}
 		// do this later, so it can be done after the read transaction closes
-		return () => {
-			let data = parseLazy(valueBuffer, {
-				shared: this.getSharedStructure()
-			})
-			let type = typeof data
-			if (type === 'object') {
-				// nothing to change
-				if (!data) {
-					return null // can't assign version to null
+		return {
+			version,
+			getData: () => {
+				let data = parseLazy(valueBuffer, {
+					shared: this.getSharedStructure()
+				})
+				let type = typeof data
+				if (type === 'object') {
+					// nothing to change
+					if (!data) {
+						return null // can't assign version to null
+					}
+				} else if (type === 'number') {
+					data = new Number(data)
+				} else if (type === 'string') {
+					data = new String(data)
+				} else if (type === 'boolean') {
+					data = new Boolean(data)
+				} else {
+					return data // can't assign a version to undefined
 				}
-			} else if (type === 'number') {
-				data = new Number(data)
-			} else if (type === 'string') {
-				data = new String(data)
-			} else if (type === 'boolean') {
-				data = new Boolean(data)
-			} else {
-				return data // can't assign a version to undefined
+				data[VERSION] = version
+				data[STATUS_BYTE] = statusByte
+				return data
 			}
-			data[VERSION] = version
-			data[STATUS_BYTE] = statusByte
-			return data			
 		}
-
 	}
 
 	static getInstanceIds(range: IterableOptions) {
@@ -970,9 +974,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			start: Buffer.from([2])
 		}).map(({ key, value }) => {
 			let entry = this.copyAndParseValue(value)
-			if (typeof entry === 'function')
-				entry = entry()
-			return {
+			return (entry && entry.getData) ?
+			{
+				key: fromBufferKey(key),
+				value: entry.getData(),
+				version: entry.version
+			} : {
 				key: fromBufferKey(key),
 				value: entry,
 				version: entry && entry[VERSION],
@@ -1042,7 +1049,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			buffer = serialize(object, {
 				startOffset: start,
 				shared: this.getSharedStructure(),
-				noShareUpdate: this.lastSerializedId === id // don't update share if it is the same as last time or it will see all properties as repeaters
+				avoidShareUpdate: this.lastSerializedId === id // don't update share if it is the same as last time or it will see all properties as repeaters
 			})
 			buffer = this.setupSizeTable(buffer, start, 8)
 			this.lastSerializedId = id
@@ -1106,7 +1113,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return when(this.whenUpdatedInContext(context), () => {
 			let entry = this.getFromDB(id)
 			if (entry) {
-				if (entry instanceof Invalidated) {
+				if (entry[STATUS_BYTE] === INVALIDATED_STATE) {
 					let oldTransition = this.transitions.get(id)
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
 					let transition = this.runTransform(id, entry[VERSION], false, mode)
