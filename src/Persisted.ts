@@ -7,7 +7,7 @@ import ExpirationStrategy from './ExpirationStrategy'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
 import Index from './KeyIndex'
-import { AccessError, ConcurrentModificationError } from './util/errors'
+import { AccessError, ConcurrentModificationError, ShareChangeError } from './util/errors'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
@@ -413,7 +413,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						if (this.sharedStructureBuffer ? !(this.sharedStructureVersion === readUInt(this.sharedStructureBuffer)) :
 							db.get(SHARED_STRUCTURE_KEY)) {
 							// The serialize should be able to re-retrieve the shared buffer and recover from this
-							throw new Error('Shared structure has changed')
+							throw new ShareChangeError('Shared structure has changed')
 						}
 						// invalidate the old one, directly writing to shared memory
 						if (this.sharedStructureBuffer)
@@ -1046,11 +1046,18 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (object === INVALIDATED_ENTRY) {
 			buffer = Buffer.allocUnsafe(8)
 		} else {
-			buffer = serialize(object, {
-				startOffset: start,
-				shared: this.getSharedStructure(),
-				avoidShareUpdate: this.lastSerializedId === id // don't update share if it is the same as last time or it will see all properties as repeaters
-			})
+			try {
+				buffer = serialize(object, {
+					startOffset: start,
+					shared: this.getSharedStructure(),
+					avoidShareUpdate: this.lastSerializedId === id // don't update share if it is the same as last time or it will see all properties as repeaters
+				})
+			} catch (error) {
+				if (error instanceof ShareChangeError)
+					return this.serializeEntryValue(object, version, canCompress, id)
+				else
+					throw error
+			}
 			buffer = this.setupSizeTable(buffer, start, 8)
 			this.lastSerializedId = id
 		}

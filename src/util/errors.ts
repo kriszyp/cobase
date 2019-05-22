@@ -5,6 +5,7 @@ export class ExtendableError extends Error {
 		this.name = this.constructor.name
 	}
 }
+export class ShareChangeError extends Error {}
 
 export class AccessError extends ExtendableError {
 	get status() {

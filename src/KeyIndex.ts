@@ -1,6 +1,7 @@
 import { currentContext, VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
 import { serialize, parse, parseLazy, createParser, asBlock } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
+import { ShareChangeError } from './util/errors'
 import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
@@ -91,9 +92,7 @@ export const Index = ({ Source }) => {
 							}
 							for (let entry of previousEntries) {
 								let previousValue = entry.value
-								previousValue = previousValue === undefined ? EMPTY_BUFFER : serialize(previousValue, {
-									shared: this.getSharedStructure()
-								})
+								previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, 0)
 								toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 							}
 						} else if (previousEntries != undefined) {
@@ -140,10 +139,7 @@ export const Index = ({ Source }) => {
 						let removedValue = toRemove.get(key)
 						// a value of '' is treated as a reference to the source object, so should always be treated as a change
 						let dpackStart = this._dpackStart
-						let value = entry.value === undefined ? EMPTY_BUFFER : serialize(asBlock(entry.value), {
-							startOffset: dpackStart,
-							shared: this.getSharedStructure()
-						})
+						let value = entry.value === undefined ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), dpackStart)
 						if (removedValue !== undefined)
 							toRemove.delete(key)
 						let isChanged = removedValue === undefined || !value.slice(dpackStart).equals(removedValue)
@@ -290,6 +286,19 @@ export const Index = ({ Source }) => {
 			pendingEvents.push(...updateEventSources)
 			
 			return committed
+		}
+		static serialize(value, startOffset) {
+			try {
+				return serialize(value, {
+					startOffset,
+					shared: this.getSharedStructure()
+				})
+			} catch (error) {
+				if (error instanceof ShareChangeError)
+					return this.serialize(value, startOffset)
+				else
+					throw error
+			}
 		}
 		static whenWritesCommitted() {
 			let myEarliestPendingVersion = 0 // recompute this

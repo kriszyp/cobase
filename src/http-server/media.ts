@@ -86,6 +86,7 @@ function serializer(returnValue, connection) {
 	try {
 		connection.response.body = connection.response.content = bestSerializer.serialize(returnValue, connection, bestParameters)
 	} catch (error) {
+		console.error(error)
 		connection.response.body = connection.response.content = 'Error serializing: ' + error.toString()
 	}
 }
