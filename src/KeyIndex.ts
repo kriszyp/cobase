@@ -472,18 +472,12 @@ export const Index = ({ Source }) => {
 				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				console.info('Finished initial index build of', this.name, 'with', idsAndVersionsToReindex.length, 'entries')
 				this.isInitialBuild = false
-				await this.db.remove(INITIALIZING_LAST_KEY)
+				await db.remove(INITIALIZING_LAST_KEY)
 				return
 			} else if (idsAndVersionsToReindex.length > 0) {
 				this.state = 'resuming'
-				if (idsAndVersions.length > 10000) {
-					console.info('Sorting', idsAndVersions.length, 'versions of', this.name, 'for resuming updates, this may take some time')
-				}
-				idsAndVersions.sort((a, b) => a.version > b.version ? 1 : a.version < b.version ? -1 : 0)
-				if (idsAndVersions.length > 10000) {
-					console.info('Finished sorting', this.name)
-				}
-				//console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
+				idsAndVersionsToReindex.sort((a, b) => a.version > b.version ? 1 : a.version < b.version ? -1 : 0)
+				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
 				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 				// clear out all the items that we are indexing, since we don't have their previous state
 				let result

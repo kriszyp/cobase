@@ -1263,6 +1263,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			this.clearAllData()
 		}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them
 		let committed
+		let queued = 0
 		for (let id of allIds) {
 			if (this.instancesById.get(id)) {
 				// instance already in memory
@@ -1271,6 +1272,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}
 			const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
 			this.whenWritten = committed = this.db.put(toBufferKey(id), this.createHeader(version))
+			if (queued++ > 2000) {
+				await this.whenWritten
+				queued = 0
+			}
 		}
 		return committed
 		//console.info('Finished reseting', this.name)
@@ -1439,10 +1444,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			for (let Source of this.Sources || []) {
 				let lastVersion = this.lastVersion
 
-				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(ids => {
+				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(async (ids) => {
 					//console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
+					let queued = 0
 					for (let { id, version } of ids) {
 						//min = Math.min(version, min)
 						//max = Math.max(version, max)
@@ -1453,6 +1459,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 							inMemoryInstance.updated(event)
 						} else {
 							this.whenWritten = this.db.put(toBufferKey(id), this.createHeader(version))
+						}
+						if (queued++ > 2000) {
+							await this.whenWritten
+							queued = 0
 						}
 					}
 					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
