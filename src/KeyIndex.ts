@@ -13,7 +13,8 @@ const expirationStrategy = ExpirationStrategy.defaultInstance
 const DEFAULT_INDEXING_CONCURRENCY = 15
 const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
 const SEPARATOR_NEXT_BYTE = Buffer.from([31])
-const INDEXING_STATE = Buffer.from([1, 5]) // a metadata key in the range the should be cleared on database clear
+const INDEXING_STATE = Buffer.from([1, 5])
+const INITIALIZING_LAST_KEY = Buffer.from([1, 7])
 const EMPTY_BUFFER = Buffer.from([])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 60
@@ -77,6 +78,8 @@ export const Index = ({ Source }) => {
 			let operations: OperationsArray = []
 			let previousVersion = previousEntry && previousEntry[VERSION]
 			let eventUpdateSources = []
+			let idAsBuffer = toBufferKey(id)
+
 			try {
 				let toRemove = new Map()
 				// TODO: handle delta, for optimized index updaes
@@ -145,7 +148,7 @@ export const Index = ({ Source }) => {
 						let isChanged = removedValue === undefined || !value.slice(dpackStart).equals(removedValue)
 						if (isChanged || value.length === 0 || this.alwaysUpdate) {
 							if (isChanged) {
-								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
+								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
 								value = this.setupSizeTable(value, dpackStart, 0)
 								if (value.length > COMPRESSION_THRESHOLD) {
 									value = this.compressEntry(value, 0)
@@ -164,7 +167,7 @@ export const Index = ({ Source }) => {
 				for (let [key] of toRemove) {
 					operations.push({
 						type: 'del',
-						key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, toBufferKey(id)])
+						key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
 					})
 					eventUpdateSources.push({ key, sources, triggers })
 				}
@@ -191,7 +194,7 @@ export const Index = ({ Source }) => {
 			}
 			this.lastWriteSync = committed
 			// update versions and send updates when promises resolve
-			this.whenWritesComplete(committed, earliestPendingVersion, version, eventUpdateSources)
+			this.whenWritesComplete(committed, earliestPendingVersion, version, eventUpdateSources, idAsBuffer)
 
 			if (indexRequest.resolveOnCompletion) {
 				await committed
@@ -257,7 +260,7 @@ export const Index = ({ Source }) => {
 		}
 
 		static pendingCommits = []
-		static whenWritesComplete(committed, earliestPendingVersion, version, updateEventSources) {
+		static whenWritesComplete(committed, earliestPendingVersion, version, updateEventSources, id) {
 			let lastPendingVersion
 			committed.maxVersion = Math.max(committed.maxVersion || 0, version)
 
@@ -277,10 +280,15 @@ export const Index = ({ Source }) => {
 					if (!indexingState) {
 						this.getIndexingState()
 					}
-					lastIndexedVersion = lastPendingVersion - 1
-					const versionWord = Buffer.alloc(8)
-					writeUInt(versionWord, lastIndexedVersion)
-					versionWord.copy(indexingState, 8) // copy word for an atomic update
+					if (this.isInitialBuilding) {
+						// write the last key indexed
+						this.db.put(INITIALIZING_LAST_KEY, id)
+					} else {
+						lastIndexedVersion = lastPendingVersion - 1
+						const versionWord = Buffer.alloc(8)
+						writeUInt(versionWord, lastIndexedVersion)
+						versionWord.copy(indexingState, 8) // copy word for an atomic update
+					}
 				})
 			}
 			pendingEvents.push(...updateEventSources)
@@ -446,20 +454,35 @@ export const Index = ({ Source }) => {
 			this.queue.clear()
 			let idsAndVersionsToReindex
 			idsAndVersionsToReindex = await Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
+			let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 			this.initializing = false
 			let min = Infinity
 			let max = 0
-			for (let { id, version } of idsAndVersionsToReindex) {
-				min = Math.min(version, min)
-				max = Math.max(version, max)
-			}
 			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
-				console.log('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
+				console.info('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
 				this.state = 'clearing'
 				this.clearAllData()
 				this.updateDBVersion()
+				console.info('Cleared index', this.name)
+				this.isInitialBuild = true
+				this.queue = new IteratorThenMap(idsAndVersionsToReindex.map(({id, version}) =>
+					[id, new InitializingIndexRequest(version)]), (map) => this.queue = map)
+				this.state = 'building'
+				console.info('Created queue for initial index build', this.name)
+				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
+				console.info('Finished initial index build of', this.name, 'with', idsAndVersionsToReindex.length, 'entries')
+				this.isInitialBuild = false
+				await this.db.remove(INITIALIZING_LAST_KEY)
+				return
 			} else if (idsAndVersionsToReindex.length > 0) {
 				this.state = 'resuming'
+				if (idsAndVersions.length > 10000) {
+					console.info('Sorting', idsAndVersions.length, 'versions of', this.name, 'for resuming updates, this may take some time')
+				}
+				idsAndVersions.sort((a, b) => a.version > b.version ? 1 : a.version < b.version ? -1 : 0)
+				if (idsAndVersions.length > 10000) {
+					console.info('Finished sorting', this.name)
+				}
 				//console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
 				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 				// clear out all the items that we are indexing, since we don't have their previous state
@@ -473,18 +496,18 @@ export const Index = ({ Source }) => {
 					}
 				}).asArray
 				await result // just need to wait for last one to finish (guarantees all others are finished)
+
+				this.state = 'initializing queue'
+				for (let { id, version } of idsAndVersionsToReindex) {
+					if (!version)
+						console.log('resuming without version',this.name, id)
+					this.queue.set(id, new InitializingIndexRequest(version))
+				}
 			} else {
 				this.state = 'ready'
 				return
 			}
 			//this.updateProcessMap(lastIndexedVersion)
-
-			this.state = 'initializing queue'
-			for (let { id, version } of idsAndVersionsToReindex) {
-				if (!version)
-					console.log('resuming without version',this.name, id)
-				this.queue.set(id, new InitializingIndexRequest(version))
-			}
 			this.state = 'processing'
 			await this.requestProcessing(DEFAULT_INDEXING_DELAY)
 		}
@@ -1022,4 +1045,34 @@ function writeUInt(buffer, number, offset?) {
 // read a 64-bit uint (could be optimized/improved)
 function readUInt(buffer, offset?) {
 	return buffer.readUIntBE((offset || 0) + 2, 6)
+}
+
+class IteratorThenMap<K, V> implements Map<K, V> {
+	onFinishedIterator: Function
+	didIterator: boolean
+	map: Map<K, V>
+	iterable: Iterable<V>
+	constructor(iterable, onFinishedIterator) {
+		this.iterable = iterable
+		this.onFinishedIterator = onFinishedIterator
+		this.map = new Map()
+	}
+	[Symbol.iterator]() {
+		if (this.didIterator) {
+			this.onFinishedIterator(this.map)
+			return this.map[Symbol.iterator]()
+		} else {
+			this.didIterator = true
+			return this.iterable[Symbol.iterator]()
+		}
+	}
+	set(id: K, value: V) {
+		return this.map.set(id, value)
+	}
+	get(id) {
+		return this.map.get(id)
+	}
+	delete(id) {
+		return this.map.delete(id)
+	}
 }

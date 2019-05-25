@@ -994,7 +994,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
 		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => this.whenWritten).then(() => {
-			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
+			console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let db = this.db
 			let versionBuffer = db.get(LAST_VERSION_IN_DB_KEY)
 			this.lastVersion = this.lastVersion || (versionBuffer ? readUInt(versionBuffer) : 0)
@@ -1002,7 +1002,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (this.lastVersion && this.lastVersion <= sinceVersion && !isFullReset) {
 				return []
 			}
-			let idsAndVersions = db.getRange({
+			let getIdsAndVersions = () => db.getRange({
 				start: Buffer.from([10])
 			}).map(({ key, value }) => {
 				try {
@@ -1016,16 +1016,29 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				}
 			}).filter(idAndVersion => {
 				return idAndVersion
-			}).asArray
-			if (idsAndVersions.length > 10000) {
-				console.info('Sorting', idsAndVersions.length, 'versions of', this.name, 'for resuming updates, this may take some time')
+			})
+			let array = []
+			let lastVersion = 0
+			let i = 0
+			for (let idAndVersion of getIdsAndVersions()) {
+				if (i > 3000) {// stop recording array
+					array = null
+					isFullReset = true
+				} else
+					array.push(idAndVersion)
+				i++
+				lastVersion = Math.max(lastVersion, idAndVersion.version)
 			}
-			idsAndVersions.sort((a, b) => a.version > b.version ? 1 : a.version < b.version ? -1 : 0)
-			if (idsAndVersions.length > 10000) {
-				console.info('Finished sorting', this.name)
+			if (isFullReset) {
+				console.info('getInstanceIdsAndVersionsSince from ', this.name, 'is a full reset', i)
+				let idsAndVersions = getIdsAndVersions()
+				idsAndVersions.isFullReset = true
+				idsAndVersions.length = i
+				idsAndVersions.lastVersion = lastVersion
+				return idsAndVersions
 			}
-			idsAndVersions.isFullReset = isFullReset
-			return idsAndVersions
+			console.log('getInstanceIdsAndVersionsSince from ', this.name, 'has this many new entities', i)
+			return array
 		})
 	}
 
