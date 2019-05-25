@@ -419,7 +419,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						if (this.sharedStructureBuffer)
 							writeUInt(this.sharedStructureBuffer, 0)
 						// and now write the new one
-						db.putSync(SHARED_STRUCTURE_KEY, this.sharedStructureBuffer = newSharedBuffer)
+						db.putSync(SHARED_STRUCTURE_KEY, newSharedBuffer)
+						db.get(SHARED_STRUCTURE_KEY, buffer => this.sharedStructureBuffer = buffer)
 						this.sharedStructureVersion++
 					})
 				}
@@ -1426,7 +1427,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				let lastVersion = this.lastVersion
 
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(ids => {
-					console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
+					//console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
 					for (let { id, version } of ids) {
