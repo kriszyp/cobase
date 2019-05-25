@@ -420,7 +420,7 @@ export const Index = ({ Source }) => {
 							let lastCpuUsage = cpuTotalUsage
 							cpuTotalUsage = cpuUsage.user + cpuUsage.system
 							// calculate an indexing adjustment based on cpu usage and queue size (which we don't want to get too big)
-							speedAdjustment = (speedAdjustment + 40000 / (cpuTotalUsage - lastCpuUsage + 10000)) / 2
+							speedAdjustment = (speedAdjustment + 400000 / (cpuTotalUsage - lastCpuUsage + 200000)) / 2
 							/* Can be used to measure performance
 							let [seconds, billionths] = process.hrtime(lastStart)
 							lastStart = process.hrtime()
