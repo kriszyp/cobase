@@ -1046,10 +1046,12 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 	didIterator: boolean
 	map: Map<K, V>
 	iterable: Iterable<V>
+	deletedCount: number
 	constructor(iterable, onFinishedIterator) {
 		this.iterable = iterable
 		this.onFinishedIterator = onFinishedIterator
 		this.map = new Map()
+		this.deletedCount = 0
 	}
 	[Symbol.iterator]() {
 		if (this.didIterator) {
@@ -1060,6 +1062,9 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 			return this.iterable[Symbol.iterator]()
 		}
 	}
+	get size() {
+		return this.iterable.length - this.deletedCount + this.map.size
+	}
 	set(id: K, value: V) {
 		return this.map.set(id, value)
 	}
@@ -1067,6 +1072,7 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 		return this.map.get(id)
 	}
 	delete(id) {
+		this.deletedCount++
 		return this.map.delete(id)
 	}
 }

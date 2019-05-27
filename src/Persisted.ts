@@ -1145,7 +1145,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 							abortable()
 						}
 					}
-					this.transitions.set(id, transition)
 					return transition.result
 				}
 				// TODO: copy this to super/Persisted.get
@@ -1169,7 +1168,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					})
 				}
 			})
-			this.transitions.set(id, transition)
 			return transition.result
 		})
 	}
@@ -1179,6 +1177,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			fromVersion,
 			abortables: []
 		}
+		this.transitions.set(id, transition)
+
 		let hasPromises
 		let inputData = this.Sources ? this.Sources.map(source => {
 			let data = source.get(id, AS_SOURCE)
