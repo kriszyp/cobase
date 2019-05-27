@@ -15,7 +15,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "dependencies": {
-    "dpack": "^0.5.9",
+    "dpack": "^0.5.10",
     "lmdb-store": "^0.2.1",
     "ordered-binary": "^0.0.2"
   },

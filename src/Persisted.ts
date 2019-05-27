@@ -1067,8 +1067,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					avoidShareUpdate: this.lastSerializedId === id // don't update share if it is the same as last time or it will see all properties as repeaters
 				})
 			} catch (error) {
-				if (error instanceof ShareChangeError)
+				if (error instanceof ShareChangeError) {
+					console.warn('Reserializing after share change in another process', this.name)
 					return this.serializeEntryValue(object, version, canCompress, id)
+				}
 				else
 					throw error
 			}
@@ -1218,6 +1220,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					transition.result = result
 					let buffer = this.serializeEntryValue(result, transition.fromVersion, typeof mode === 'object', id)
 					this.whenWritten = committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
+					let valueCache = this._valueCache
+					if (valueCache) {
+						valueCache.set(id, result)
+					}
+					expirationStrategy.useEntry(result, buffer.length)
 				}
 				this.whenValueCommitted = committed
 				committed.then((successfulWrite) => {

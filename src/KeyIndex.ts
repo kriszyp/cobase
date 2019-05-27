@@ -95,7 +95,7 @@ export const Index = ({ Source }) => {
 							}
 							for (let entry of previousEntries) {
 								let previousValue = entry.value
-								previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, 0)
+								previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, false, 0)
 								toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 							}
 						} else if (previousEntries != undefined) {
@@ -135,6 +135,7 @@ export const Index = ({ Source }) => {
 						// allow single primitive key
 						entries = entries === undefined ? [] : [entries]
 					}
+					let first = true
 					for (let entry of entries) {
 						// we use the composite key, so we can quickly traverse all the entries under a certain key
 						let key = typeof entry === 'object' ? entry.key : entry // TODO: Maybe at some point we support dates as keys
@@ -142,7 +143,8 @@ export const Index = ({ Source }) => {
 						let removedValue = toRemove.get(key)
 						// a value of '' is treated as a reference to the source object, so should always be treated as a change
 						let dpackStart = this._dpackStart
-						let value = entry.value === undefined ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), dpackStart)
+						let value = entry.value === undefined ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), first, dpackStart)
+						first = false
 						if (removedValue !== undefined)
 							toRemove.delete(key)
 						let isChanged = removedValue === undefined || !value.slice(dpackStart).equals(removedValue)
@@ -295,15 +297,18 @@ export const Index = ({ Source }) => {
 			
 			return committed
 		}
-		static serialize(value, startOffset) {
+		static serialize(value, firstValue, startOffset) {
 			try {
 				return serialize(value, {
 					startOffset,
-					shared: this.getSharedStructure()
+					shared: this.getSharedStructure(),
+					avoidShareUpdate: !firstValue
 				})
 			} catch (error) {
-				if (error instanceof ShareChangeError)
-					return this.serialize(value, startOffset)
+				if (error instanceof ShareChangeError) {
+					console.warn('Reserializing after share change in another process', this.name)
+					return this.serialize(value, firstValue, startOffset)
+				}
 				else
 					throw error
 			}
@@ -466,11 +471,15 @@ export const Index = ({ Source }) => {
 				console.info('Cleared index', this.name)
 				this.isInitialBuild = true
 				this.queue = new IteratorThenMap(idsAndVersionsToReindex.map(({id, version}) =>
-					[id, new InitializingIndexRequest(version)]), (map) => this.queue = map)
+					[id, new InitializingIndexRequest(version)]), idsAndVersionsToReindex.length)
 				this.state = 'building'
 				console.info('Created queue for initial index build', this.name)
 				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				console.info('Finished initial index build of', this.name, 'with', idsAndVersionsToReindex.length, 'entries')
+				this.queue = this.queue.deferredMap
+				if (this.queue.size)
+					await this.requestProcessing(DEFAULT_INDEXING_DELAY)
+
 				this.isInitialBuild = false
 				await db.remove(INITIALIZING_LAST_KEY)
 				return
@@ -1042,37 +1051,35 @@ function readUInt(buffer, offset?) {
 }
 
 class IteratorThenMap<K, V> implements Map<K, V> {
-	onFinishedIterator: Function
 	didIterator: boolean
-	map: Map<K, V>
+	deferredMap: Map<K, V>
 	iterable: Iterable<V>
 	deletedCount: number
-	constructor(iterable, onFinishedIterator) {
+	constructor(iterable, length) {
 		this.iterable = iterable
-		this.onFinishedIterator = onFinishedIterator
-		this.map = new Map()
+		this.deferredMap = new Map()
 		this.deletedCount = 0
+		this.length = length
 	}
 	[Symbol.iterator]() {
 		if (this.didIterator) {
-			this.onFinishedIterator(this.map)
-			return this.map[Symbol.iterator]()
+			return this.deferredMap[Symbol.iterator]()
 		} else {
 			this.didIterator = true
 			return this.iterable[Symbol.iterator]()
 		}
 	}
 	get size() {
-		return this.iterable.length - this.deletedCount + this.map.size
+		return this.length - this.deletedCount + this.deferredMap.size
 	}
 	set(id: K, value: V) {
-		return this.map.set(id, value)
+		return this.deferredMap.set(id, value)
 	}
 	get(id) {
-		return this.map.get(id)
+		return this.deferredMap.get(id)
 	}
 	delete(id) {
 		this.deletedCount++
-		return this.map.delete(id)
+		return this.deferredMap.delete(id)
 	}
 }
