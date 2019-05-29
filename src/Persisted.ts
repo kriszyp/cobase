@@ -995,51 +995,60 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => this.whenWritten).then(() => {
 			console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
-			let db = this.db
-			let versionBuffer = db.get(LAST_VERSION_IN_DB_KEY)
+			let versionBuffer = this.db.get(LAST_VERSION_IN_DB_KEY)
 			this.lastVersion = this.lastVersion || (versionBuffer ? readUInt(versionBuffer) : 0)
 			let isFullReset = this.startVersion > sinceVersion
 			if (this.lastVersion && this.lastVersion <= sinceVersion && !isFullReset) {
 				return []
 			}
-			let getIdsAndVersions = () => db.getRange({
-				start: Buffer.from([10])
-			}).map(({ key, value }) => {
-				try {
-					const version = readUInt(value)
-					return version > sinceVersion ? {
-						id: fromBufferKey(key),
-						version
-					} : null
-				} catch (error) {
-					console.error('Error reading data from table scan', this.name, fromBufferKey(key), error)
-				}
-			}).filter(idAndVersion => {
-				return idAndVersion
-			})
-			let array = []
-			let lastVersion = 0
-			let i = 0
-			for (let idAndVersion of getIdsAndVersions()) {
-				if (i > 3000) {// stop recording array
-					array = null
-					isFullReset = true
-				} else
-					array.push(idAndVersion)
-				i++
-				lastVersion = Math.max(lastVersion, idAndVersion.version)
+			let idsAndVersions = this.getIdsAndVersionFromKey(Buffer.from([10]), sinceVersion, 3000)
+			if (idsAndVersions.isFullReset) {
+				idsAndVersions = this.getIdsAndVersionFromKey(Buffer.from([10]))
 			}
-			if (isFullReset) {
-				console.info('getInstanceIdsAndVersionsSince from ', this.name, 'is a full reset', i)
-				let idsAndVersions = getIdsAndVersions()
-				idsAndVersions.isFullReset = true
-				idsAndVersions.length = i
-				idsAndVersions.lastVersion = lastVersion
-				return idsAndVersions
-			}
-			console.log('getInstanceIdsAndVersionsSince from ', this.name, 'has this many new entities', i)
-			return array
+			return idsAndVersions
 		})
+	}
+
+	static getIdsAndVersionFromKey(startKey, sinceVersion = 0, arrayThreshold = 0) {
+		let getIdsAndVersions = () => this.db.getRange({
+			start: startKey
+		}).map(({ key, value }) => {
+			try {
+				const version = readUInt(value)
+				return version > sinceVersion ? {
+					id: fromBufferKey(key),
+					version
+				} : null
+			} catch (error) {
+				console.error('Error reading data from table scan', this.name, fromBufferKey(key), error)
+			}
+		}).filter(idAndVersion => {
+			return idAndVersion
+		})
+		let array = arrayThreshold > 0 ? [] : null
+		let lastVersion = 0
+		let i = 0
+		for (let idAndVersion of getIdsAndVersions()) {
+			if (i >= arrayThreshold) {// stop recording array
+				if (array) {
+					return {
+						isFullReset: true
+					}
+				}
+			} else
+				array.push(idAndVersion)
+			i++
+			lastVersion = Math.max(lastVersion, idAndVersion.version)
+		}
+		if (array) {
+			 return array
+		}
+		console.info('getInstanceIdsAndVersionsSince from ', this.name, 'is a full reset', i)
+		let idsAndVersions = getIdsAndVersions()
+		idsAndVersions.isFullReset = true
+		idsAndVersions.length = i
+		idsAndVersions.lastVersion = lastVersion
+		return idsAndVersions
 	}
 
 	static remove(id, event?) {

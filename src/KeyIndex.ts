@@ -68,6 +68,7 @@ export const Index = ({ Source }) => {
 
 	return class extends Persistable.as(VArray) {
 		version: number
+		averageConcurrencyLevel: number
 		static Sources = [Source]
 		static whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index
 		static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
@@ -98,7 +99,7 @@ export const Index = ({ Source }) => {
 								previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, false, 0)
 								toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 							}
-						} else if (previousEntries != undefined) {
+						} else if (previousEntries != null) {
 							toRemove.set(previousEntries, EMPTY_BUFFER)
 						}
 					}
@@ -133,7 +134,7 @@ export const Index = ({ Source }) => {
 					}
 					if (typeof entries != 'object' || !(entries instanceof Array)) {
 						// allow single primitive key
-						entries = entries === undefined ? [] : [entries]
+						entries = entries == null ? [] : [entries]
 					}
 					let first = true
 					for (let entry of entries) {
@@ -282,7 +283,7 @@ export const Index = ({ Source }) => {
 					if (!indexingState) {
 						this.getIndexingState()
 					}
-					if (this.isInitialBuilding) {
+					if (this.isInitialBuild) {
 						// write the last key indexed
 						this.db.put(INITIALIZING_LAST_KEY, id)
 					} else {
@@ -417,6 +418,7 @@ export const Index = ({ Source }) => {
 							this.onBeforeCommit && this.onBeforeCommit(id)
 							let indexingStarted = indexingInProgress
 							indexingInProgress = []
+							this.averageConcurrencyLevel = ((this.averageConcurrencyLevel || 0) + sinceLastStateUpdate) / 2
 							sinceLastStateUpdate = 0
 							await Promise.all(indexingStarted)
 							let processedEntries = indexingStarted.length
@@ -459,46 +461,46 @@ export const Index = ({ Source }) => {
 			this.queue.clear()
 			let idsAndVersionsToReindex
 			idsAndVersionsToReindex = await Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
-			let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
-			this.initializing = false
-			let min = Infinity
-			let max = 0
+			let idsAndVersionsToInitialize
 			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
 				console.info('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
 				this.state = 'clearing'
 				this.clearAllData()
 				this.updateDBVersion()
 				console.info('Cleared index', this.name)
+				idsAndVersionsToInitialize = idsAndVersionsToReindex
+				idsAndVersionsToReindex = []
+				writeUInt(this.getIndexingState(), lastIndexedVersion = idsAndVersionsToInitialize.lastVersion, 8)
+			} else {
+				let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
+				if (resumeFromKey) {
+					await clearEntries(resumeFromKey, (sourceId) => true)
+					console.info(this.name, 'Resuming from key', resumeFromKey)
+					idsAndVersionsToInitialize = Source.getIdsAndVersionFromKey(resumeFromKey)
+				}
+			}
+			this.initializing = false
+			let min = Infinity
+			let max = 0
+			if (idsAndVersionsToInitialize) {
 				this.isInitialBuild = true
-				this.queue = new IteratorThenMap(idsAndVersionsToReindex.map(({id, version}) =>
-					[id, new InitializingIndexRequest(version)]), idsAndVersionsToReindex.length)
+				this.queue = new IteratorThenMap(idsAndVersionsToInitialize.map(({id, version}) =>
+					[id, new InitializingIndexRequest(version)]), idsAndVersionsToInitialize.length)
 				this.state = 'building'
 				console.info('Created queue for initial index build', this.name)
 				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
-				console.info('Finished initial index build of', this.name, 'with', idsAndVersionsToReindex.length, 'entries')
+				console.info('Finished initial index build of', this.name, 'with', idsAndVersionsToInitialize.length, 'entries')
 				this.queue = this.queue.deferredMap
-				if (this.queue.size)
-					await this.requestProcessing(DEFAULT_INDEXING_DELAY)
-
 				this.isInitialBuild = false
 				await db.remove(INITIALIZING_LAST_KEY)
-				return
-			} else if (idsAndVersionsToReindex.length > 0) {
+			}
+			if (idsAndVersionsToReindex.length > 0) {
 				this.state = 'resuming'
 				idsAndVersionsToReindex.sort((a, b) => a.version > b.version ? 1 : a.version < b.version ? -1 : 0)
 				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
 				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 				// clear out all the items that we are indexing, since we don't have their previous state
-				let result
-				db.getRange({
-					start: Buffer.from([2])
-				}).map(({ key, value }) => {
-					let [, sourceId] = fromBufferKey(key, true)
-					if (setOfIds.has(sourceId)) {
-						result = db.remove(key)
-					}
-				}).asArray
-				await result // just need to wait for last one to finish (guarantees all others are finished)
+				await clearEntries(Buffer.from([2]), (sourceId) => setOfIds.has(sourceId))
 
 				this.state = 'initializing queue'
 				for (let { id, version } of idsAndVersionsToReindex) {
@@ -511,8 +513,22 @@ export const Index = ({ Source }) => {
 				return
 			}
 			//this.updateProcessMap(lastIndexedVersion)
-			this.state = 'processing'
-			await this.requestProcessing(DEFAULT_INDEXING_DELAY)
+			if (this.queue.size > 0) {
+				this.state = 'processing'
+				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
+			}
+			function clearEntries(start, condition) {
+				let result
+				db.getRange({
+					start
+				}).forEach(({ key, value }) => {
+					let [, sourceId] = fromBufferKey(key, true)
+					if (condition(sourceId)) {
+						result = db.remove(key)
+					}
+				})
+				return result // just need to wait for last one to finish (guarantees all others are finished)
+			}
 		}
 
 		static delay(ms) {
@@ -613,8 +629,8 @@ export const Index = ({ Source }) => {
 				}*/
 				return returnFullKeyValue ? {
 					key: sourceId,
-					value: value !== null ? value.length > 0 ? this.parseEntryValue(value) : Source.for(sourceId) : value,
-				} : value.length > 0 ? this.parseEntryValue(value) : Source.for(sourceId)
+					value: value !== null ? value.length > 0 ? this.parseEntryValue(value) : Source.get(sourceId) : value,
+				} : value.length > 0 ? this.parseEntryValue(value) : Source.get(sourceId)
 			})
 		}
 		/**
@@ -1027,6 +1043,7 @@ Index.getCurrentStatus = () => {
 		name: Index.name,
 		queued: Index.queue.size,
 		state: Index.state,
+		concurrencyLevel: Index.averageConcurrencyLevel,
 		pendingRequests: Array.from(Index.pendingRequests),
 	}))
 }
