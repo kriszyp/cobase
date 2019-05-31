@@ -10,7 +10,7 @@ import { DEFAULT_CONTEXT } from './RequestContext'
 //import { mergeProgress, registerProcessing, whenClassIsReady, DEFAULT_CONTEXT } from './UpdateProgress'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
-const DEFAULT_INDEXING_CONCURRENCY = 15
+const DEFAULT_INDEXING_CONCURRENCY = 40
 const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
 const SEPARATOR_NEXT_BYTE = Buffer.from([31])
 const INDEXING_STATE = Buffer.from([1, 5])
@@ -302,7 +302,7 @@ export const Index = ({ Source }) => {
 			try {
 				return serialize(value, {
 					startOffset,
-					shared: this.getSharedStructure(),
+					shared: this.sharedStructure,
 					avoidShareUpdate: !firstValue
 				})
 			} catch (error) {
@@ -615,7 +615,7 @@ export const Index = ({ Source }) => {
 			if (statusByte >= COMPRESSED_STATUS_24) {
 				buffer = this.uncompressEntry(buffer, statusByte, 0)
 			}
-			return parseLazy(buffer, { shared: this.getSharedStructure() })
+			return parseLazy(buffer, { shared: this.sharedStructure })
 		}
 
 		// Get a range of indexed entries for this id (used by Reduced)

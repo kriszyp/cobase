@@ -1,4 +1,4 @@
-export { Persisted, Cached, Persistable, secureAccess } from './Persisted'
+export { Persisted, Cached, Persistable, secureAccess, writeCommonStructures } from './Persisted'
 export { Index } from './KeyIndex'
 export { RequestContext } from './RequestContext'
 export { Reduced } from './Reduced'

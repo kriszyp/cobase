@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { createSerializer, createSharedStructure, serialize, parse, parseLazy, asBlock, isBlock, copy, reassignBuffers } from 'dpack'
+import { createSerializer, createSharedStructure, readSharedStructure, serialize, parse, parseLazy, asBlock, isBlock, copy, reassignBuffers } from 'dpack'
 import * as lmdb from 'lmdb-store'
 import when from './util/when'
 import { WeakValueMap } from './util/WeakValueMap'
@@ -37,6 +37,7 @@ const COMPRESSION_THRESHOLD = 1024
 const AS_SOURCE = {}
 const EXTENSION = '.mdpack'
 const DB_FORMAT_VERSION = 0
+const allStores = new Map()
 
 export const VERSION = Symbol('version')
 export const STATUS_BYTE = Symbol('statusByte')
@@ -322,8 +323,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				db.removeSync(key)
 				count++
 			}
-			this.sharedStructureBuffer = null
-			this.sharedStructureVersion = 0
 		})
 		console.info('Cleared the database', this.name, 'of', count, 'entries, rebuilding')
 	}
@@ -355,6 +354,21 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static initializeDB() {
 		const db = this.db
 
+		if (sharedStructureDirectory) {
+			let sharedFile = sharedStructureDirectory + '/' + this.name + '.dpack'
+			if (fs.existsSync(sharedFile)) {
+				let sharedStructureBuffer
+				this.sharedStructure = readSharedStructure(sharedStructureBuffer = fs.readFileSync(sharedFile))
+				let hmac = crypto.createHmac('sha256', 'cobase')
+				hmac.update(sharedStructureBuffer)
+				this.hashedVersion = this.hashedVersion ^ parseInt(hmac.digest('hex').slice(-6), 16)
+			}
+			if (sharedInstrumenting && !this.sharedStructure) {
+				this.sharedStructure = createSharedStructure()
+				this.hashedVersion = Math.round(Math.random() * 10000) // we have to completely restart every time in this case
+			}
+		}
+
 		const processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
 		let initializingProcess
 		db.transaction(() => {
@@ -380,53 +394,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let didReset
 		let state = stateDPack && parse(stateDPack)
 		if (state) {
-			this.dbVersion = state.dbVersion ^ (DB_FORMAT_VERSION << 12)
+			this.dbVersion = state.dbVersion
 			this.startVersion = state.startVersion
 		}
 		return initializingProcess
-	}
-
-	static getSharedStructure() {
-		if (this.sharedStructure === false)
-			return null
-		let db = this.db
-		if (this.sharedStructureBuffer && readUInt(this.sharedStructureBuffer) === this.sharedStructureVersion ||
-			this.sharedStructureVersion === 271828182845904 && !db.get(SHARED_STRUCTURE_KEY)) {
-			// we have the latest structure, use it
-			return this.sharedStructure
-		}
-		if (!this._remapListener)
-			this._remapListener = db.on('remap', () => {
-				this.sharedStructureBuffer = null
-			})
-		db.get(SHARED_STRUCTURE_KEY, buffer => {
-			this.sharedStructureBuffer = buffer // get the shared memory copy
-			this.sharedStructureVersion = this.sharedStructureBuffer ? readUInt(this.sharedStructureBuffer) : 271828182845904
-
-			this.sharedStructure = createSharedStructure(this.sharedStructureBuffer && this.sharedStructureBuffer.slice(8), {
-				onUpdate: () => {
-					// create the new shared buffer (at least tentatively, assuming the transaction goes through)
-					var newSharedBuffer = Buffer.concat([Buffer.alloc(8), this.sharedStructure.serialized])
-					writeUInt(newSharedBuffer, this.sharedStructureVersion + 1)
-					db.transaction(() => {
-						// we have to do this synchronously so we know immediately if there were any changes from other processes
-						if (this.sharedStructureBuffer ? !(this.sharedStructureVersion === readUInt(this.sharedStructureBuffer)) :
-							db.get(SHARED_STRUCTURE_KEY)) {
-							// The serialize should be able to re-retrieve the shared buffer and recover from this
-							throw new ShareChangeError('Shared structure has changed')
-						}
-						// invalidate the old one, directly writing to shared memory
-						if (this.sharedStructureBuffer)
-							writeUInt(this.sharedStructureBuffer, 0)
-						// and now write the new one
-						db.putSync(SHARED_STRUCTURE_KEY, newSharedBuffer)
-						db.get(SHARED_STRUCTURE_KEY, buffer => this.sharedStructureBuffer = buffer)
-						this.sharedStructureVersion++
-					})
-				}
-			})
-		})
-		return this.sharedStructure
 	}
 
 	static getStructureVersion() {
@@ -439,10 +410,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
 		
 		clearTimeout(this._registerTimeout)
-		if (global[this.name]) {
+		if (allStores.get(this.name)) {
 			throw new Error(this.name + ' already registered')
 		}
-		global[this.name] = this
+		if (!storesObject[this.name])
+			storesObject[this.name] = this
+		allStores.set(this.name, this)
 		for (let Source of this.Sources || []) {
 			if (Source.start)
 				Source.start()
@@ -461,9 +434,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name + EXTENSION, options)
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization && false
-		return when(this.getStructureVersion(), dbVersion => {
+		return when(this.getStructureVersion(), structureVersion => {
 			//console.log("db version", this.name, dbVersion)
-			this.version = dbVersion
+			this.hashedVersion = (structureVersion || 0) ^ (DB_FORMAT_VERSION << 12)
+
 			let initializingProcess = this.initializeDB()
 			const db = this.db
 			registerClass(this)
@@ -544,7 +518,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	static initializeData() {
 		const db = this.db
-		if (this.dbVersion == this.version) {
+		if (this.dbVersion == this.hashedVersion) {
 			// update to date
 		} else {
 			//console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
@@ -659,7 +633,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let version = this.startVersion
 		this.db.putSync(DB_VERSION_KEY, serialize({
 			startVersion: version,
-			dbVersion: this.version ^ (DB_FORMAT_VERSION << 12)
+			dbVersion: this.hashedVersion
 		}))
 		let versionBuffer = Buffer.allocUnsafe(8)
 		writeUInt(versionBuffer, this.lastVersion)
@@ -815,6 +789,16 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return buffer.slice(startOfSizeTable - headerSize)
 	}
+	static writeCommonStructure() {
+		let sharedFile = sharedStructureDirectory + '/' + this.name + '.dpack'
+		if (this.sharedStructure.serializeCommonStructure) {
+			let structureBuffer = this.sharedStructure.serializeCommonStructure()
+			if (structureBuffer.length > 0) {
+				fs.writeFileSync(sharedFile, structureBuffer)
+				return true
+			}
+		}
+	}
 })
 
 const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Base {
@@ -829,7 +813,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static get transitions() {
 		return this._transitions || (this._transitions = new Map())
 	}
-	static get(id, mode) {
+	static get(id, mode?) {
 		let context = currentContext
 		/*
 		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
@@ -930,7 +914,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			version,
 			getData: () => {
 				let data = parseLazy(valueBuffer, {
-					shared: this.getSharedStructure()
+					shared: this.sharedStructure
 				})
 				let type = typeof data
 				if (type === 'object') {
@@ -1072,8 +1056,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			try {
 				buffer = serialize(object, {
 					startOffset: start,
-					shared: this.getSharedStructure(),
-					avoidShareUpdate: this.lastSerializedId === id // don't update share if it is the same as last time or it will see all properties as repeaters
+					shared: this.sharedStructure
 				})
 			} catch (error) {
 				if (error instanceof ShareChangeError) {
@@ -1084,7 +1067,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					throw error
 			}
 			buffer = this.setupSizeTable(buffer, start, 8)
-			this.lastSerializedId = id
 		}
 
 		buffer[0] = 0
@@ -1140,7 +1122,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static Sources: any[]
 	static fetchAllIds: () => {}[]
 
-	static get(id, mode) {
+	static get(id, mode?) {
 		let context = currentContext		
 		return when(this.whenUpdatedInContext(context), () => {
 			let entry = this.getFromDB(id)
@@ -1274,10 +1256,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static async resetAll(clearDb) {
 		//console.log('reseting', this.name)
 		let version = this.startVersion = getNextVersion()
-		let allIds = await (this.fetchAllIds ? this.fetchAllIds() : [])
 		if (clearDb) {
 			this.clearAllData()
 		}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them
+		let allIds = await (this.fetchAllIds ? this.fetchAllIds() : [])
 		let committed
 		let queued = 0
 		for (let id of allIds) {
@@ -1596,12 +1578,32 @@ secureAccess.checkPermissions = () => true
 import { Reduced } from './Reduced'
 
 let clearOnStart
+let sharedStructureDirectory
+let sharedInstrumenting
+let storesObject = global
 export function configure(options) {
 	Persisted.dbFolder = options.dbFolder
 	Cached.dbFolder = options.cacheDbFolder || options.dbFolder
 	Persistable.dbFolder = options.cacheDbFolder || options.dbFolder
 	globalDoesInitialization = options.doesInitialization
 	clearOnStart = options.clearOnStart
+	if (options.storesObject) {
+		storesObject = options.storesObject
+	}
+	if (options.sharedStructureDirectory)
+		sharedStructureDirectory = options.sharedStructureDirectory
+	if (options.sharedInstrumenting) {
+		sharedInstrumenting = true
+		console.warn('sharedInstrumenting is turned on!!!!!!!')
+	}
+}
+export function writeCommonStructures() {
+	let wrote = []
+	for (let [name, store] of allStores) {
+		if (store.writeCommonStructure())
+			wrote.push(name)
+	}
+	return wrote
 }
 
 // write a 64-bit uint (could be optimized/improved)
