@@ -11,7 +11,7 @@ const NOMINAL_SIZE = 100
 // this is the speed of decay towards expiration. Reducing this will result in
 // more "accurate" expiration timing, but will also increase the overhead of the
 // algorithm
-const DECAY_RATE = 1.7
+const DECAY_RATE = 2.7
 
 const DECAY_INTERVAL = 10000
 const DECAY_REMOVAL = 10
