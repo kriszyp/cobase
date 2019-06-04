@@ -580,25 +580,20 @@ export const Index = ({ Source }) => {
 		}
 
 		static get(id) {
-/*
+
 			// First: ensure that all the source instances are up-to-date
 			const context = currentContext
-			return when(this.constructor.whenUpdatedInContext(context), () => {
+			return when(this.whenUpdatedInContext(context), () => {
 				if (context)
 					context.setVersion(lastIndexedVersion)
-				return when(super.valueOf(true), (value) => {
-					expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
-					return value
+				let keyPrefix = toBufferKey(id)
+				let iterable = this.getIndexedValues({
+					start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
+					end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
+					recordApproximateSize: true,
 				})
+				return this.returnsIterables ? iterable : iterable.asArray
 			})
-*/
-			let keyPrefix = toBufferKey(id)
-			let iterable = this.getIndexedValues({
-				start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
-				end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
-				recordApproximateSize: true,
-			})
-			return this.returnsIterables ? iterable : iterable.asArray
 		}
 
 		static getIndexedKeys(id) {
@@ -622,15 +617,23 @@ export const Index = ({ Source }) => {
 		static getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
 			const db: Database = this.db
 			let approximateSize = 0
+			let promises = []
 			return db.getRange(range).map(({ key, value }) => {
 				let [, sourceId] = fromBufferKey(key, true)
 				/*if (range.recordApproximateSize) {
 					let approximateSize = approximateSize += key.length + (value && value.length || 10)
 				}*/
+				let parsedValue = value !== null ? value.length > 0 ? this.parseEntryValue(value) : Source.get(sourceId) : value
+				if (parsedValue && parsedValue.then) {
+					return parsedValue.then(parsedValue => returnFullKeyValue ? {
+						key: sourceId,
+						value: parsedValue,
+					} : parsedValue)
+				}
 				return returnFullKeyValue ? {
 					key: sourceId,
-					value: value !== null ? value.length > 0 ? this.parseEntryValue(value) : Source.get(sourceId) : value,
-				} : value.length > 0 ? this.parseEntryValue(value) : Source.get(sourceId)
+					value: parsedValue,
+				} : parsedValue
 			})
 		}
 		/**
@@ -682,15 +685,9 @@ export const Index = ({ Source }) => {
 		}
 
 		valueOf() {
-			// First: ensure that all the source instances are up-to-date
-			const context = currentContext
-			return when(this.constructor.whenUpdatedInContext(context), () => {
-				if (context)
-					context.setVersion(lastIndexedVersion)
-				return when(super.valueOf(true), (value) => {
-					expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
-					return value
-				})
+			return when(super.valueOf(true), (value) => {
+				expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
+				return value
 			})
 		}
 

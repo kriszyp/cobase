@@ -1025,7 +1025,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			lastVersion = Math.max(lastVersion, idAndVersion.version)
 		}
 		if (array) {
-			 return array
+			array.lastVersion = lastVersion
+			return array
 		}
 		console.info('getInstanceIdsAndVersionsSince from ', this.name, 'is a full reset', i)
 		let idsAndVersions = getIdsAndVersions()
