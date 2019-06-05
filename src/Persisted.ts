@@ -840,6 +840,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			transition.result = value
 		}
 		let buffer = this.serializeEntryValue(value, event.version, true, id)
+		this.lastVersion = event.version
 		return this.whenWritten = this.db.put(toBufferKey(id), buffer)
 	}
 
@@ -982,7 +983,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
 		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => this.whenWritten).then(() => {
-			console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
+			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let versionBuffer = this.db.get(LAST_VERSION_IN_DB_KEY)
 			this.lastVersion = this.lastVersion || (versionBuffer ? readUInt(versionBuffer) : 0)
 			let isFullReset = this.startVersion > sinceVersion
@@ -1038,6 +1039,19 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		idsAndVersions.length = i
 		idsAndVersions.lastVersion = lastVersion
 		return idsAndVersions
+	}
+	static initializeDB() {
+		let initializingProcess = super.initializeDB()
+		this.db.on('beforecommit', () => {
+			// before each commit, save the last version as well (if it has changed)
+			if (this.lastVersionCommitted === this.lastVersion)
+				return
+			let versionBuffer = Buffer.alloc(8)
+			writeUInt(versionBuffer, this.lastVersion)
+			this.db.put(LAST_VERSION_IN_DB_KEY, versionBuffer)
+			this.lastVersionCommitted = this.lastVersion
+		})
+		return initializingProcess
 	}
 
 	static remove(id, event?) {
@@ -1349,11 +1363,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				written = db.put(keyAsBuffer, this.createHeader(version), conditionalHeader)
 			}
 			this.whenWritten = written
-			
-			// TODO: Determine when the writes are submitted and just update this buffer over and over
-			let versionBuffer = Buffer.allocUnsafe(8)
-			writeUInt(versionBuffer, this.lastVersion = Math.max(this.lastVersion, version))
-			db.put(LAST_VERSION_IN_DB_KEY, versionBuffer)
+			this.lastVersion = Math.max(this.lastVersion, version)
 			if (!event.whenWritten)
 				event.whenWritten = written
 			if (by.previousEntry) {
@@ -1440,7 +1450,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static initializeData() {
-		console.log('initializeData', this.name)
+		//console.log('initializeData', this.name)
 		const initialized = super.initializeData()
 		return when(initialized, () => {
 			let receivedPendingVersion = []
@@ -1456,7 +1466,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					let queued = 0
 					for (let { id, version } of ids) {
 						//min = Math.min(version, min)
-						//max = Math.max(version, max)
+						this.lastVersion = Math.max(this.lastVersion, version)
 						let inMemoryInstance = this.instancesById && this.instancesById.get(id)
 						if (inMemoryInstance) {
 							let event = new ReplacedEvent()
