@@ -40,7 +40,6 @@ const DB_FORMAT_VERSION = 0
 const allStores = new Map()
 
 export const VERSION = Symbol('version')
-export const STATUS_BYTE = Symbol('statusByte')
 
 let globalDoesInitialization
 
@@ -158,7 +157,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static assignPreviousValue(id, by) {
-		by.previousValue = this.getFromDB(id)
+		by.previousEntry = this.getFromDB(id)
 	}
 
 	static index(propertyName: string, indexBy?: (value, sourceKey) => any) {
@@ -820,10 +819,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			context.ifModifiedSince = undefined
 		}*/
 		let entry = this.getFromDB(id)
-		if (typeof mode === 'object') {
-			entry = copy(entry)
+		if (typeof mode === 'object' && entry && entry.value) {
+			return copy(entry.value)
 		}
-		return entry
+		return entry && entry.value
 	}
 
 	static is(id, value, event) {
@@ -845,14 +844,17 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 
-
+	_valueCache: Map<any, any>
 	static getFromDB(id, conditional?) {
 		let transition = this.transitions.get(id) // if we are transitioning, return the transition result
 		if (transition) {
 			if (transition.invalidating) {
 				return new Invalidated(transition.newVersion)
 			} else {
-				return transition.result
+				return {
+					value: transition.result,
+					version: transition.fromVersion
+				}
 			}
 		}
 		let db = this.db
@@ -873,16 +875,19 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			let value = valueCache.get(id)
 			if (value && value[VERSION] === entry.version) {
 				expirationStrategy.useEntry(value, size/* >> (entryBuffer.buffer.onInvalidation ? 2 : 0)*/)
-				return value
+				entry.value = value
+				return entry
 			}
 		} else {
 			this._valueCache = valueCache = new WeakValueMap()
 		}
-		let value = entry.getData()
-		valueCache.set(id, value)
-		if (value)
+		let value = entry.value = entry.getData()
+		if (value) {
+			valueCache.set(id, value)
+			value[VERSION] = entry.version
 			expirationStrategy.useEntry(value, size/* >> (entryBuffer.buffer.onInvalidation ? 2 : 0)*/)
-		return value
+		}
+		return entry
 	}
 
 	static copyAndParseValue(buffer) {
@@ -912,8 +917,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		// do this later, so it can be done after the read transaction closes
 		return {
 			version,
+			statusByte,
 			getData: () => {
-				let data = parseLazy(valueBuffer, {
+				return parseLazy(valueBuffer, {
 					shared: this.sharedStructure
 				})
 				let type = typeof data
@@ -931,8 +937,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				} else {
 					return data // can't assign a version to undefined
 				}
-				data[VERSION] = version
-				data[STATUS_BYTE] = statusByte
 				return data
 			}
 		}
@@ -967,7 +971,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			} : {
 				key: fromBufferKey(key),
 				value: entry,
-				version: entry && entry[VERSION],
+				version: entry && entry.version,
 			}
 		}).asArray)
 	}
@@ -1128,10 +1132,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return when(this.whenUpdatedInContext(context), () => {
 			let entry = this.getFromDB(id)
 			if (entry) {
-				if (entry[STATUS_BYTE] === INVALIDATED_STATE) {
+				if (entry.statusByte === INVALIDATED_STATE) {
 					let oldTransition = this.transitions.get(id)
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
-					let transition = this.runTransform(id, entry[VERSION], false, mode)
+					let transition = this.runTransform(id, entry.version, false, mode)
 					if (oldTransition && oldTransition.abortables) {
 						// if it is still in progress, we can abort it and replace the result
 						oldTransition.replaceWith = transition.result
@@ -1145,7 +1149,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				if (context && context.ifModifiedSince >= this.cachedVersion) {
 					return NOT_MODIFIED
 				}
-				return entry
+				return entry.value
 			}
 			let version = getNextVersion()
 			let transition = this.runTransform(id, version, true, mode)
@@ -1210,10 +1214,12 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				} else {
 					result = convertToBlocks(result)
 					transition.result = result
-					let buffer = this.serializeEntryValue(result, transition.fromVersion, typeof mode === 'object', id)
+					let version = transition.fromVersion
+					let buffer = this.serializeEntryValue(result, version, typeof mode === 'object', id)
 					this.whenWritten = committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
 					let valueCache = this._valueCache
 					if (valueCache) {
+						result[VERSION] = version
 						valueCache.set(id, result)
 					}
 					expirationStrategy.useEntry(result, buffer.length)
@@ -1285,10 +1291,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		let previousEntry
 		let previousVersion, previousStatusByte
 		if (this.updateWithPrevious) {
-			previousEntry = by.previousValue = this.getFromDB(id)
+			previousEntry = by.previousEntry = this.getFromDB(id)
 			if (previousEntry) {
-				previousVersion = previousEntry[VERSION]
-				previousStatusByte = previousEntry[STATUS_BYTE]
+				previousVersion = previousEntry.version
+				previousStatusByte = previousEntry.statusByte
 			}
 		}
 		let version = event.version
@@ -1350,8 +1356,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			db.put(LAST_VERSION_IN_DB_KEY, versionBuffer)
 			if (!event.whenWritten)
 				event.whenWritten = written
-			if (by.previousValue) {
-				by.previousValue = written.then((result) => {
+			if (by.previousEntry) {
+				by.previousEntry = written.then((result) => {
 					if (result === false) {
 //						console.log('Value had changed during invalidation', id, this.name, version)
 						this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
@@ -1363,7 +1369,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						} else {
 							// it was no longer the same as what we read, re-run, as we have a more recent update
 							this.writeEntry(id, event, by)
-							return by.previousValue
+							return by.previousEntry
 						}
 					}
 					return previousEntry
@@ -1618,8 +1624,8 @@ function readUInt(buffer, offset?) {
 
 export class Invalidated {
 	constructor(version) {
-		this[VERSION] = version
+		this.version = version
 	}
-	[VERSION]: number
+	version: number
 }
-Invalidated.prototype[STATUS_BYTE] = INVALIDATED_STATE
+Invalidated.prototype.statusByte = INVALIDATED_STATE

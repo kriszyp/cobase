@@ -77,7 +77,7 @@ export const Index = ({ Source }) => {
 		static async indexEntry(id, indexRequest: IndexRequest) {
 			let { previousEntry, deleted, sources, triggers, version } = indexRequest
 			let operations: OperationsArray = []
-			let previousVersion = previousEntry && previousEntry[VERSION]
+			let previousVersion = previousEntry && previousEntry.version
 			let eventUpdateSources = []
 			let idAsBuffer = toBufferKey(id)
 
@@ -89,7 +89,10 @@ export const Index = ({ Source }) => {
 				try {
 					if (previousEntry !== undefined) { // if no data, then presumably no references to clear
 						// use the same mapping function to determine values to remove
-						previousEntries = await this.indexBy(previousEntry, id)
+						let previousData = previousEntry.value
+						previousEntries = this.indexBy(previousData, id)
+						if (previousEntries && previousEntries.then)
+							previousEntries = await previousEntries
 						if (typeof previousEntries == 'object' && previousEntries) {
 							if (!(previousEntries instanceof Array)) {
 								previousEntries = [previousEntries]
@@ -113,7 +116,9 @@ export const Index = ({ Source }) => {
 					let attempts = 0
 					let data
 					try {
-						data = await Source.get(id, INDEXING_MODE)
+						data = Source.get(id, INDEXING_MODE)
+						if (data && data.then)
+							data = await data
 					} catch(error) {
 						try {
 							// try again
@@ -123,11 +128,14 @@ export const Index = ({ Source }) => {
 							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
 						}
 					}
-					await Source.whenValueCommitted
+					if (Source.whenValueCommitted && Source.whenValueCommitted.then)
+						await Source.whenValueCommitted
 					if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 					// let the indexBy define how we get the set of values to index
 					try {
-						entries = data === undefined ? data : await this.indexBy(data, id)
+						entries = data === undefined ? data : this.indexBy(data, id)
+						if (entries && entries.then)
+							entries = await entries
 					} catch(error) {
 						if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 						console.warn('Error indexing value', error, 'for', this.name, id)
@@ -387,7 +395,7 @@ export const Index = ({ Source }) => {
 						await this.delay(this.nice) // short delay for other processing to occur
 					for (let [id, indexRequest] of queue) {
 						let { previousEntry } = indexRequest
-						previousEntry = indexRequest.previousEntry = await previousEntry
+						previousEntry = indexRequest.previousEntry = (previousEntry && previousEntry.then) ? await previousEntry : previousEntry
 						if (previousEntry instanceof Invalidated) {
 							// delete from our queue
 							this.queue.delete(id)
@@ -901,7 +909,7 @@ export const Index = ({ Source }) => {
 			let context = currentContext
 			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
 
-			let previousEntry = by && by.previousValue
+			let previousEntry = by && by.previousEntry
 			let id = by && (typeof by === 'object' ? by.id : by) // if we are getting an update from a source instance
 			if (by && by.constructor === this || // our own instances can notify us of events, ignore them
 				this.otherProcesses && event.sourceProcess && 
