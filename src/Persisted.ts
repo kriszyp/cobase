@@ -1015,7 +1015,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			return idAndVersion
 		})
 		let array = arrayThreshold > 0 ? [] : null
-		let lastVersion = 0
+		let lastVersion = getNextVersion()
 		let i = 0
 		for (let idAndVersion of getIdsAndVersions()) {
 			if (i >= arrayThreshold) {// stop recording array
@@ -1160,12 +1160,16 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					return transition.result
 				}
 				// TODO: copy this to super/Persisted.get
-				if (context && context.ifModifiedSince >= this.cachedVersion) {
+				if (context)
+					context.setVersion(entry.version)
+				if (context && context.ifModifiedSince >= entry.version) {
 					return NOT_MODIFIED
 				}
 				return entry.value
 			}
 			let version = getNextVersion()
+			if (context)
+				context.setVersion(version)
 			let transition = this.runTransform(id, version, true, mode)
 			when(transition.result, (result) => {
 				if (result !== undefined && !transition.invalidating) {

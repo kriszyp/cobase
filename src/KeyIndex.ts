@@ -126,6 +126,7 @@ export const Index = ({ Source }) => {
 						} catch(error) {
 							if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
+							data = undefined
 						}
 					}
 					if (Source.whenValueCommitted && Source.whenValueCommitted.then)
@@ -139,6 +140,7 @@ export const Index = ({ Source }) => {
 					} catch(error) {
 						if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 						console.warn('Error indexing value', error, 'for', this.name, id)
+						entries = undefined
 					}
 					if (typeof entries != 'object' || !(entries instanceof Array)) {
 						// allow single primitive key
@@ -474,6 +476,8 @@ export const Index = ({ Source }) => {
 				console.info('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
 				this.state = 'clearing'
 				this.clearAllData()
+				if (idsAndVersionsToReindex.length > 0)
+					this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 6]))
 				this.updateDBVersion()
 				console.info('Cleared index', this.name)
 				idsAndVersionsToInitialize = idsAndVersionsToReindex
@@ -490,7 +494,7 @@ export const Index = ({ Source }) => {
 			this.initializing = false
 			let min = Infinity
 			let max = 0
-			if (idsAndVersionsToInitialize) {
+			if (idsAndVersionsToInitialize && idsAndVersionsToInitialize.length > 0) {
 				this.isInitialBuild = true
 				this.queue = new IteratorThenMap(idsAndVersionsToInitialize.map(({id, version}) =>
 					[id, new InitializingIndexRequest(version)]), idsAndVersionsToInitialize.length)
