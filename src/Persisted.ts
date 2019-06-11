@@ -746,7 +746,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (headerSize)
 				buffer.copy(compressedData, 0, 0, headerSize)
 			if (longSize) {
-				writeUInt(buffer, uncompressedLength, headerSize)
+				writeUInt(compressedData, uncompressedLength, headerSize)
 				compressedData[0] = COMPRESSED_STATUS_48
 			} else {
 				compressedData.writeUInt32BE(uncompressedLength, headerSize)
