@@ -477,7 +477,7 @@ export const Index = ({ Source }) => {
 				this.state = 'clearing'
 				this.clearAllData()
 				if (idsAndVersionsToReindex.length > 0)
-					this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 6]))
+					this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 8]))
 				this.updateDBVersion()
 				console.info('Cleared index', this.name)
 				idsAndVersionsToInitialize = idsAndVersionsToReindex
@@ -534,9 +534,13 @@ export const Index = ({ Source }) => {
 				db.getRange({
 					start
 				}).forEach(({ key, value }) => {
-					let [, sourceId] = fromBufferKey(key, true)
-					if (condition(sourceId)) {
-						result = db.remove(key)
+					try {
+						let [, sourceId] = fromBufferKey(key, true)
+						if (condition(sourceId)) {
+							result = db.remove(key)
+						}
+					} catch(error) {
+						console.error(error)
 					}
 				})
 				return result // just need to wait for last one to finish (guarantees all others are finished)

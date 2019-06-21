@@ -1284,7 +1284,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		if (clearDb) {
 			this.clearAllData()
 		}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them
-		let allIds = await (this.fetchAllIds ? this.fetchAllIds() : [])
+		let allIds = await (this.fetchAllIds ? this.fetchAllIds() :
+			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ? this.Sources[0].getInstanceIds() : [])
 		let committed
 		let queued = 0
 		for (let id of allIds) {
