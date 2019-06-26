@@ -835,7 +835,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 		this.updated(event, { id })
 		let transition = this.transitions.get(id)
-		if (transition) { // non cache entities won't have a transition
+		if (transition) { // non cache entities won't have a transition, TODO, need to fix that?
 			transition.invalidating = false
 			transition.result = value
 		}
@@ -1194,6 +1194,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			abortables: []
 		}
 		this.transitions.set(id, transition)
+		const removeTransition = () => {
+			if (this.transitions.get(id) === transition && !transition.invalidating)
+				this.transitions.delete(id)
+		}
 
 		let hasPromises
 		let inputData = this.Sources ? this.Sources.map(source => {
@@ -1224,8 +1228,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				//console.log('conditional header for writing transform ' + (result ? 'write' : 'delete'), id, this.name, conditionalHeader)
 				if (result === undefined) {
 					if (conditionalHeader === null) {
-						// already gone, nothing to do
-						committed = Promise.resolve(true)
+						// already an undefined entry, nothing to do (but clear out the transition)
+						return removeTransition()
 					} else {
 						this.whenWritten = committed = this.db.remove(toBufferKey(id), conditionalHeader)
 					}
@@ -1244,8 +1248,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				}
 				this.whenValueCommitted = committed
 				committed.then((successfulWrite) => {
-					if (this.transitions.get(id) === transition && !transition.invalidating)
-						this.transitions.delete(id)
+					removeTransition()
 					if (!successfulWrite) {
 						//console.log('unsuccessful write of transform, data changed, updating', id, this.name, this.db.get(toBufferKey(id)))
 						this.updated(new ReloadEntryEvent(), { id })
@@ -1256,13 +1259,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				if (error.__CANCEL__) {
 					return transition.replaceWith
 				}
-				if (this.transitions.get(id) === transition && !transition.invalidating)
-					this.transitions.delete(id)
+				removeTransition()
 				throw error
 			})
 		} catch (error) {
-			if (this.transitions.get(id) === transition && !transition.invalidating)
-				this.transitions.delete(id)
+			removeTransition()
 			throw error
 		}
 		return transition
@@ -1465,7 +1466,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				let lastVersion = this.lastVersion
 
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(async (ids) => {
-					//console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
+					console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
 					let queued = 0
@@ -1485,7 +1486,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 							queued = 0
 						}
 					}
-					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
+					console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
 			}
 			if (receivedPendingVersion.length > 0) {

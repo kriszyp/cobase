@@ -197,7 +197,6 @@ export const Index = ({ Source }) => {
 				earliestPendingVersion = firstInQueue.version
 				break
 			}
-			const sourceWhenWritten = Source.whenWritten
 			let committed
 			if (operations.length > 0) {
 				committed = this.submitWrites(operations, previousVersion || 0)
@@ -205,7 +204,7 @@ export const Index = ({ Source }) => {
 				// still need to update version and send event updates
 				committed = Promise.resolve()
 			}
-			this.lastWriteSync = committed
+			this.lastWriteCommitted = committed
 			// update versions and send updates when promises resolve
 			this.whenWritesComplete(committed, earliestPendingVersion, version, eventUpdateSources, idAsBuffer)
 
@@ -451,6 +450,7 @@ export const Index = ({ Source }) => {
 					this.state = 'processing'
 					await Promise.all(indexingInProgress) // then wait for all indexing to finish everything
 				} while (queue.size > 0)
+				await this.lastWriteCommitted
 				if (initialQueueSize > 100) {
 					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
 				}
@@ -598,12 +598,9 @@ export const Index = ({ Source }) => {
 		static get(id) {
 
 			// First: ensure that all the source instances are up-to-date
-			const context = currentContext
-			return when(this.whenUpdatedInContext(context), () => {
-				if (context)
-					context.setVersion(lastIndexedVersion)
+			return when(this.whenUpdatedInContext(), () => {
 				let keyPrefix = toBufferKey(id)
-				let iterable = this.getIndexedValues({
+				let iterable = this._getIndexedValues({
 					start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
 					end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
 					recordApproximateSize: true,
@@ -614,7 +611,7 @@ export const Index = ({ Source }) => {
 
 		static getIndexedKeys(id) {
 			let keyPrefix = toBufferKey(id)
-			return this.getIndexedValues({
+			return this._getIndexedValues({
 				start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
 				end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
 				values: false,
@@ -628,9 +625,22 @@ export const Index = ({ Source }) => {
 			}
 			return parseLazy(buffer, { shared: this.sharedStructure })
 		}
+		static getIndexedValues(range: IterableOptions) {
+			range = range || {}
+			if (!this.initialized)
+				return this.start().then(() => this.getIndexedValues(range))
+			if (range.start !== undefined)
+				range.start = toBufferKey(range.start)
+			else
+				range.start = Buffer.from([2])
+			if (range.end !== undefined)
+				range.end = toBufferKey(range.end)
+			return when(this.whenUpdatedInContext(), () =>
+				this._getIndexedValues(range, !range.onlyValues))
+		}
 
 		// Get a range of indexed entries for this id (used by Reduced)
-		static getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
+		static _getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
 			const db: Database = this.db
 			let approximateSize = 0
 			let promises = []
@@ -669,16 +679,19 @@ export const Index = ({ Source }) => {
 			return this.rebuildIndex()
 		}
 
-		static whenUpdatedInContext(context) {
+		static whenUpdatedInContext(context?) {
 			context = context || currentContext
 			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
-			return when(Source.whenUpdatedInContext(), () => {
+			return when(when(Source.whenUpdatedInContext(), () => {
 				// Go through the expected source versions and see if we are behind and awaiting processing on any sources
 				for (const sourceName in updateContext.expectedVersions) {
 					// if the expected version is behind, wait for processing to finish
 					if (updateContext.expectedVersions[sourceName] > (sourceVersions[sourceName] || 0) && this.queue.size > 0)
 						return this.requestProcessing(0) // up the priority
 				}
+			}), () => {
+				if (context)
+					context.setVersion(lastIndexedVersion)
 			})
 		}
 
@@ -691,6 +704,16 @@ export const Index = ({ Source }) => {
 			//console.log('getInstanceIdsAndVersionsSince from KeyIndex', this.name, version)
 			return this.ready.then(() => {
 				//console.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
+				if (version == 0) { // if we are starting from scratch, we can return everything
+					return when(this.getInstanceIds(), idsAndVersions => {
+						idsAndVersions = idsAndVersions.map(id => ({
+							id,
+							version: getNextVersion(),
+						}))
+						idsAndVersions.isFullReset = true
+						return idsAndVersions
+					})
+				}
 				return []
 			})
 		}
@@ -871,7 +894,7 @@ export const Index = ({ Source }) => {
 			if (waitFor == 'write') {
 				if (this.queue.size === 0) {
 					// if nothing in queue, wait for last write and return
-					return when(this.lastWriteSync, () => ({ written: true }))
+					return when(this.lastWriteCommitted, () => ({ written: true }))
 				}
 				if (!this.requestForWriteNotification) {
 					this.requestForWriteNotification = []

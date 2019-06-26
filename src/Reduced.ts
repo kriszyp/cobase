@@ -56,7 +56,7 @@ export class Reduced extends Cached {
 		const indexBufferKey = toBufferKey(this.id)
 		if (level === 1) {
 			// leaf-node, go to source index
-			iterator = this.indexSource.getIndexedValues({
+			iterator = this.indexSource._getIndexedValues({
 				start: Buffer.concat([indexBufferKey, SEPARATOR_BYTE, rangeStartKey]),
 				end: Buffer.concat([indexBufferKey, SEPARATOR_BYTE, rangeEndKey]),
 			}, true)[Symbol.iterator]()
