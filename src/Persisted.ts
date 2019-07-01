@@ -28,6 +28,7 @@ const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 3]) // table metadata 2
 const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
 const SHARED_STRUCTURE_KEY = Buffer.from([1, 10])
 const INITIALIZATION_SOURCE = 'is-initializing'
+const DISCOVERED_SOURCE = 'is-discovered'
 const SHARED_MEMORY_THRESHOLD = 1024
 export const INVALIDATED_ENTRY = { state: 'invalidated'}
 const INVALIDATED_STATE = 1
@@ -830,7 +831,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			let entry = this.getFromDB(id)
 			event = entry ? new ReplacedEvent() : new AddedEvent()
 		}
-		event.triggers = [ INITIALIZATION_SOURCE ]
+		event.triggers = [ DISCOVERED_SOURCE ]
 		event.source = { constructor: this, id }
 
 		this.updated(event, { id })
@@ -838,6 +839,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (transition) { // non cache entities won't have a transition, TODO, need to fix that?
 			transition.invalidating = false
 			transition.result = value
+			transition.fromVersion = transition.newVersion
 		}
 		let buffer = this.serializeEntryValue(value, event.version, true, id)
 		this.lastVersion = event.version
@@ -1174,7 +1176,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			when(transition.result, (result) => {
 				if (result !== undefined && !transition.invalidating) {
 					let event = new DiscoveredEvent()
-					event.triggers = [ INITIALIZATION_SOURCE ]
+					event.triggers = [ DISCOVERED_SOURCE ]
 					event.source = { constructor: this, id }
 					event.version = version
 					this.instanceSetUpdated(event)
@@ -1486,6 +1488,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 							queued = 0
 						}
 					}
+					await this.whenWritten
 					console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
 			}

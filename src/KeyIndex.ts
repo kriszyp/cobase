@@ -554,7 +554,7 @@ export const Index = ({ Source }) => {
 		static sendUpdates(eventSources) {
 			let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
 			// aggregate them by key so as to minimize the number of events we send
-			for ( const { key, triggers, sources } of eventSources) {
+			nextEvent: for ( const { key, triggers, sources } of eventSources) {
 				let entry = updatedIndexEntries.get(key)
 				if (!entry) {
 					updatedIndexEntries.set(key, entry = {
@@ -566,7 +566,7 @@ export const Index = ({ Source }) => {
 					for (let trigger of triggers) {
 						entry.triggers.add(trigger)
 						if (trigger === INITIALIZATION_SOURCE) {
-							return // don't record sources for initialization
+							continue nextEvent // don't record sources for initialization
 						}
 					}
 				}
@@ -583,7 +583,7 @@ export const Index = ({ Source }) => {
 					let event = new ReplacedEvent()
 					let indexEntryUpdate: IndexEntryUpdate = indexedEntry[1]
 					event.sources = indexEntryUpdate.sources
-					event.triggers = indexEntryUpdate.triggers
+					event.triggers = Array.from(indexEntryUpdate.triggers)
 					super.updated(event, { // send downstream
 						id: indexedEntry[0],
 						constructor: this
