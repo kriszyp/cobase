@@ -435,7 +435,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization && false
 		return when(this.getStructureVersion(), structureVersion => {
-			//console.log("db version", this.name, dbVersion)
+			console.log("db version", this.name, this.version, structureVersion, this.getStructureVersion.toString())
 			this.hashedVersion = (structureVersion || 0) ^ (DB_FORMAT_VERSION << 12)
 
 			let initializingProcess = this.initializeDB()
@@ -518,10 +518,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	static initializeData() {
 		const db = this.db
+		console.log('comparing db versions', this.name, this.dbVersion, this.hashedVersion)
 		if (this.dbVersion == this.hashedVersion) {
 			// update to date
 		} else {
-			//console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
+			console.log('transform/database version mismatch, reseting db table', this.name, this.dbVersion, this.version)
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
 			return when(this.resetAll(clearDb), () => clearDb)
@@ -1415,7 +1416,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static _version: number
 	static get version() {
 		if (this.Sources) {
-			return Math.max(this._version || 1, ...(this.Sources.map(Source => Source.version)))
+			return this.Sources.reduce((sum, Source) => sum += (Source.version || 0), this._version)
 		} else {
 			return this._version || 1
 		}
@@ -1468,7 +1469,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				let lastVersion = this.lastVersion
 
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(async (ids) => {
-					console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
+					//console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
 					let queued = 0
@@ -1489,7 +1490,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						}
 					}
 					await this.whenWritten
-					console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
+					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
 			}
 			if (receivedPendingVersion.length > 0) {
