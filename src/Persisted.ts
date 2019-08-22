@@ -435,7 +435,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization && false
 		return when(this.getStructureVersion(), structureVersion => {
-			console.log("db version", this.name, this.version, structureVersion, this.getStructureVersion.toString())
 			this.hashedVersion = (structureVersion || 0) ^ (DB_FORMAT_VERSION << 12)
 
 			let initializingProcess = this.initializeDB()
@@ -518,7 +517,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	static initializeData() {
 		const db = this.db
-		console.log('comparing db versions', this.name, this.dbVersion, this.hashedVersion)
+		//console.log('comparing db versions', this.name, this.dbVersion, this.hashedVersion)
 		if (this.dbVersion == this.hashedVersion) {
 			// update to date
 		} else {
