@@ -261,6 +261,7 @@ export const Index = ({ Source }) => {
 						operations,
 					})
 					if (!this.queuedRequestForWriteNotification) {
+						this.queuedRequestForWriteNotification = Promise.resolve() // in case sendRequest throws
 						this.queuedRequestForWriteNotification = this.sendRequestToWrite(this.earliestProcess, previousVersion).then(() => {
 							this.queuedRequestForWriteNotification = null
 							this.resumeWrites()
@@ -894,6 +895,11 @@ export const Index = ({ Source }) => {
 			if (waitFor == 'write') {
 				if (this.queue.size === 0) {
 					// if nothing in queue, wait for last write and return
+					return when(this.lastWriteCommitted, () => ({ written: true }))
+				}
+				if (this.queuedRequestForWriteNotification) {
+					// if we are waiting for other processes, let it proceed, so don't deadlock
+					// (it is possible for a sequence of processes to wait on each other, but we won't worry about that for now)
 					return when(this.lastWriteCommitted, () => ({ written: true }))
 				}
 				if (!this.requestForWriteNotification) {
