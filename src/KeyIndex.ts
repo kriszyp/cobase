@@ -503,7 +503,7 @@ export const Index = ({ Source }) => {
 				console.info('Created queue for initial index build', this.name)
 				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				console.info('Finished initial index build of', this.name, 'with', idsAndVersionsToInitialize.length, 'entries')
-				this.queue = this.queue.deferredMap
+				this.queue = this.queue.deferredMap || new Map()
 				this.isInitialBuild = false
 				await db.remove(INITIALIZING_LAST_KEY)
 			}

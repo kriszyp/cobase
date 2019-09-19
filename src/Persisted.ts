@@ -1284,9 +1284,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static async resetAll(clearDb) {
 		//console.log('reseting', this.name)
 		let version = this.startVersion = getNextVersion()
-		if (clearDb) {
-			this.clearAllData()
-		}// else TODO: if not clearDb, verify that there are no entries; if there are, remove them
+		//if (clearDb) {TODO: if not clearDb, verify that there are no entries; if there are, remove them
+		this.clearAllData()
 		let allIds = await (this.fetchAllIds ? this.fetchAllIds() :
 			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ? this.Sources[0].getInstanceIds() : [])
 		let committed
