@@ -401,9 +401,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static getStructureVersion() {
-		// default version handling is just to get the static version, but this can be overriden with something
-		// that gets this asynchronously
-		return this.version
+		// default version handling is just to get the static version and hash with source versions, but this can be overriden with something
+		// that gets this asynchronously or uses other logic
+		let aggregateVersion = 0
+		for (let Source of this.Sources || []) {
+			let version = Source.getStructureVersion && Source.getStructureVersion() || 0
+			aggregateVersion = (aggregateVersion ^ version) * 1049011 + (aggregateVersion / 5555555 >>> 0)
+		}
+		return aggregateVersion ^ (this.version || 0)
 	}
 
 	static initialize() {

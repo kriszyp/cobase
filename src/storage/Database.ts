@@ -19,6 +19,7 @@ export interface IterableOptions {
 	values?: boolean
 	reverse?: boolean
 	valueAsBuffer?: boolean
+	waitForInitialization?: boolean
 	limit?: number
 }
 export interface OperationsArray extends Array<{

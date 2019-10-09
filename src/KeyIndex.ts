@@ -396,6 +396,8 @@ export const Index = ({ Source }) => {
 					if (this.nice > 0)
 						await this.delay(this.nice) // short delay for other processing to occur
 					for (let [id, indexRequest] of queue) {
+						if (queue.isReplaced)
+							return
 						let { previousEntry } = indexRequest
 						previousEntry = indexRequest.previousEntry = (previousEntry && previousEntry.then) ? await previousEntry : previousEntry
 						if (previousEntry instanceof Invalidated) {
@@ -498,12 +500,14 @@ export const Index = ({ Source }) => {
 			if (idsAndVersionsToInitialize && idsAndVersionsToInitialize.length > 0) {
 				this.isInitialBuild = true
 				this.queue = new IteratorThenMap(idsAndVersionsToInitialize.map(({id, version}) =>
-					[id, new InitializingIndexRequest(version)]), idsAndVersionsToInitialize.length)
+					[id, new InitializingIndexRequest(version)]), idsAndVersionsToInitialize.length, this.queue)
 				this.state = 'building'
 				console.info('Created queue for initial index build', this.name)
 				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
 				console.info('Finished initial index build of', this.name, 'with', idsAndVersionsToInitialize.length, 'entries')
+				this.queue.isReplaced = true
 				this.queue = this.queue.deferredMap || new Map()
+				this.queue.isReplaced = false
 				this.isInitialBuild = false
 				await db.remove(INITIALIZING_LAST_KEY)
 			}
@@ -628,7 +632,7 @@ export const Index = ({ Source }) => {
 		}
 		static getIndexedValues(range: IterableOptions) {
 			range = range || {}
-			if (!this.initialized)
+			if (!this.initialized && range.waitForInitialization)
 				return this.start().then(() => this.getIndexedValues(range))
 			if (range.start !== undefined)
 				range.start = toBufferKey(range.start)
@@ -1114,9 +1118,10 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 	deferredMap: Map<K, V>
 	iterable: Iterable<V>
 	deletedCount: number
-	constructor(iterable, length) {
+	constructor(iterable, length, deferredMap) {
 		this.iterable = iterable
-		this.deferredMap = new Map()
+		this.deferredMap = deferredMap || new Map()
+		this.deferredMap.isReplaced = true
 		this.deletedCount = 0
 		this.length = length
 	}
