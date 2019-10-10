@@ -24,9 +24,10 @@ try {
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
-const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 3]) // table metadata 2
 const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
+// everything after 9 is cleared when a db is cleared
 const SHARED_STRUCTURE_KEY = Buffer.from([1, 10])
+const LAST_VERSION_IN_DB_KEY = Buffer.from([1,11]) // table metadata 11
 const INITIALIZATION_SOURCE = 'is-initializing'
 const DISCOVERED_SOURCE = 'is-discovered'
 const SHARED_MEMORY_THRESHOLD = 1024
@@ -1361,8 +1362,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			// storing as a version alone to indicate invalidation
 			let db = this.db
 			let written
-				//console.log('Invalidating entry', id, this.name, new Date(version/ 256 + 1500000000000), this.createHeader(version))
-				let conditionalHeader
+			//console.log('Invalidating entry', id, this.name, new Date(version/ 256 + 1500000000000), this.createHeader(version))
+			let conditionalHeader
+			this.lastVersion = Math.max(this.lastVersion, version)
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
 				written = db.remove(keyAsBuffer)
@@ -1375,7 +1377,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				written = db.put(keyAsBuffer, this.createHeader(version), conditionalHeader)
 			}
 			this.whenWritten = written
-			this.lastVersion = Math.max(this.lastVersion, version)
 			if (!event.whenWritten)
 				event.whenWritten = written
 			if (by.previousEntry) {

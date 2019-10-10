@@ -480,7 +480,7 @@ export const Index = ({ Source }) => {
 				this.state = 'clearing'
 				this.clearAllData()
 				if (idsAndVersionsToReindex.length > 0)
-					this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 8]))
+					this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 11]))
 				this.updateDBVersion()
 				console.info('Cleared index', this.name)
 				idsAndVersionsToInitialize = idsAndVersionsToReindex
