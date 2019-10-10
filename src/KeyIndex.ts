@@ -1134,6 +1134,8 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 		}
 	}
 	get size() {
+		if (this.didIterator)
+			return this.deferredMap.size
 		return this.length - this.deletedCount + this.deferredMap.size
 	}
 	set(id: K, value: V) {
