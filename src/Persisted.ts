@@ -468,9 +468,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static doDataInitialization() {
-		//console.log('start data initialization', this.name)
 		const versionBuffer = this.db.get(LAST_VERSION_IN_DB_KEY)
 		this.lastVersion = Math.max(this.lastVersion, versionBuffer ? readUInt(versionBuffer) : 0) // re-retrieve this, it could have changed since we got a lock
+		console.log('start data initialization', this.name, this.lastVersion)
 		const whenFinished = () => {
 			try {
 				this.db.removeSync(INITIALIZING_PROCESS_KEY)
@@ -991,7 +991,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
 		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.ready.then(() => this.whenWritten).then(() => {
-			//console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
+			if (verboseLogging)
+				console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let versionBuffer = this.db.get(LAST_VERSION_IN_DB_KEY)
 			this.lastVersion = this.lastVersion || (versionBuffer ? readUInt(versionBuffer) : 0)
 			let isFullReset = this.startVersion > sinceVersion
@@ -1041,7 +1042,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			array.lastVersion = lastVersion
 			return array
 		}
-		console.info('getInstanceIdsAndVersionsSince from ', this.name, 'is a full reset', i)
+		if (verboseLogging)
+			console.info('getInstanceIdsAndVersionsSince from ', this.name, 'is a full reset', i)
 		let idsAndVersions = getIdsAndVersions()
 		idsAndVersions.isFullReset = true
 		idsAndVersions.length = i
@@ -1288,7 +1290,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static async resetAll(clearDb) {
-		//console.log('reseting', this.name)
+		if (verboseLogging)
+			console.log('reseting', this.name)
 		let version = this.startVersion = getNextVersion()
 		//if (clearDb) {TODO: if not clearDb, verify that there are no entries; if there are, remove them
 		this.clearAllData()
@@ -1463,7 +1466,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static initializeData() {
-		//console.log('initializeData', this.name)
+		if (verboseLogging)
+			console.log('initializeData', this.name)
 		const initialized = super.initializeData()
 		return when(initialized, () => {
 			let receivedPendingVersion = []
@@ -1473,7 +1477,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				let lastVersion = this.lastVersion
 
 				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(async (ids) => {
-					//console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
+					if (verboseLogging)
+						console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
 					let min = Infinity
 					let max = 0
 					let queued = 0
@@ -1494,7 +1499,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						}
 					}
 					await this.whenWritten
-					//console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
+					if (verboseLogging)
+						console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
 				}))
 			}
 			if (receivedPendingVersion.length > 0) {
@@ -1611,12 +1617,14 @@ import { Reduced } from './Reduced'
 let clearOnStart
 let sharedStructureDirectory
 let sharedInstrumenting
+let verboseLogging
 let storesObject = global
 export function configure(options) {
 	Persisted.dbFolder = options.dbFolder
 	Cached.dbFolder = options.cacheDbFolder || options.dbFolder
 	Persistable.dbFolder = options.cacheDbFolder || options.dbFolder
 	globalDoesInitialization = options.doesInitialization
+	verboseLogging = options.verboseLogging
 	clearOnStart = options.clearOnStart
 	if (options.storesObject) {
 		storesObject = options.storesObject
