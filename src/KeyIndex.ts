@@ -1115,7 +1115,7 @@ function readUInt(buffer, offset?) {
 
 class IteratorThenMap<K, V> implements Map<K, V> {
 	didIterator: boolean
-	iteratingDeferredMap: boolean
+	iterator: any
 	deferredMap: Map<K, V>
 	iterable: Iterable<V>
 	deletedCount: number
@@ -1128,15 +1128,17 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 	}
 	[Symbol.iterator]() {
 		if (this.didIterator) {
-			this.iteratingDeferredMap = true
 			return this.deferredMap[Symbol.iterator]()
 		} else {
 			this.didIterator = true
-			return this.iterable[Symbol.iterator]()
+			return this.iterator = this.iterable.map(([id, value]) => {
+				this.deferredMap.set(id, value)
+				return [id, value]
+			})[Symbol.iterator]()
 		}
 	}
 	get size() {
-		if (this.iteratingDeferredMap)
+		if (this.iterator && this.iterator.done)
 			return this.deferredMap.size
 		return this.length - this.deletedCount + this.deferredMap.size
 	}

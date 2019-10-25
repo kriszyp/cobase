@@ -962,6 +962,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				options.start = toBufferKey(range.start)
 			if (range.end != null)
 				options.end = toBufferKey(range.end)
+			if (range.limit)
+				options.limit = range.limit
 		}
 		return db.getRange(options).map(({ key }) => fromBufferKey(key)).asArray
 	}
