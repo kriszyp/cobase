@@ -73,6 +73,7 @@ export const Index = ({ Source }) => {
 		static whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index
 		static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
 		static indexingProcess: Promise<any>
+		static eventLog = []
 
 		static async indexEntry(id, indexRequest: IndexRequest) {
 			let { previousEntry, deleted, sources, triggers, version } = indexRequest
@@ -108,7 +109,7 @@ export const Index = ({ Source }) => {
 					}
 				} catch(error) {
 					if (indexRequest.version !== version) return // don't log errors from invalidated states
-					console.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
+					this.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
 				}
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 				let entries
@@ -125,7 +126,7 @@ export const Index = ({ Source }) => {
 							data = await Source.get(id, INDEXING_MODE)
 						} catch(error) {
 							if (indexRequest.version !== version) return // if at any point it is invalidated, break out
-							console.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
+							this.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
 							data = undefined
 						}
 					}
@@ -139,7 +140,7 @@ export const Index = ({ Source }) => {
 							entries = await entries
 					} catch(error) {
 						if (indexRequest.version !== version) return // if at any point it is invalidated, break out
-						console.warn('Error indexing value', error, 'for', this.name, id)
+						this.warn('Error indexing value', error, 'for', this.name, id)
 						entries = undefined
 					}
 					if (typeof entries != 'object' || !(entries instanceof Array)) {
@@ -189,7 +190,7 @@ export const Index = ({ Source }) => {
 				}
 			} catch(error) {
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
-				console.warn('Error indexing', Source.name, 'for', this.name, id, error)
+				this.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
 			this.queue.delete(id)
 			let earliestPendingVersion
@@ -253,7 +254,7 @@ export const Index = ({ Source }) => {
 					// now previous version is earlier than all writes from other processes, proceed
 					return this.db.batch(operations)
 				} else {
-					console.log('sendRequestToWrite batch', previousVersion)
+					this.log('sendRequestToWrite batch', previousVersion)
 					if (!this.queuedWrites)
 						this.queuedWrites = []
 					this.queuedWrites.push({
@@ -317,7 +318,7 @@ export const Index = ({ Source }) => {
 				})
 			} catch (error) {
 				if (error instanceof ShareChangeError) {
-					console.warn('Reserializing after share change in another process', this.name)
+					this.warn('Reserializing after share change in another process', this.name)
 					return this.serialize(value, firstValue, startOffset)
 				}
 				else
@@ -349,7 +350,7 @@ export const Index = ({ Source }) => {
 		}
 
 		static resumeWrites() {
-			console.log('resumeWrites batch')
+			this.log('resumeWrites batch')
 			const resumedWrites = this.queuedWrites
 			this.queuedWrites = null
 			for (const { operations, previousVersion, version, updateEventSources } of resumedWrites) {
@@ -362,7 +363,7 @@ export const Index = ({ Source }) => {
 			lastIndexedVersion = 1
 
 			// restart from scratch
-			console.info('rebuilding index', this.name, 'Source version', Source.startVersion, 'index version')
+			this.log('rebuilding index', this.name, 'Source version', Source.startVersion, 'index version')
 			// first cancel any existing indexing
 			this.clearAllData()
 		}
@@ -386,7 +387,7 @@ export const Index = ({ Source }) => {
 				let initialQueueSize = queue.size
 				currentlyProcessing.add(this)
 				if (initialQueueSize > 100) {
-					console.log('Indexing', initialQueueSize, Source.name, 'for', this.name)
+					this.log('Indexing', initialQueueSize, Source.name, 'for', this.name)
 				}
 				let indexingInProgress = []
 				let indexingInOtherProcess = [] // TODO: Need to have whenUpdated wait on this too
@@ -409,7 +410,7 @@ export const Index = ({ Source }) => {
 								} else  {
 									let newEntry = Source.getFromDB(id)
 									if (newEntry instanceof Invalidated) {
-										console.log('no process confirmed sendRequestToIndex, still invalidated, indexing locally', this.name, id)
+										this.log('no process confirmed sendRequestToIndex, still invalidated, indexing locally', this.name, id)
 										let event = new ReplacedEvent()
 										event.version = indexRequest.version
 										this.updated(event, { id })
@@ -455,10 +456,10 @@ export const Index = ({ Source }) => {
 				} while (queue.size > 0)
 				await this.lastWriteCommitted
 				if (initialQueueSize > 100) {
-					console.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
+					this.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
 				}
 			} catch (error) {
-				console.error('Error occurred in processing index queue for', this.name, error, 'remaining in queue', this.queue.size)
+				this.warn('Error occurred in processing index queue for', this.name, error, 'remaining in queue', this.queue.size)
 			}
 			this.state = 'processed'
 			if (this.onStateChange) {
@@ -466,6 +467,13 @@ export const Index = ({ Source }) => {
 			}
 		}
 
+		static log(...args) {
+			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
+		}
+		static warn(...args) {
+			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
+			console.warn(...args)
+		}
 		static async resumeIndex() {
 			// TODO: if it is over half the index, just rebuild
 			this.state = 'initializing'
@@ -476,13 +484,13 @@ export const Index = ({ Source }) => {
 			idsAndVersionsToReindex = await Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
 			let idsAndVersionsToInitialize
 			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
-				console.info('Starting index from scratch', this.name, 'with', idsAndVersionsToReindex.length, 'to index')
+				this.log('Starting index from scratch ' + this.name + ' with ' + idsAndVersionsToReindex.length + ' to index')
 				this.state = 'clearing'
 				this.clearAllData()
 				if (idsAndVersionsToReindex.length > 0)
 					this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 11]))
 				this.updateDBVersion()
-				console.info('Cleared index', this.name)
+				this.log('Cleared index' + this.name)
 				idsAndVersionsToInitialize = idsAndVersionsToReindex
 				idsAndVersionsToReindex = []
 				writeUInt(this.getIndexingState(), lastIndexedVersion = idsAndVersionsToInitialize.lastVersion, 8)
@@ -490,7 +498,7 @@ export const Index = ({ Source }) => {
 				let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 				if (resumeFromKey) {
 					await clearEntries(resumeFromKey, (sourceId) => true)
-					console.info(this.name, 'Resuming from key', resumeFromKey)
+					this.log(this.name + ' Resuming from key ' + resumeFromKey)
 					idsAndVersionsToInitialize = Source.getIdsAndVersionFromKey(resumeFromKey)
 				}
 			}
@@ -502,9 +510,9 @@ export const Index = ({ Source }) => {
 				this.queue = new IteratorThenMap(idsAndVersionsToInitialize.map(({id, version}) =>
 					[id, new InitializingIndexRequest(version)]), idsAndVersionsToInitialize.length, this.queue)
 				this.state = 'building'
-				console.info('Created queue for initial index build', this.name)
+				this.log('Created queue for initial index build', this.name)
 				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
-				console.info('Finished initial index build of', this.name, 'with', idsAndVersionsToInitialize.length, 'entries')
+				this.log('Finished initial index build of', this.name, 'with', idsAndVersionsToInitialize.length, 'entries')
 				this.queue.isReplaced = true
 				this.queue = this.queue.deferredMap || new Map()
 				this.queue.isReplaced = false
@@ -514,7 +522,7 @@ export const Index = ({ Source }) => {
 			if (idsAndVersionsToReindex.length > 0) {
 				this.state = 'resuming'
 				idsAndVersionsToReindex.sort((a, b) => a.version > b.version ? 1 : a.version < b.version ? -1 : 0)
-				console.info('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
+				this.log('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
 				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
 				// clear out all the items that we are indexing, since we don't have their previous state
 				await clearEntries(Buffer.from([2]), (sourceId) => setOfIds.has(sourceId))
@@ -522,7 +530,7 @@ export const Index = ({ Source }) => {
 				this.state = 'initializing queue'
 				for (let { id, version } of idsAndVersionsToReindex) {
 					if (!version)
-						console.log('resuming without version',this.name, id)
+						this.log('resuming without version',this.name, id)
 					this.queue.set(id, new InitializingIndexRequest(version))
 				}
 			} else {
@@ -594,7 +602,7 @@ export const Index = ({ Source }) => {
 						constructor: this
 					})
 				} catch (error) {
-					console.error('Error sending index updates', error)
+					this.warn('Error sending index updates', error)
 				}
 			}
 			this.instanceIds.updated()
@@ -680,7 +688,7 @@ export const Index = ({ Source }) => {
 		}
 		static resetAll() {
 			// rebuild index
-			console.log('Index', this.name, 'resetAll')
+			this.log('Index', this.name, 'resetAll')
 			return this.rebuildIndex()
 		}
 
@@ -708,7 +716,7 @@ export const Index = ({ Source }) => {
 			// downstream tables should have received all the updates they need to proceed
 			//console.log('getInstanceIdsAndVersionsSince from KeyIndex', this.name, version)
 			return this.ready.then(() => {
-				//console.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
+				this.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
 				if (version == 0) { // if we are starting from scratch, we can return everything
 					return when(this.getInstanceIds(), idsAndVersions => {
 						idsAndVersions = idsAndVersions.map(id => ({
@@ -770,14 +778,14 @@ export const Index = ({ Source }) => {
 						stateOffset += 16
 					}
 				}
-				console.error('No free indexing process slots, need to reset indexing state table')
+				this.warn('No free indexing process slots, need to reset indexing state table')
 				indexingState.fill(0, 0, INDEXING_STATE_SIZE)
 				stateOffset = 16
 				writeUInt(indexingState, process.pid, stateOffset)
 				indexingState[1] = 1
 			})
 			db.on('remap', (forceUnload) => {
-				console.log('onInvalidation of indexingState')
+				this.log('onInvalidation of indexingState')
 				//if (forceUnload === true) {
 				indexingState = null
 				//} else {
@@ -823,7 +831,7 @@ export const Index = ({ Source }) => {
 		static pendingRequests = new Map()
 		static sendRequestToIndex(id, indexRequest) {
 
-			//console.log('sendRequestToIndex', id, this.name, 'version', indexRequest.version, 'previousVersion', indexRequest.previousVersion)
+			this.log('sendRequestToIndex', id, this.name, 'version', indexRequest.version, 'previousVersion', indexRequest.previousVersion)
 			if (!this.sendRequestToProcess) {
 				return Promise.resolve({ indexed: false })
 			}
@@ -841,7 +849,7 @@ export const Index = ({ Source }) => {
 					indexed: responses.some(({ indexed }) => indexed)
 				}
 			}, error => {
-				console.warn('Error on waiting for indexed', this.name, 'index request', request, error.toString())
+				this.log('Error on waiting for indexed', this.name, 'index request', request, error.toString())
 				return { indexed: false }
 			}).finally((indexed) => {
 				this.pendingRequests.delete(id)
@@ -854,7 +862,7 @@ export const Index = ({ Source }) => {
 					version,
 					waitFor: 'write',
 				}), 60000).catch(error => {
-					console.warn('Error on waiting for writing index', this.name, 'from process', pid, 'index request', version, error.toString())
+					this.log('Error on waiting for writing index', this.name, 'from process', pid, 'index request', version, error.toString())
 					return { indexed: false }
 				})
 			} catch(error) {
