@@ -303,7 +303,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			const initializeReturn = this.initialize()
 			resolver(initializeReturn)
 			this._ready.then(() => {
-				//console.log(this.name, 'is ready and initialized')
+				console.log(this.name, 'is ready and initialized')
 				this.initialized = true
 			}, (error) => {
 				console.error('Error initializing', this.name, error)
@@ -481,7 +481,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		try {
 			return when(this.initializeData(), () => {
-				//console.log('Finished initializeData', this.name)
+				console.log('Finished initializeData', this.name)
 				this.updateDBVersion()
 				whenFinished()
 			}, (error) => {
@@ -1665,3 +1665,4 @@ export class Invalidated {
 	version: number
 }
 Invalidated.prototype.statusByte = INVALIDATED_STATE
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
