@@ -490,15 +490,15 @@ export const Index = ({ Source }) => {
 				if (idsAndVersionsToReindex.length > 0)
 					this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 11]))
 				this.updateDBVersion()
-				this.log('Cleared index' + this.name)
+				this.log('Cleared index', this.name)
 				idsAndVersionsToInitialize = idsAndVersionsToReindex
 				idsAndVersionsToReindex = []
 				writeUInt(this.getIndexingState(), lastIndexedVersion = idsAndVersionsToInitialize.lastVersion, 8)
 			} else {
 				let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 				if (resumeFromKey) {
-					await clearEntries(resumeFromKey, (sourceId) => true)
-					this.log(this.name + ' Resuming from key ' + resumeFromKey)
+					//await clearEntries(Buffer.from([2]), (sourceId) => sourceId > resumeFromKey)
+					this.log(this.name + ' Resuming from key ' + fromBufferKey(resumeFromKey))
 					idsAndVersionsToInitialize = Source.getIdsAndVersionFromKey(resumeFromKey)
 				}
 			}

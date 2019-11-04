@@ -1301,6 +1301,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ? this.Sources[0].getInstanceIds() : [])
 		let committed
 		let queued = 0
+		console.info('reseting', this.name, 'with', allIds.length, 'ids')
 		for (let id of allIds) {
 			if (this.instancesById.get(id)) {
 				// instance already in memory
@@ -1314,8 +1315,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				queued = 0
 			}
 		}
+		console.info('Finished reseting', this.name)
 		return committed
-		//console.info('Finished reseting', this.name)
+		
 	}
 
 	static writeEntry(id, event, by) {
