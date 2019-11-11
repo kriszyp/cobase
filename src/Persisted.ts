@@ -299,9 +299,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static start() {
 		if (!this.hasOwnProperty('_ready')) {
 			let resolver
-			this._ready = new Promise(resolve => resolver = resolve)
-			const initializeReturn = this.initialize()
-			resolver(initializeReturn)
+			this._ready = Promise.resolve(this.initialize())
 			this._ready.then(() => {
 				console.log(this.name, 'is ready and initialized')
 				this.initialized = true
@@ -450,15 +448,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let whenEachProcess = []
 			//console.log('Connecting', this.name, 'to processes', this.otherProcesses)
 			for (const pid of this.otherProcesses) {
-				whenEachProcess.push(addProcess(pid, this).catch(() => {
-					this.cleanupDeadProcessReference(pid, initializingProcess)
-				}))
+				whenEachProcess.push(addProcess(pid, this).catch(() =>
+					this.cleanupDeadProcessReference(pid, initializingProcess)))
 			}
 			// make sure these are inherited
 			if (initializingProcess/* || !Persisted.doesInitialization*/) {
 				// there is another process handling initialization
 				return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), () => {
-					//console.log('Connected to each process complete and finished initialization', this.name)
+					console.log('Connected to each process complete and finished initialization', this.name)
 				})
 			}
 			return this.doDataInitialization()
@@ -510,7 +507,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				initializingProcess = initializingProcess && +initializingProcess.toString()
 				if (initializingProcess == pid) {
 					// take over the initialization process
-					//console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
+					console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
 					db.putSync(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
 					doInit = true
 				}
