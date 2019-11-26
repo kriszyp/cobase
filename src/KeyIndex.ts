@@ -65,6 +65,7 @@ export const Index = ({ Source }) => {
 	// this is shared memory buffer between processes where we define what each process is currently indexing, so processes can determine if there are potentially conflicts
 	// in what is being processed
 	let indexingState: Buffer
+	let temporaryRestartDelay = 1000
 
 	return class extends Persistable.as(VArray) {
 		version: number
@@ -108,6 +109,8 @@ export const Index = ({ Source }) => {
 						}
 					}
 				} catch(error) {
+					if (error.isTemporary)
+						throw error
 					if (indexRequest.version !== version) return // don't log errors from invalidated states
 					this.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
 				}
@@ -121,6 +124,8 @@ export const Index = ({ Source }) => {
 						if (data && data.then)
 							data = await data
 					} catch(error) {
+						if (error.isTemporary)
+							throw error
 						try {
 							// try again
 							data = await Source.get(id, INDEXING_MODE)
@@ -139,6 +144,8 @@ export const Index = ({ Source }) => {
 						if (entries && entries.then)
 							entries = await entries
 					} catch(error) {
+						if (error.isTemporary)
+							throw error
 						if (indexRequest.version !== version) return // if at any point it is invalidated, break out
 						this.warn('Error indexing value', error, 'for', this.name, id)
 						entries = undefined
@@ -189,9 +196,16 @@ export const Index = ({ Source }) => {
 					Index.onIndexEntry(this.name, id, version, previousEntries, entries)
 				}
 			} catch(error) {
+				if (error.isTemporary) {
+					temporaryRestartDelay *= 2
+					await this.delay(temporaryRestartDelay)
+					console.info('Retrying index entry', this.name, id, error)
+					return
+				}
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 				this.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
+			temporaryRestartDelay = 1000
 			this.queue.delete(id)
 			let earliestPendingVersion
 			for (const firstInQueue of this.queue) {
@@ -640,8 +654,9 @@ export const Index = ({ Source }) => {
 		}
 		static getIndexedValues(range: IterableOptions) {
 			range = range || {}
-			if (!this.initialized && range.waitForInitialization)
+			if (!this.initialized && range.waitForInitialization) {
 				return this.start().then(() => this.getIndexedValues(range))
+			}
 			if (range.start !== undefined)
 				range.start = toBufferKey(range.start)
 			else
