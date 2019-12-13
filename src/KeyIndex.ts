@@ -162,11 +162,11 @@ export const Index = ({ Source }) => {
 						let removedValue = toRemove.get(key)
 						// a value of '' is treated as a reference to the source object, so should always be treated as a change
 						let dpackStart = this._dpackStart
-						let value = entry.value === undefined ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), first, dpackStart)
+						let value = entry.value == null ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), first, dpackStart)
 						first = false
-						if (removedValue !== undefined)
+						if (removedValue != null)
 							toRemove.delete(key)
-						let isChanged = removedValue === undefined || !value.slice(dpackStart).equals(removedValue)
+						let isChanged = removedValue == null || !value.slice(dpackStart).equals(removedValue)
 						if (isChanged || value.length === 0 || this.alwaysUpdate) {
 							if (isChanged) {
 								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
@@ -483,6 +483,7 @@ export const Index = ({ Source }) => {
 
 		static log(...args) {
 			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
+			console.log(...args)
 		}
 		static warn(...args) {
 			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())

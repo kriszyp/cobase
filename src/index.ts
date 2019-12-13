@@ -2,7 +2,7 @@ export { Persisted, Cached, Persistable, secureAccess, writeCommonStructures } f
 export { Index } from './KeyIndex'
 export { RequestContext } from './RequestContext'
 export { Reduced } from './Reduced'
-export { AccessError } from './util/errors'
+export { AccessError, UnauthenticatedError } from './util/errors'
 export { JSONStream } from './http-server/JSONStream'
 export { media, mediaTypes } from './http-server/media'
 export { default as ExpirationStrategy } from './ExpirationStrategy'

@@ -16,5 +16,13 @@ export class AccessError extends ExtendableError {
 	}
 }
 
+export class UnauthenticatedError extends ExtendableError {
+	get status() {
+		return 401
+	}
+	get isExternal() {
+		return true
+	}
+}
 export class ConcurrentModificationError extends ExtendableError {
 }
