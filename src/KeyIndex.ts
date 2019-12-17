@@ -197,7 +197,8 @@ export const Index = ({ Source }) => {
 				}
 			} catch(error) {
 				if (error.isTemporary) {
-					temporaryRestartDelay *= 2
+					temporaryRestartDelay *= 1.05
+					this.state = 'retrying index in ' + temporaryRestartDelay + 'ms'
 					await this.delay(temporaryRestartDelay)
 					console.info('Retrying index entry', this.name, id, error)
 					return
@@ -439,6 +440,7 @@ export const Index = ({ Source }) => {
 						}
 
 						sinceLastStateUpdate++
+						this.state = 'initiating indexing of entry'
 						indexingInProgress.push(this.indexEntry(id, indexRequest))
 						if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * speedAdjustment) {
 							// we have process enough, commit our changes so far
@@ -447,7 +449,9 @@ export const Index = ({ Source }) => {
 							indexingInProgress = []
 							this.averageConcurrencyLevel = ((this.averageConcurrencyLevel || 0) + sinceLastStateUpdate) / 2
 							sinceLastStateUpdate = 0
+							this.state = 'awaiting indexing'
 							await Promise.all(indexingStarted)
+							this.state = 'finished indexing batch'
 							let processedEntries = indexingStarted.length
 							//this.saveLatestVersion(false)
 							cpuUsage = process.cpuUsage()
@@ -465,7 +469,7 @@ export const Index = ({ Source }) => {
 						}
 					}
 					this.state = 'waiting on other processes'
-					this.state = 'processing'
+					this.state = 'awaiting final indexing'
 					await Promise.all(indexingInProgress) // then wait for all indexing to finish everything
 				} while (queue.size > 0)
 				await this.lastWriteCommitted
