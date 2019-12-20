@@ -396,7 +396,9 @@ export const Index = ({ Source }) => {
 			}
 			let cpuUsage = process.cpuUsage()
 			let cpuTotalUsage = cpuUsage.user + cpuUsage.system
-			let speedAdjustment = 2
+			let lastTime = Date.now()
+			let concurrencyAdjustment = 1
+			let niceAdjustment = 2
 			try {
 				let queue = this.queue
 				let initialQueueSize = queue.size
@@ -442,7 +444,7 @@ export const Index = ({ Source }) => {
 						sinceLastStateUpdate++
 						this.state = 'initiating indexing of entry'
 						indexingInProgress.push(this.indexEntry(id, indexRequest))
-						if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * speedAdjustment) {
+						if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * concurrencyAdjustment) {
 							// we have process enough, commit our changes so far
 							this.onBeforeCommit && this.onBeforeCommit(id)
 							let indexingStarted = indexingInProgress
@@ -457,15 +459,19 @@ export const Index = ({ Source }) => {
 							cpuUsage = process.cpuUsage()
 							let lastCpuUsage = cpuTotalUsage
 							cpuTotalUsage = cpuUsage.user + cpuUsage.system
+							let currentTime = Date.now()
+							let timeUsed = currentTime - lastTime
+							lastTime = currentTime
 							// calculate an indexing adjustment based on cpu usage and queue size (which we don't want to get too big)
-							speedAdjustment = (speedAdjustment + 400000 / (cpuTotalUsage - lastCpuUsage + 200000)) / 2
+							concurrencyAdjustment = (concurrencyAdjustment + 1000 / (1000 + timeUsed)) / 2
+							niceAdjustment = (niceAdjustment + (cpuTotalUsage - lastCpuUsage) / timeUsed / 20) / 2
 							/* Can be used to measure performance
 							let [seconds, billionths] = process.hrtime(lastStart)
 							lastStart = process.hrtime()
-							if (Math.random() > 0.95)
-								console.log('processed', processedEntries, 'for', this.name, 'in', seconds + billionths/1000000000, 'secs, waiting', this.nice/ 1000) */
+							*/if (Math.random() > 0.95)
+								console.log('speed adjustment', { concurrencyAdjustment, niceAdjustment, timeUsed, cpuTime: (cpuTotalUsage - lastCpuUsage) })
 							if (this.nice > 0)
-								await this.delay(Math.round(this.nice * 1000 / (queue.size + 1000))) // short delay for other processing to occur
+								await this.delay(Math.round((this.nice * niceAdjustment) / (queue.size + 1000))) // short delay for other processing to occur
 						}
 					}
 					this.state = 'waiting on other processes'

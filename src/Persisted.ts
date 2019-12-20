@@ -1599,8 +1599,8 @@ function convertToBlocks(value) {
 			var newValue = {}
 			for (var key in value) {
 				var subValue = value[key]
-				if (subValue && typeof subValue === 'object') {
-
+				if (subValue && (subValue.constructor == Object || subValue.constructor == Array)) {
+					// don't use blocks for typed values, just objects and arrays
 					newValue[key] = asBlock(subValue)
 				} else {
 					newValue[key] = subValue
