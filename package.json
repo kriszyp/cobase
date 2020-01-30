@@ -1,7 +1,7 @@
 {
   "name": "cobase",
   "author": "Kris Zyp",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "description": "Compositional data stores of reactive JavaScript transform, index, reduce, and join functions, built on NodeJS, Alkali, and LMDB",
   "license": "MIT",
   "repository": {
@@ -17,7 +17,7 @@
   "dependencies": {
     "dpack": "^0.6.8",
     "lmdb-store": "^0.3.5",
-    "ordered-binary": "^0.1.0"
+    "ordered-binary": "^0.1.1"
   },
   "peerDependencies": {
     "alkali": "^0.21.20"
