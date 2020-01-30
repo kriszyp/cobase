@@ -76,6 +76,7 @@ export class JSONStream extends Readable {
 				return
 			}
 			containsVariables = containsVariables || object.containsVariables
+			object = object.valueOf()
 			if (object.then) {
 				try {
 					yield this.context.executeWithin(() =>
