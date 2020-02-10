@@ -674,7 +674,7 @@ export const Index = ({ Source }) => {
 				range.start = Buffer.from([2])
 			if (range.end !== undefined)
 				range.end = toBufferKey(range.end)
-			return when(this.whenUpdatedInContext(), () =>
+			return when(!range.noWait && this.whenUpdatedInContext(), () =>
 				this._getIndexedValues(range, !range.onlyValues))
 		}
 

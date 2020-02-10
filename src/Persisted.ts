@@ -27,7 +27,7 @@ const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
 const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
 // everything after 9 is cleared when a db is cleared
 const SHARED_STRUCTURE_KEY = Buffer.from([1, 10])
-const LAST_VERSION_IN_DB_KEY = Buffer.from([1,11]) // table metadata 11
+const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 11]) // table metadata 11
 const INITIALIZATION_SOURCE = 'is-initializing'
 const DISCOVERED_SOURCE = 'is-discovered'
 const SHARED_MEMORY_THRESHOLD = 1024
