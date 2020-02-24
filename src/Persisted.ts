@@ -839,14 +839,24 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 		this.updated(event, { id })
 		let transition = this.transitions.get(id)
-		if (transition) { // non cache entities won't have a transition, TODO, need to fix that?
+		if (transition) {
 			transition.invalidating = false
 			transition.result = value
 			transition.fromVersion = transition.newVersion
+		} else {
+			transition = {
+				fromVersion: event.version,
+				result: value,
+			}
+			this.transitions.set(id, transition)
 		}
 		let buffer = this.serializeEntryValue(value, event.version, true, id)
 		this.lastVersion = event.version
-		return this.whenWritten = this.db.put(toBufferKey(id), buffer)
+		return this.whenWritten = this.db.put(toBufferKey(id), buffer).then(successfulWrite => {
+			if (this.transitions.get(id) == transition && !transition.invalidating)
+				this.transitions.delete(id)
+			return successfulWrite
+		})
 	}
 
 
@@ -1218,7 +1228,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		}) : []
 		try {
 			transition.result = when(when(hasPromises ? Promise.all(inputData) : inputData, inputData => {
-				if (inputData.length > 0 && inputData[0] === undefined) // first input is undefined, we pass through
+				if (inputData.length > 0 && inputData[0] === undefined && !this.sourceOptional) // first input is undefined, we pass through
 					return
 				let context = currentContext
 				let transformContext = context ? context.newContext() : new RequestContext(null, null)

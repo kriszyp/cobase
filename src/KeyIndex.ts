@@ -96,9 +96,7 @@ export const Index = ({ Source }) => {
 						if (previousEntries && previousEntries.then)
 							previousEntries = await previousEntries
 						if (typeof previousEntries == 'object' && previousEntries) {
-							if (!(previousEntries instanceof Array)) {
-								previousEntries = [previousEntries]
-							}
+							previousEntries = this.normalizeEntries(previousEntries)
 							for (let entry of previousEntries) {
 								let previousValue = entry.value
 								previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, false, 0)
@@ -150,10 +148,7 @@ export const Index = ({ Source }) => {
 						this.warn('Error indexing value', error, 'for', this.name, id)
 						entries = undefined
 					}
-					if (typeof entries != 'object' || !(entries instanceof Array)) {
-						// allow single primitive key
-						entries = entries == null ? [] : [entries]
-					}
+					entries = this.normalizeEntries(entries)
 					let first = true
 					for (let entry of entries) {
 						// we use the composite key, so we can quickly traverse all the entries under a certain key
@@ -232,6 +227,19 @@ export const Index = ({ Source }) => {
 			}
 		}
 		static pendingEvents = new Map()
+
+		static normalizeEntries(entries) {
+			if (typeof entries != 'object') {
+				// allow single primitive key
+				return entries == null ? [] : [entries]
+			} else if (entries instanceof Map) {
+				return Array.from(entries).map(([ key, value]) => ({ key, value }))
+			} else if (!(entries instanceof Array)) {
+				// single object
+				return [entries]
+			}
+			return entries
+		}
 
 		static updateEarliestPendingVersion() {
 			this.earliestPendingVersionInOtherProcesses = getNextVersion()
