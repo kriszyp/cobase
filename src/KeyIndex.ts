@@ -65,7 +65,6 @@ export const Index = ({ Source }) => {
 	// this is shared memory buffer between processes where we define what each process is currently indexing, so processes can determine if there are potentially conflicts
 	// in what is being processed
 	let indexingState: Buffer
-	let temporaryRestartDelay = 1000
 
 	return class extends Persistable.as(VArray) {
 		version: number
@@ -192,16 +191,19 @@ export const Index = ({ Source }) => {
 				}
 			} catch(error) {
 				if (error.isTemporary) {
-					temporaryRestartDelay *= 1.05
 					this.state = 'retrying index in ' + temporaryRestartDelay + 'ms'
-					await this.delay(temporaryRestartDelay)
-					console.info('Retrying index entry', this.name, id, error)
-					return
+					let retries = indexRequest.retries = (indexRequest.retries || 0) + 1
+					if (retries < 4)
+						await this.delay(retries * 1000)
+						console.info('Retrying index entry', this.name, id, error)
+						return
+					} else {
+						console.info('Too many retries', this.name, id, retries)
+					}
 				}
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 				this.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
-			temporaryRestartDelay = 1000
 			this.queue.delete(id)
 			let earliestPendingVersion
 			for (const firstInQueue of this.queue) {
