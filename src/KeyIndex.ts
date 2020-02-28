@@ -238,6 +238,8 @@ export const Index = ({ Source }) => {
 				return Array.from(entries).map(([ key, value]) => ({ key, value }))
 			} else if (!(entries instanceof Array)) {
 				// single object
+				if (entries === null)
+					return []
 				return [entries]
 			}
 			return entries
