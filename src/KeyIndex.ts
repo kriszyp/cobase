@@ -472,14 +472,15 @@ export const Index = ({ Source }) => {
 							lastTime = currentTime
 							// calculate an indexing adjustment based on cpu usage and queue size (which we don't want to get too big)
 							concurrencyAdjustment = (concurrencyAdjustment + 1000 / (1000 + timeUsed)) / 2
-							niceAdjustment = (niceAdjustment + (cpuTotalUsage - lastCpuUsage) / timeUsed / 20) / 2
+							niceAdjustment = (niceAdjustment + (cpuTotalUsage - lastCpuUsage) / (timeUsed + 10) / 20) / 2
 							/* Can be used to measure performance
 							let [seconds, billionths] = process.hrtime(lastStart)
 							lastStart = process.hrtime()
-							*/if (Math.random() > 0.95)
+							*/if (isNaN(niceAdjustment)) {
 								console.log('speed adjustment', { concurrencyAdjustment, niceAdjustment, timeUsed, cpuTime: (cpuTotalUsage - lastCpuUsage) })
-							if (this.nice > 0)
-								await this.delay(Math.round((this.nice * niceAdjustment) / (queue.size + 1000))) // short delay for other processing to occur
+								niceAdjustment = 10
+							}
+							await this.delay(Math.round((this.nice * niceAdjustment) / (queue.size + 1000))) // short delay for other processing to occur
 						}
 					}
 					this.state = 'waiting on other processes'
@@ -734,7 +735,7 @@ export const Index = ({ Source }) => {
 				for (const sourceName in updateContext.expectedVersions) {
 					// if the expected version is behind, wait for processing to finish
 					if (updateContext.expectedVersions[sourceName] > (sourceVersions[sourceName] || 0) && this.queue.size > 0)
-						return this.requestProcessing(0) // up the priority
+						return this.requestProcessing(1) // up the priority
 				}
 			}), () => {
 				if (context)

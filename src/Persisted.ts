@@ -569,7 +569,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	static writeEntry(event) {
+	static invalidateEntry(event) {
 	}
 
 	static update(id, event) {
@@ -608,7 +608,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			// if we are being notified of ourself being created, ignore it
 			// do nothing
 		} else if (id) {
-			this.writeEntry(id, event, nextBy)
+			if (this.updateWithPrevious)
+				nextBy.previousEntry = this.getFromDB(id)
+			this.invalidateEntry(id, event, nextBy)
 		}
 		if (id) {
 			let instance
@@ -1327,12 +1329,12 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		
 	}
 
-	static writeEntry(id, event, by) {
+	static invalidateEntry(id, event, by) {
 		const keyAsBuffer = toBufferKey(id)
 		let previousEntry
 		let previousVersion, previousStatusByte
 		if (this.updateWithPrevious) {
-			previousEntry = by.previousEntry = this.getFromDB(id)
+			previousEntry = by.previousEntry
 			if (previousEntry) {
 				previousVersion = previousEntry.version
 				previousStatusByte = previousEntry.statusByte
@@ -1340,7 +1342,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		}
 		let version = event.version
 		let transition = this.transitions.get(id)
-		//console.log('writeEntry previous transition', id, this.name, transition)
+		//console.log('invalidateEntry previous transition', id, this.name, transition)
 
 		if (transition) {
 			if (transition.invalidating) {
@@ -1405,7 +1407,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 							return new Invalidated(newVersion)
 						} else {
 							// it was no longer the same as what we read, re-run, as we have a more recent update
-							this.writeEntry(id, event, by)
+							if (this.updateWithPrevious)
+								by.previousEntry = this.getFromDB(id)
+							this.invalidateEntry(id, event, by)
 							return by.previousEntry
 						}
 					}
@@ -1413,7 +1417,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				})
 			}
 			const finished = (result) => {
-				//console.log('writeEntry finished with', id, this.name, result)
+				//console.log('invalidateEntry finished with', id, this.name, result)
 				if (this.transitions.get(id) === transition && transition.newVersion === version) {
 					this.transitions.delete(id)
 				}
