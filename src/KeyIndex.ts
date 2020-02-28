@@ -191,8 +191,8 @@ export const Index = ({ Source }) => {
 				}
 			} catch(error) {
 				if (error.isTemporary) {
-					this.state = 'retrying index in ' + temporaryRestartDelay + 'ms'
 					let retries = indexRequest.retries = (indexRequest.retries || 0) + 1
+					this.state = 'retrying index in ' + retries * 1000 + 'ms'
 					if (retries < 4) {
 						await this.delay(retries * 1000)
 						console.info('Retrying index entry', this.name, id, error)
