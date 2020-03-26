@@ -825,6 +825,20 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			context.ifModifiedSince = undefined
 		}*/
 		let entry = this.getFromDB(id)
+		if (entry) {
+			if (context) {
+				context.setVersion(entry.version)
+				if (context.ifModifiedSince >= entry.version) {
+					return NOT_MODIFIED
+				}
+			}
+		} else {
+			if (context) {
+				let version = getNextVersion()
+				context.setVersion(version)
+			}
+		}
+
 		if (typeof mode === 'object' && entry && entry.value) {
 			return copy(entry.value)
 		}
@@ -1180,11 +1194,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					}
 					return transition.result
 				}
-				// TODO: copy this to super/Persisted.get
-				if (context)
+				if (context) {
 					context.setVersion(entry.version)
-				if (context && context.ifModifiedSince >= entry.version) {
-					return NOT_MODIFIED
+					if (context.ifModifiedSince >= entry.version) {
+						return NOT_MODIFIED
+					}
 				}
 				return entry.value
 			}
