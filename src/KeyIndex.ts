@@ -944,11 +944,14 @@ export const Index = ({ Source }) => {
 
 		static receiveRequest({ id, version, previousVersion, waitFor }) {
 			if (waitFor == 'write') {
+				console.log('received request to wait for write')
 				if (this.queue.size === 0) {
+					console.log('nothing in queue, immediately responding')
 					// if nothing in queue, wait for last write and return
 					return when(this.lastWriteCommitted, () => ({ written: true }))
 				}
 				if (this.queuedRequestForWriteNotification) {
+					console.log('waiting on other processes, immediately responding')
 					// if we are waiting for other processes, let it proceed, so don't deadlock
 					// (it is possible for a sequence of processes to wait on each other, but we won't worry about that for now)
 					return when(this.lastWriteCommitted, () => ({ written: true }))
@@ -956,6 +959,7 @@ export const Index = ({ Source }) => {
 				if (!this.requestForWriteNotification) {
 					this.requestForWriteNotification = []
 				}
+				console.log('adding a requestForWriteNotification')
 				return new Promise(resolve => {
 					this.requestForWriteNotification.push({
 						version,
