@@ -755,7 +755,7 @@ export const Index = ({ Source }) => {
 			// downstream tables should have received all the updates they need to proceed
 			//console.log('getInstanceIdsAndVersionsSince from KeyIndex', this.name, version)
 			return this.ready.then(() => {
-				this.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
+				//this.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
 				if (version == 0) { // if we are starting from scratch, we can return everything
 					return when(this.getInstanceIds(), idsAndVersions => {
 						idsAndVersions = idsAndVersions.map(id => ({
@@ -892,7 +892,7 @@ export const Index = ({ Source }) => {
 				return { indexed: false }
 			}).finally((indexed) => {
 				this.pendingRequests.delete(id)
-				//console.log('sendRequestToIndex finished', id, this.name, indexed)
+				this.log('sendRequestToIndex finished', id, this.name, indexed)
 			})
 		}
 		static sendRequestToWrite(pid, version) {

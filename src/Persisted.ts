@@ -35,7 +35,7 @@ export const INVALIDATED_ENTRY = { state: 'invalidated'}
 const INVALIDATED_STATE = 1
 const COMPRESSED_STATUS_24 = 254
 const COMPRESSED_STATUS_48 = 255
-const COMPRESSION_THRESHOLD = 1024
+const COMPRESSION_THRESHOLD = 512
 const AS_SOURCE = {}
 const EXTENSION = '.mdpack'
 const DB_FORMAT_VERSION = 0
@@ -159,7 +159,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static assignPreviousValue(id, by) {
-		by.previousEntry = this.getFromDB(id)
+		by.previousEntry = this.getEntryData(id)
 	}
 
 	static index(propertyName: string, indexBy?: (value, sourceKey) => any) {
@@ -301,7 +301,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let resolver
 			this._ready = Promise.resolve(this.initialize())
 			this._ready.then(() => {
-				console.log(this.name, 'is ready and initialized')
+				//console.log(this.name, 'is ready and initialized')
 				this.initialized = true
 			}, (error) => {
 				console.error('Error initializing', this.name, error)
@@ -467,7 +467,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static doDataInitialization() {
 		const versionBuffer = this.db.get(LAST_VERSION_IN_DB_KEY)
 		this.lastVersion = Math.max(this.lastVersion, versionBuffer ? readUInt(versionBuffer) : 0) // re-retrieve this, it could have changed since we got a lock
-		console.log('start data initialization', this.name, this.lastVersion)
+		//console.log('start data initialization', this.name, this.lastVersion)
 		const whenFinished = () => {
 			try {
 				this.db.removeSync(INITIALIZING_PROCESS_KEY)
@@ -478,7 +478,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		try {
 			return when(this.initializeData(), () => {
-				console.log('Finished initializeData', this.name)
+				//console.log('Finished initializeData', this.name)
 				this.updateDBVersion()
 				whenFinished()
 			}, (error) => {
@@ -609,7 +609,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			// do nothing
 		} else if (id) {
 			if (this.updateWithPrevious)
-				nextBy.previousEntry = this.getFromDB(id)
+				nextBy.previousEntry = this.getEntryData(id)
 			this.invalidateEntry(id, event, nextBy)
 		}
 		if (id) {
@@ -824,7 +824,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
 			context.ifModifiedSince = undefined
 		}*/
-		let entry = this.getFromDB(id)
+		let entry = this.getEntryData(id)
 		if (entry) {
 			if (context) {
 				context.setVersion(entry.version)
@@ -847,7 +847,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	static is(id, value, event) {
 		if (!event) {
-			let entry = this.getFromDB(id)
+			let entry = this.getEntryData(id)
 			event = entry ? new ReplacedEvent() : new AddedEvent()
 		}
 		event.triggers = [ DISCOVERED_SOURCE ]
@@ -877,7 +877,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 
 	_valueCache: Map<any, any>
-	static getFromDB(id, conditional?) {
+	static getEntryData(id, conditional?) {
+		let context = currentContext
 		let transition = this.transitions.get(id) // if we are transitioning, return the transition result
 		if (transition) {
 			if (transition.invalidating) {
@@ -889,8 +890,22 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				}
 			}
 		}
+		let valueCache = this._valueCache
+		if (valueCache) {
+			// TODO: only read from DB if context specifies to look for a newer version
+			let value = valueCache.get(id)
+			if (value) {
+				expirationStrategy.useEntry(value)
+				return {
+					 version: value[VERSION],
+					 statusByte: 0,
+					 value,
+				}
+			}
+		} else {
+			this._valueCache = valueCache = new WeakValueMap()
+		}
 		let db = this.db
-		// TODO: only read from DB if context specifies to look for a newer version
 		let key = toBufferKey(id)
 		let size
 		let entry = db.get(key, entryBuffer => {
@@ -902,17 +917,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (!entry || !entry.getData)
 			return entry
 
-		let valueCache = this._valueCache
-		if (valueCache) {
-			let value = valueCache.get(id)
-			if (value && value[VERSION] === entry.version) {
-				expirationStrategy.useEntry(value, size/* >> (entryBuffer.buffer.onInvalidation ? 2 : 0)*/)
-				entry.value = value
-				return entry
-			}
-		} else {
-			this._valueCache = valueCache = new WeakValueMap()
-		}
 		let value = entry.value = entry.getData()
 		if (value) {
 			valueCache.set(id, value)
@@ -1019,7 +1023,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (verboseLogging)
 				console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
 			let versionBuffer = this.db.get(LAST_VERSION_IN_DB_KEY)
-			this.lastVersion = this.lastVersion || (versionBuffer ? readUInt(versionBuffer) : 0)
+			let lastVersionFromHeader = this.lastVersion = this.lastVersion || (versionBuffer ? readUInt(versionBuffer) : 0)
 			let isFullReset = this.startVersion > sinceVersion
 			if (this.lastVersion && this.lastVersion <= sinceVersion && !isFullReset) {
 				return []
@@ -1027,6 +1031,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			let idsAndVersions = this.getIdsAndVersionFromKey(Buffer.from([10]), sinceVersion, 3000)
 			if (idsAndVersions.isFullReset) {
 				idsAndVersions = this.getIdsAndVersionFromKey(Buffer.from([10]))
+			}
+			if (idsAndVersions.lastVersion > 0 && idsAndVersions.lastVersion != this.lastVersion) {
+				let versionBuffer = Buffer.alloc(8)
+				writeUInt(versionBuffer, this.lastVersion = idsAndVersions.lastVersion)
+				this.db.putSync(LAST_VERSION_IN_DB_KEY, versionBuffer)
 			}
 			return idsAndVersions
 		})
@@ -1049,7 +1058,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			return idAndVersion
 		})
 		let array = arrayThreshold > 0 ? [] : null
-		let lastVersion = getNextVersion()
+		let lastVersion = 0
 		let i = 0
 		for (let idAndVersion of getIdsAndVersions()) {
 			if (i >= arrayThreshold) {// stop recording array
@@ -1101,7 +1110,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		this.constructor.is(this.id, value)
 	}
 
-	static serializeEntryValue(object, version, canCompress, id) {
+	static serializeEntryValue(object, version, shouldCompress, id) {
 		let start = this._dpackStart
 		let buffer
 		if (object === INVALIDATED_ENTRY) {
@@ -1115,7 +1124,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			} catch (error) {
 				if (error instanceof ShareChangeError) {
 					console.warn('Reserializing after share change in another process', this.name)
-					return this.serializeEntryValue(object, version, canCompress, id)
+					return this.serializeEntryValue(object, version, shouldCompress, id)
 				}
 				else
 					throw error
@@ -1126,7 +1135,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		buffer[0] = 0
 		buffer[1] = 0
 		writeUInt(buffer, version, 0)
-		if (canCompress && buffer.length > COMPRESSION_THRESHOLD) {
+		if (buffer.length > (shouldCompress ? COMPRESSION_THRESHOLD : 2 * COMPRESSION_THRESHOLD)) {
 			return this.compressEntry(buffer, 8)
 		}
 		return buffer
@@ -1179,7 +1188,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static get(id, mode?) {
 		let context = currentContext		
 		return when(this.whenUpdatedInContext(context), () => {
-			let entry = this.getFromDB(id)
+			let entry = this.getEntryData(id)
 			if (entry) {
 				if (entry.statusByte === INVALIDATED_STATE) {
 					let oldTransition = this.transitions.get(id)
@@ -1291,10 +1300,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				})
 				return result
 			}, (error) => {
+				removeTransition()
 				if (error.__CANCEL__) {
 					return transition.replaceWith
 				}
-				removeTransition()
 				throw error
 			})
 		} catch (error) {
@@ -1308,7 +1317,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return this.constructor.get(this.id)
 	}
 	is(value, event) {
-		// we skip getFromDB and pretend it wasn't in the cache... not clear if
+		// we skip getEntryData and pretend it wasn't in the cache... not clear if
 		// that is how we want is() to behave or not
 		this.constructor.is(this.id, value, event)
 		return this
@@ -1331,7 +1340,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				this.for(id).updated()
 				continue
 			}
-			const version = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
+			const version = this.lastVersion = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
 			this.whenWritten = committed = this.db.put(toBufferKey(id), this.createHeader(version))
 			if (queued++ > 2000) {
 				await this.whenWritten
@@ -1417,12 +1426,12 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						let newVersion = db.get(keyAsBuffer, existingBuffer =>
 							existingBuffer ? readUInt(existingBuffer) : 0)
 						if (newVersion > version) {
-							// don't do anything further, db is ahead of us, and we should take no indexing action
+							// don't do anything further, other db process is ahead of us, and we should take no indexing action
 							return new Invalidated(newVersion)
 						} else {
 							// it was no longer the same as what we read, re-run, as we have a more recent update
 							if (this.updateWithPrevious)
-								by.previousEntry = this.getFromDB(id)
+								by.previousEntry = this.getEntryData(id)
 							this.invalidateEntry(id, event, by)
 							return by.previousEntry
 						}
