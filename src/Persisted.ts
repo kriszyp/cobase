@@ -41,6 +41,8 @@ const EXTENSION = '.mdpack'
 const DB_FORMAT_VERSION = 0
 const allStores = new Map()
 
+let processId = process.pid & 255 // we have one byte to store it
+
 export const VERSION = Symbol('version')
 
 let globalDoesInitialization
@@ -569,7 +571,15 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	static invalidateEntry(event) {
+	static invalidateEntry(id, event) {
+		let valueCache = this._valueCache
+		if (valueCache) {
+			let value = valueCache.get(id)
+			if (value !== undefined) {
+				expirationStrategy.deleteEntry(value)
+				valueCache.delete(id)
+			}
+		}
 	}
 
 	static update(id, event) {
@@ -929,6 +939,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static copyAndParseValue(buffer) {
 		const version = readUInt(buffer)
 		let statusByte = buffer[0]
+		let processId = buffer[1]
 		let valueBuffer
 		if (statusByte >= COMPRESSED_STATUS_24) {
 			valueBuffer = this.uncompressEntry(buffer, statusByte, 8)
@@ -1133,7 +1144,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 
 		buffer[0] = 0
-		buffer[1] = 0
+		buffer[1] = processId
 		writeUInt(buffer, version, 0)
 		if (buffer.length > (shouldCompress ? COMPRESSION_THRESHOLD : 2 * COMPRESSION_THRESHOLD)) {
 			return this.compressEntry(buffer, 8)
