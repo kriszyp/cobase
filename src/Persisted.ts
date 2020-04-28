@@ -876,7 +876,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		let valueCache = this._valueCache
 		if (valueCache) {
-			valueCache.set(id, value)
+			let value = valueCache.get(id)
+			if (value !== undefined) {
+				expirationStrategy.deleteEntry(value)
+				valueCache.delete(id)
+			}
 		}
 		let buffer = this.serializeEntryValue(value, event.version, true, id)
 		this.lastVersion = event.version
