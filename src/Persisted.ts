@@ -41,8 +41,6 @@ const EXTENSION = '.mdpack'
 const DB_FORMAT_VERSION = 0
 const allStores = new Map()
 
-let processId = process.pid & 255 // we have one byte to store it
-
 export const VERSION = Symbol('version')
 
 let globalDoesInitialization
@@ -876,6 +874,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			}
 			this.transitions.set(id, transition)
 		}
+		let valueCache = this._valueCache
+		if (valueCache) {
+			valueCache.set(id, value)
+		}
 		let buffer = this.serializeEntryValue(value, event.version, true, id)
 		this.lastVersion = event.version
 		return this.whenWritten = this.db.put(toBufferKey(id), buffer).then(successfulWrite => {
@@ -939,7 +941,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static copyAndParseValue(buffer) {
 		const version = readUInt(buffer)
 		let statusByte = buffer[0]
-		let processId = buffer[1]
 		let valueBuffer
 		if (statusByte >= COMPRESSED_STATUS_24) {
 			valueBuffer = this.uncompressEntry(buffer, statusByte, 8)
@@ -1144,7 +1145,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 
 		buffer[0] = 0
-		buffer[1] = processId
+		buffer[1] = 0
 		writeUInt(buffer, version, 0)
 		if (buffer.length > (shouldCompress ? COMPRESSION_THRESHOLD : 2 * COMPRESSION_THRESHOLD)) {
 			return this.compressEntry(buffer, 8)
