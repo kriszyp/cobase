@@ -647,7 +647,6 @@ export const Index = ({ Source }) => {
 		}
 
 		static get(id) {
-
 			// First: ensure that all the source instances are up-to-date
 			return when(this.whenUpdatedInContext(), () => {
 				let keyPrefix = toBufferKey(id)
@@ -738,8 +737,9 @@ export const Index = ({ Source }) => {
 				// Go through the expected source versions and see if we are behind and awaiting processing on any sources
 				for (const sourceName in updateContext.expectedVersions) {
 					// if the expected version is behind, wait for processing to finish
-					if (updateContext.expectedVersions[sourceName] > (sourceVersions[sourceName] || 0) && this.queue.size > 0)
+					if (updateContext.expectedVersions[sourceName] > (sourceVersions[sourceName] || 0) && this.queue.size > 0) {
 						return this.requestProcessing(1) // up the priority
+					}
 				}
 			}), () => {
 				if (context)
@@ -783,7 +783,7 @@ export const Index = ({ Source }) => {
 		}
 
 		static getIndexingState(onlyTry?) {
-			this.db.get(INDEXING_STATE, buffer => indexingState = buffer)
+			this.db.get(INDEXING_STATE, buffer => indexingState = buffer, true)
 			if (indexingState && indexingState.buffer.byteLength > 4000) {
 				debugger
 				throw new Error('Indexing state is not shared, can not continue')

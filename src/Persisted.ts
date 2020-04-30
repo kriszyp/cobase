@@ -910,7 +910,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (valueCache) {
 			// TODO: only read from DB if context specifies to look for a newer version
 			let value = valueCache.get(id)
-			if (value) {
+			if (value && value[VERSION]) {
 				expirationStrategy.useEntry(value)
 				return {
 					 version: value[VERSION],
