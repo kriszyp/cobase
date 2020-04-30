@@ -81,7 +81,7 @@ export const Index = ({ Source }) => {
 			return this.indexEntry(id, indexRequest)
 		}
 		static async indexEntry(id, indexRequest: IndexRequest) {
-			let { previousEntry, deleted, sources, triggers, version } = indexRequest
+			let { previousEntry, deleted, sources, triggers, version } = indexRequest || {}
 			let operations: OperationsArray = []
 			let previousVersion = previousEntry && previousEntry.version
 			let eventUpdateSources = []
@@ -209,9 +209,10 @@ export const Index = ({ Source }) => {
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 				this.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
-			this.queue.delete(id)
+			if (this.queue)
+				this.queue.delete(id)
 			return {
-				commit(lastVersion) {
+				commit: (lastVersion) => {
 					let batchFinished
 					if (operations.length > 0) {
 						batchFinished = this.db.batch(operations)
@@ -286,7 +287,6 @@ export const Index = ({ Source }) => {
 			this.state = 'initializing'
 			const db: Database = this.db
 			sourceVersions[Source.name] = lastIndexedVersion
-			this.queue.clear()
 			let idsAndVersionsToReindex
 			idsAndVersionsToReindex = await Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
 			let idsAndVersionsToInitialize
@@ -417,12 +417,11 @@ export const Index = ({ Source }) => {
 
 		static get(id) {
 			// First: ensure that all the source instances are up-to-date
-			return when(this.whenUpdatedInContext(), () => {
+			return when(Source.whenUpdatedInContext(true), () => {
 				let keyPrefix = toBufferKey(id)
 				let iterable = this._getIndexedValues({
 					start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
 					end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
-					recordApproximateSize: true,
 				})
 				return this.returnsIterables ? iterable : iterable.asArray
 			})
@@ -500,20 +499,9 @@ export const Index = ({ Source }) => {
 		}
 
 		static whenUpdatedInContext(context?) {
-			context = context || currentContext
-			let updateContext = (context && context.expectedVersions) ? context : DEFAULT_CONTEXT
-			return when(when(Source.whenUpdatedInContext(), () => {
-				// Go through the expected source versions and see if we are behind and awaiting processing on any sources
-				for (const sourceName in updateContext.expectedVersions) {
-					// if the expected version is behind, wait for processing to finish
-					if (updateContext.expectedVersions[sourceName] > (sourceVersions[sourceName] || 0) && this.queue.size > 0) {
-						return this.requestProcessing(1) // up the priority
-					}
-				}
-			}), () => {
-				if (context)
-					context.setVersion(lastIndexedVersion)
-			})
+			return Source.whenUpdatedInContext(true)
+				/*if (context)
+					context.setVersion(lastIndexedVersion)*/
 		}
 
 		// static returnsIterables = true // maybe at some point default this to on
@@ -609,6 +597,7 @@ export const Index = ({ Source }) => {
 		static initialize(module) {
 			this.initializing = true
 			this.Sources[0].start()
+			Source.openChildDB(this)
 			/*if (this.Sources[0].updatingProcessModule && !this.updatingProcessModule) {
 				this.updatingProcessModule = this.Sources[0].updatingProcessModule
 			}*/
@@ -767,41 +756,6 @@ export const Index = ({ Source }) => {
 		static get instances() {
 			// don't load from disk
 			return this._instances || (this._instances = [])
-		}
-		static nice = DEFAULT_INDEXING_DELAY
-		static requestProcessing(nice) {
-			// Indexing is performed one index at a time, until the indexing on that index is completed.
-			// This is to prevent too much processing being consumed by the index processing,
-			// and to allow dependent indices to fully complete before downstream indices start to
-			// avoid thrashing from repeated changes in values
-			if (this.whenProcessingComplete) {
-				// TODO: priority increases need to be transitively applied
-				this.nice = Math.min(this.nice, nice) // once started, niceness can only go down (and priority up)
-			} else {
-				this.nice = nice
-				let whenUpdatesReadable
-				this.state = 'pending'
-				this.whenProcessingComplete = Promise.all(this.Sources.map(Source =>
-					Source.whenProcessingComplete)).then(() =>
-					this.processQueue()).then(() => {
-						this.state = 'ready'
-						this.whenProcessingComplete = null
-						currentlyProcessing.delete(this)
-						for (const sourceName in processingSourceVersions) {
-							sourceVersions[sourceName] = processingSourceVersions[sourceName]
-						}
-						/*const event = new IndexingCompletionEvent()
-						event.sourceVersions = sourceVersions
-						event.sourceVersions[this.name] = lastIndexedVersion
-						super.updated(event, this)*/
-					})
-				this.whenProcessingComplete.version = lastIndexedVersion
-			}
-			return this.whenProcessingComplete
-		}
-
-		static initialize() {
-			Source.openChildDB(this)
 		}
 
 		static getInstanceIds(range?: IterableOptions) {

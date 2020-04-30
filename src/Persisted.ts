@@ -21,6 +21,7 @@ try {
 	lz4Compress = () => 0 // compression always fails if not loaded
 }
 
+const DEFAULT_INDEXING_DELAY = 20
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
@@ -458,6 +459,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
 		}
+		if (this.maxDbs) {
+			options.maxDbs = this.maxDbs
+		}
 		// useWriteMap provides better performance
 		options.useWritemap = this.useWritemap == null ? true : this.useWritemap
 		if (clearOnStart) {
@@ -676,7 +680,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.db.putSync(DB_VERSION_KEY, serialize({
 			startVersion: version,
 			dbVersion: this.hashedVersion,
-			children: this.indices.map(childStore => ({
+			indices: this.indices && this.indices.map(childStore => ({
 				name: childStore.name,
 				dbVersion: childStore.hashedVersion,
 			}))
@@ -691,7 +695,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let metadata = parse(this.db.get(DB_VERSION_KEY)) || {}
 		this.startVersion = metadata.startVersion
 		this.dbVersion = metadata.dbVersion
-		this.indices = metadata.children
+		this.indices = metadata.indices
 	}
 
 	static writeStoreMetadata() {
@@ -699,7 +703,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.db.putSync(DB_VERSION_KEY, serialize({
 			startVersion: version,
 			dbVersion: this.hashedVersion,
-			children: this.indices?.map(childStore => ({
+			indices: this.indices && this.indices.map(childStore => ({
 				name: childStore.name,
 				dbVersion: childStore.hashedVersion,
 			}))
@@ -749,7 +753,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return Variable.prototype.stopNotifies.call(this, target)
 	}
-	static whenUpdatedInContext() {
+	static whenUpdatedInContext(waitForIndexing) {
 		// transitively wait on all sources that need to update to this version
 		let promises = []
 		for (let Source of this.Sources || []) {
@@ -758,11 +762,23 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				promises.push(whenUpdated)
 			}
 		}
+		let whenReady
 		if (promises.length > 1) {
-			return Promise.all(promises)
+			whenReady = Promise.all(promises)
 		} else if (promises.length == 1) {
-			return promises[0]
+			whenReady = promises[0]
 		}
+		if (waitForIndexing) {
+			let updateContext = (currentContext && currentContext.expectedVersions) ? currentContext : DEFAULT_CONTEXT
+			return when(whenReady, () => {
+				for (const sourceName in updateContext.expectedVersions) {
+					// if the expected version is behind, wait for processing to finish
+					//if (updateContext.expectedVersions[sourceName] > (sourceVersions[sourceName] || 0) && this.queue.size > 0)
+					//	return this.requestProcessing(1) // up the priority
+				}
+			})
+		}
+		return whenReady
 	}
 	static get instanceIds() {
 		let instanceIds = instanceIdsMap.get(this.name)
@@ -865,6 +881,119 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 	}
+
+	static queue = new Map<any, IndexRequest>()
+	static async processQueue() {
+		this.state = 'processing'
+		if (this.onStateChange) {
+			this.onStateChange({ processing: true, started: true })
+		}
+		let cpuUsage = process.cpuUsage()
+		let cpuTotalUsage = cpuUsage.user + cpuUsage.system
+		let lastTime = Date.now()
+		let concurrencyAdjustment = 1
+		let niceAdjustment = 2
+		try {
+			let queue = this.queue
+			let initialQueueSize = queue.size
+			//currentlyProcessing.add(this)
+			if (initialQueueSize > 100) {
+				this.log('Indexing', initialQueueSize, Source.name, 'for', this.name)
+			}
+			let indexingInProgress = []
+			let indexingInOtherProcess = [] // TODO: Need to have whenUpdated wait on this too
+			let actionsInProgress = []
+			let sinceLastStateUpdate = 0
+			do {
+				if (this.nice > 0)
+					await this.delay(this.nice) // short delay for other processing to occur
+				for (let entry of queue) {
+					if (queue.isReplaced)
+						return
+					sinceLastStateUpdate++
+					this.state = 'initiating indexing of entry'
+					indexingInProgress.push(this.indexEntry(entry))
+					if (sinceLastStateUpdate > (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * concurrencyAdjustment) {
+						// we have process enough, commit our changes so far
+						this.onBeforeCommit && this.onBeforeCommit(id)
+						let indexingStarted = indexingInProgress
+						indexingInProgress = []
+						this.averageConcurrencyLevel = ((this.averageConcurrencyLevel || 0) + sinceLastStateUpdate) / 2
+						sinceLastStateUpdate = 0
+						this.state = 'awaiting indexing'
+						await Promise.all(indexingStarted)
+						this.state = 'finished indexing batch'
+						let processedEntries = indexingStarted.length
+						//this.saveLatestVersion(false)
+						cpuUsage = process.cpuUsage()
+						let lastCpuUsage = cpuTotalUsage
+						cpuTotalUsage = cpuUsage.user + cpuUsage.system
+						let currentTime = Date.now()
+						let timeUsed = currentTime - lastTime
+						lastTime = currentTime
+						// calculate an indexing adjustment based on cpu usage and queue size (which we don't want to get too big)
+						concurrencyAdjustment = (concurrencyAdjustment + 1000 / (1000 + timeUsed)) / 2
+						niceAdjustment = (niceAdjustment + (cpuTotalUsage - lastCpuUsage) / (timeUsed + 10) / 20) / 2
+						/* Can be used to measure performance
+						let [seconds, billionths] = process.hrtime(lastStart)
+						lastStart = process.hrtime()
+						*/if (isNaN(niceAdjustment)) {
+							console.log('speed adjustment', { concurrencyAdjustment, niceAdjustment, timeUsed, cpuTime: (cpuTotalUsage - lastCpuUsage) })
+							niceAdjustment = 10
+						}
+						await this.delay(Math.round((this.nice * niceAdjustment) / (queue.size + 1000))) // short delay for other processing to occur
+					}
+				}
+				this.state = 'waiting on other processes'
+				this.state = 'awaiting final indexing'
+				await Promise.all(indexingInProgress) // then wait for all indexing to finish everything
+			} while (queue.size > 0)
+			await this.lastWriteCommitted
+			if (initialQueueSize > 100) {
+				this.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
+			}
+		} catch (error) {
+			this.warn('Error occurred in processing index queue for', this.name, error, 'remaining in queue', this.queue.size)
+		}
+		this.state = 'processed'
+		if (this.onStateChange) {
+			this.onStateChange({ processing: true, started: false })
+		}
+	}
+
+	static indexEntry([ id ]) {
+		return this.get(id)
+	}
+
+	static requestProcessing(nice) {
+		// Indexing is performed one index at a time, until the indexing on that index is completed.
+		// This is to prevent too much processing being consumed by the index processing,
+		// and to allow dependent indices to fully complete before downstream indices start to
+		// avoid thrashing from repeated changes in values
+		if (this.whenProcessingThisComplete) {
+			// TODO: priority increases need to be transitively applied
+			this.nice = Math.min(this.nice, nice) // once started, niceness can only go down (and priority up)
+		} else {
+			this.nice = nice
+			let whenUpdatesReadable
+			this.state = 'pending'
+			this.whenProcessingThisComplete = Promise.all((this.Sources || []).map(Source =>
+				Source.whenProcessingComplete)).then(() =>
+				this.processQueue()).then(() => {
+					this.state = 'ready'
+					this.whenProcessingThisComplete = null
+					//for (const sourceName in processingSourceVersions) {
+					//	sourceVersions[sourceName] = processingSourceVersions[sourceName]
+					//}
+					/*const event = new IndexingCompletionEvent()
+					event.sourceVersions = sourceVersions
+					event.sourceVersions[this.name] = lastIndexedVersion
+					super.updated(event, this)*/
+				})
+			this.whenProcessingThisComplete.version = lastIndexedVersion
+		}
+		return this.whenProcessingThisComplete
+	}
 })
 
 const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Base {
@@ -940,17 +1069,17 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	_valueCache: Map<any, any>
 
 	static saveValue(id, value, isNew?, beforeCommit?) {
-		let forValueResults = this.indices?.map(store => store.forValue(id, value, this.queue.get(id)))
-		let promises = forValueResults.filter(promise => promise?.then)
 		let transition = this.transitions.get(id)
 		let version = transition.fromVersion
+		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, value, this.queue.get(id) || { version })) : []
+		let promises = forValueResults.filter(promise => promise && promise.then)
 
 		const readyToCommit = (forValueResults) => {
 			const conditionalHeader = isNew === undefined ? undefined : isNew ? null :
 					this.createHeader(transition.fromVersion, process.pid)
 			this.lastIndexedVersion = Math.max(this.lastIndexedVersion || 0, version)
 			for (let result of forValueResults) {
-				forValueResults.commit(this.lastIndexedVersion)
+				result.commit(this.lastIndexedVersion)
 			}
 			let committed
 			//console.log('conditional header for writing transform ' + (value ? 'write' : 'delete'), id, this.name, conditionalHeader)
@@ -1240,9 +1369,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 			if (this.indices) {
 				let versionBuffer = this.dataVersionBuffer
-				if (this.nextInvalidatedVersion)
-					writeUInt(versionBuffer, this.nextInvalidatedVersion)
-				for (let i = 0, l = this.indices.length; i < l; i++) {
+				let indexCount = this.indices.length
+				if (!versionBuffer || versionBuffer.length < (indexCount + 1) * 8) {
+					versionBuffer = this.dataVersionBuffer = Buffer.allocUnsafeSlow((indexCount + 1) * 8).fill(0) // I think allocUnsafeSlow is better for long-lived buffers
+				}
+				writeUInt(versionBuffer, this.nextInvalidatedVersion || 0)
+				for (let i = 0; i < indexCount; i++) {
 					let childStore = this.indices[i]
 					if (childStore.lastUpdate)
 						writeUInt(versionBuffer, childStore.lastUpdate, 8 * (i + 1))
@@ -1294,111 +1426,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		return buffer
 	}
-
-	static queue = new Map<any, IndexRequest>()
-	static async processQueue() {
-		this.state = 'processing'
-		if (this.onStateChange) {
-			this.onStateChange({ processing: true, started: true })
-		}
-		let cpuUsage = process.cpuUsage()
-		let cpuTotalUsage = cpuUsage.user + cpuUsage.system
-		let lastTime = Date.now()
-		let concurrencyAdjustment = 1
-		let niceAdjustment = 2
-		try {
-			let queue = this.queue
-			let initialQueueSize = queue.size
-			currentlyProcessing.add(this)
-			if (initialQueueSize > 100) {
-				this.log('Indexing', initialQueueSize, Source.name, 'for', this.name)
-			}
-			let indexingInProgress = []
-			let indexingInOtherProcess = [] // TODO: Need to have whenUpdated wait on this too
-			let actionsInProgress = []
-			let sinceLastStateUpdate = 0
-			do {
-				if (this.nice > 0)
-					await this.delay(this.nice) // short delay for other processing to occur
-				for (let [id] of queue) {
-					if (queue.isReplaced)
-						return
-					let { previousEntry } = indexRequest
-					previousEntry = indexRequest.previousEntry = (previousEntry && previousEntry.then) ? await previousEntry : previousEntry
-					if (previousEntry instanceof Invalidated) {
-						// delete from our queue
-						this.queue.delete(id)
-						// delegate to other process
-						indexingInOtherProcess.push(this.sendRequestToIndex(id, indexRequest).then(( { indexed }) => {
-							if (indexed) {
-							} else  {
-								let newEntry = Source.getFromDB(id)
-								if (newEntry instanceof Invalidated) {
-									this.log('no process confirmed sendRequestToIndex, still invalidated, indexing locally', this.name, id)
-									let event = new ReplacedEvent()
-									event.version = indexRequest.version
-									this.updated(event, { id })
-								}
-							}
-						}))
-						if (this.queue.size == 0) {
-							// if our queue is empty, need to update our process map
-							this.whenWritesCommitted()
-						}
-						continue // and don't add to count of concurrent indexing, as that could contribute to a deadlock
-					}
-
-					sinceLastStateUpdate++
-					this.state = 'initiating indexing of entry'
-					indexingInProgress.push(this.get(id))
-					if (sinceLastStateUpdate > (Source.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * concurrencyAdjustment) {
-						// we have process enough, commit our changes so far
-						this.onBeforeCommit && this.onBeforeCommit(id)
-						let indexingStarted = indexingInProgress
-						indexingInProgress = []
-						this.averageConcurrencyLevel = ((this.averageConcurrencyLevel || 0) + sinceLastStateUpdate) / 2
-						sinceLastStateUpdate = 0
-						this.state = 'awaiting indexing'
-						await Promise.all(indexingStarted)
-						this.state = 'finished indexing batch'
-						let processedEntries = indexingStarted.length
-						//this.saveLatestVersion(false)
-						cpuUsage = process.cpuUsage()
-						let lastCpuUsage = cpuTotalUsage
-						cpuTotalUsage = cpuUsage.user + cpuUsage.system
-						let currentTime = Date.now()
-						let timeUsed = currentTime - lastTime
-						lastTime = currentTime
-						// calculate an indexing adjustment based on cpu usage and queue size (which we don't want to get too big)
-						concurrencyAdjustment = (concurrencyAdjustment + 1000 / (1000 + timeUsed)) / 2
-						niceAdjustment = (niceAdjustment + (cpuTotalUsage - lastCpuUsage) / (timeUsed + 10) / 20) / 2
-						/* Can be used to measure performance
-						let [seconds, billionths] = process.hrtime(lastStart)
-						lastStart = process.hrtime()
-						*/if (isNaN(niceAdjustment)) {
-							console.log('speed adjustment', { concurrencyAdjustment, niceAdjustment, timeUsed, cpuTime: (cpuTotalUsage - lastCpuUsage) })
-							niceAdjustment = 10
-						}
-						await this.delay(Math.round((this.nice * niceAdjustment) / (queue.size + 1000))) // short delay for other processing to occur
-					}
-				}
-				this.state = 'waiting on other processes'
-				this.state = 'awaiting final indexing'
-				await Promise.all(indexingInProgress) // then wait for all indexing to finish everything
-			} while (queue.size > 0)
-			await this.lastWriteCommitted
-			if (initialQueueSize > 100) {
-				this.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
-			}
-		} catch (error) {
-			this.warn('Error occurred in processing index queue for', this.name, error, 'remaining in queue', this.queue.size)
-		}
-		this.state = 'processed'
-		if (this.onStateChange) {
-			this.onStateChange({ processing: true, started: false })
-		}
-	}
-
 }
 
 export class Persisted extends KeyValued(MakePersisted(Variable), {
@@ -1757,7 +1784,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static createHeader(version, processId) {
-		const buffer = Buffer.allocUnsafe(processId 12 : 8)
+		const buffer = Buffer.allocUnsafe(processId ? 12 : 8)
 		writeUInt(buffer, version)
 		buffer[0] = INVALIDATED_STATE
 		buffer[1] = 0
@@ -1770,9 +1797,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		if (waitFor == 'get') {
 			console.log('waiting for entity to commit', id)
 			this.get(id)
-			return when(this.transitions.get(id)?.committed, () => {
-				// return nothing, so we don't create any overhead between processes
-			})
+			if (this.transitions.has(id))
+				return when(this.transitions.get(id).committed, () => {
+					// return nothing, so we don't create any overhead between processes
+				})
 		}
 	}
 
