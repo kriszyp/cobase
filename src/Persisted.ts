@@ -22,6 +22,7 @@ try {
 }
 
 const DEFAULT_INDEXING_DELAY = 20
+const DEFAULT_INDEXING_CONCURRENCY = 40
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
@@ -439,6 +440,22 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return aggregateVersion ^ (this.version || 0)
 	}
+	static openDatabase() {
+		const options = {}
+		if (this.mapSize) {
+			options.mapSize = this.mapSize
+		}
+		if (this.maxDbs) {
+			options.maxDbs = this.maxDbs
+		}
+		// useWriteMap provides better performance
+		options.useWritemap = this.useWritemap == null ? true : this.useWritemap
+		if (clearOnStart) {
+			console.info('Completely clearing', this.name)
+			options.clearOnStart = true
+		}
+		return this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name + EXTENSION, options)
+	}
 
 	static initialize() {
 		this.instancesById = new (this.useWeakMap ? WeakValueMap : Map)()
@@ -455,20 +472,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				Source.start()
 			Source.notifies(this)
 		}
-		const options = {}
-		if (this.mapSize) {
-			options.mapSize = this.mapSize
-		}
-		if (this.maxDbs) {
-			options.maxDbs = this.maxDbs
-		}
-		// useWriteMap provides better performance
-		options.useWritemap = this.useWritemap == null ? true : this.useWritemap
-		if (clearOnStart) {
-			console.info('Completely clearing', this.name)
-			options.clearOnStart = true
-		}
-		const db = this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name + EXTENSION, options)
+
+		this.openDatabase()
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization && false
 		return when(this.getStructureVersion(), structureVersion => {
@@ -882,7 +887,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	static queue = new Map<any, IndexRequest>()
+	static queue: Map<any, IndexRequest>
 	static async processQueue() {
 		this.state = 'processing'
 		if (this.onStateChange) {
@@ -898,7 +903,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let initialQueueSize = queue.size
 			//currentlyProcessing.add(this)
 			if (initialQueueSize > 100) {
-				this.log('Indexing', initialQueueSize, Source.name, 'for', this.name)
+				console.log('Indexing', initialQueueSize, this.name, 'for', this.name)
 			}
 			let indexingInProgress = []
 			let indexingInOtherProcess = [] // TODO: Need to have whenUpdated wait on this too
@@ -906,13 +911,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let sinceLastStateUpdate = 0
 			do {
 				if (this.nice > 0)
-					await this.delay(this.nice) // short delay for other processing to occur
+					await delay(this.nice) // short delay for other processing to occur
 				for (let entry of queue) {
 					if (queue.isReplaced)
 						return
 					sinceLastStateUpdate++
 					this.state = 'initiating indexing of entry'
-					indexingInProgress.push(this.indexEntry(entry))
+					indexingInProgress.push(this.forQueueEntry(entry))
 					if (sinceLastStateUpdate > (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * concurrencyAdjustment) {
 						// we have process enough, commit our changes so far
 						this.onBeforeCommit && this.onBeforeCommit(id)
@@ -941,7 +946,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 							console.log('speed adjustment', { concurrencyAdjustment, niceAdjustment, timeUsed, cpuTime: (cpuTotalUsage - lastCpuUsage) })
 							niceAdjustment = 10
 						}
-						await this.delay(Math.round((this.nice * niceAdjustment) / (queue.size + 1000))) // short delay for other processing to occur
+						await delay(Math.round((this.nice * niceAdjustment) / (queue.size + 1000))) // short delay for other processing to occur
 					}
 				}
 				this.state = 'waiting on other processes'
@@ -950,10 +955,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			} while (queue.size > 0)
 			await this.lastWriteCommitted
 			if (initialQueueSize > 100) {
-				this.log('Finished indexing', initialQueueSize, Source.name, 'for', this.name)
+				console.log('Finished indexing', initialQueueSize, 'for', this.name)
 			}
 		} catch (error) {
-			this.warn('Error occurred in processing index queue for', this.name, error, 'remaining in queue', this.queue.size)
+			console.warn('Error occurred in processing index queue for', this.name, error, 'remaining in queue', this.queue.size)
 		}
 		this.state = 'processed'
 		if (this.onStateChange) {
@@ -961,8 +966,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	static indexEntry([ id ]) {
-		return this.get(id)
+	static forQueueEntry([ id ]) {
+		return when(this.get(id), () => {
+			this.queue.delete(id)
+		})
 	}
 
 	static requestProcessing(nice) {
@@ -990,7 +997,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					event.sourceVersions[this.name] = lastIndexedVersion
 					super.updated(event, this)*/
 				})
-			this.whenProcessingThisComplete.version = lastIndexedVersion
+			//this.whenProcessingThisComplete.version = lastIndexedVersion
 		}
 		return this.whenProcessingThisComplete
 	}
@@ -1081,6 +1088,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			for (let result of forValueResults) {
 				result.commit(this.lastIndexedVersion)
 			}
+			// TODO: Only do this if the version is still the same
 			let committed
 			//console.log('conditional header for writing transform ' + (value ? 'write' : 'delete'), id, this.name, conditionalHeader)
 			if (value === undefined) {
@@ -1244,6 +1252,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			this.indices.push(store)
 			this.writeStoreMetadata()
 		}
+		return store.db
 	}
 
 
@@ -1491,7 +1500,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					}
 					let oldTransition = this.transitions.get(id)
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
-					let transition = this.runTransform(id, entry.version, false, mode)
+					let isNew
+					if (entry.processId)
+						isNew = false
+					// else TODO: if there is an un-owned entry, we should actually do a conditional write to make sure it hasn't changed
+					let transition = this.runTransform(id, entry.version, isNew, mode)
 					if (oldTransition && oldTransition.abortables) {
 						// if it is still in progress, we can abort it and replace the result
 						oldTransition.replaceWith = transition.result

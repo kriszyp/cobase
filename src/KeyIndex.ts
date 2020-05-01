@@ -80,6 +80,14 @@ export const Index = ({ Source }) => {
 			indexRequest.value = value
 			return this.indexEntry(id, indexRequest)
 		}
+		static forQueueEntry([id, indexRequest]) {
+			this.indexEntry(id, indexRequest).then(complete => {
+				if (complete) {
+					this.queue.delete(id)
+					complete.commit()
+				}
+			})
+		}
 		static async indexEntry(id, indexRequest: IndexRequest) {
 			let { previousEntry, deleted, sources, triggers, version } = indexRequest || {}
 			let operations: OperationsArray = []
@@ -209,8 +217,6 @@ export const Index = ({ Source }) => {
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 				this.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
-			if (this.queue)
-				this.queue.delete(id)
 			return {
 				commit: (lastVersion) => {
 					let batchFinished
@@ -300,7 +306,6 @@ export const Index = ({ Source }) => {
 				this.log('Cleared index', this.name)
 				idsAndVersionsToInitialize = idsAndVersionsToReindex
 				idsAndVersionsToReindex = []
-				writeUInt(this.getIndexingState(), lastIndexedVersion = idsAndVersionsToInitialize.lastVersion, 8)
 			} else {
 				let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 				if (resumeFromKey) {
@@ -539,65 +544,12 @@ export const Index = ({ Source }) => {
 			})
 		}
 
-		static getIndexingState(onlyTry?) {
-			this.db.get(INDEXING_STATE, buffer => indexingState = buffer, true)
-			if (indexingState && indexingState.buffer.byteLength > 4000) {
-				debugger
-				throw new Error('Indexing state is not shared, can not continue')
-			}
-			if (!indexingState && !onlyTry) {
-				this.initializeIndexingState()
-			}
-			return indexingState
-		}
-		static initializeIndexingState() {
-			const db = this.db
-			db.transaction(() => {
-				this.getIndexingState(true)
-				// we setup the indexing state buffer
-				if (!indexingState || indexingState.length !== INDEXING_STATE_SIZE) {
-					db.putSync(INDEXING_STATE, Buffer.alloc(INDEXING_STATE_SIZE))
-					this.getIndexingState(true) // now get the shared reference to it again
-				}
-				lastIndexedVersion = readUInt(Buffer.from(indexingState.slice(8, 16))) || 1
-				stateOffset = 16
-				if (indexingState[1] < 20) {
-					while (stateOffset < indexingState.length) {
-						const processId = readUInt(indexingState, stateOffset)
-						if (processId === 0) { // empty slot, grab it for this process
-							writeUInt(indexingState, process.pid, stateOffset)
-							indexingState[1] = Math.max(indexingState[1], stateOffset / 16)
-							//console.log('Registered indexing process at offset', stateOffset, indexingState[1], process.pid)
-							// directly write to buffer, don't need to do a put
-							return indexingState
-						}
-						stateOffset += 16
-					}
-				}
-				this.warn('No free indexing process slots, need to reset indexing state table')
-				indexingState.fill(0, 0, INDEXING_STATE_SIZE)
-				stateOffset = 16
-				writeUInt(indexingState, process.pid, stateOffset)
-				indexingState[1] = 1
-			})
-			db.on('remap', (forceUnload) => {
-				this.log('onInvalidation of indexingState')
-				//if (forceUnload === true) {
-				indexingState = null
-				//} else {
-				//	return false // if it is not forced, indicate that it is always up-to-date (we never overwrite this entry)
-				//}
-			})
-		}
-		static initializeDB() {
-			let initializingProcess = super.initializeDB()
-			this.initializeIndexingState()
-			return initializingProcess
+		static openDatabase() {
+			return Source.openChildDB(this)
 		}
 		static initialize(module) {
 			this.initializing = true
 			this.Sources[0].start()
-			Source.openChildDB(this)
 			/*if (this.Sources[0].updatingProcessModule && !this.updatingProcessModule) {
 				this.updatingProcessModule = this.Sources[0].updatingProcessModule
 			}*/
@@ -613,137 +565,6 @@ export const Index = ({ Source }) => {
 		}
 		static myEarliestPendingVersion = 0 // have we registered our process, and at what version
 		static whenAllConcurrentlyIndexing?: Promise<any> // promise if we are waiting for the initial indexing process to join the concurrent indexing mode
-		static updateProcessMap(version, force?) {
-			if (this.myEarliestPendingVersion === 0 || force) {
-				if (!indexingState) {
-					// need to re-retrieve it
-					this.getIndexingState()
-				}
-				const versionWord = Buffer.alloc(8)
-				writeUInt(versionWord, version)
-				versionWord.copy(indexingState, stateOffset + 8) // copy word for an atomic update
-				this.myEarliestPendingVersion = version
-			}
- 		}
-		static pendingRequests = new Map()
-		static sendRequestToIndex(id, indexRequest) {
-
-			this.log('sendRequestToIndex', id, this.name, 'version', indexRequest.version, 'previousVersion', indexRequest.previousVersion)
-			if (!this.sendRequestToProcess) {
-				return Promise.resolve({ indexed: false })
-			}
-			const request = {
-				id,
-				version: indexRequest.version,
-				previousVersion: indexRequest.previousVersion,
-				waitFor: 'index',
-			}
-			this.pendingRequests.set(id, {
-				request
-			})
-			return withTimeout(this.sendRequestToAllProcesses(request), 60000).then(responses => {
-				return {
-					indexed: responses.some(({ indexed }) => indexed)
-				}
-			}, error => {
-				this.log('Error on waiting for indexed', this.name, 'index request', request, error.toString())
-				return { indexed: false }
-			}).finally((indexed) => {
-				this.pendingRequests.delete(id)
-				this.log('sendRequestToIndex finished', id, this.name, indexed)
-			})
-		}
-		static sendRequestToWrite(pid, version) {
-			try {
-				return withTimeout(this.sendRequestToProcess(pid, {
-					version,
-					waitFor: 'write',
-				}), 60000).catch(error => {
-					this.log('Error on waiting for writing index', this.name, 'from process', pid, 'index request', version, error.toString())
-					return { indexed: false }
-				})
-			} catch(error) {
-				if (error.message.startsWith('No socket')) {
-					// clean up if the process/socket is dead
-					console.info('Cleaning up socket to old process', pid)
-					this.removeDeadProcessEntry(pid)
-					return { indexed: false }
-					// TODO: resumeIndex?
-				}
-				throw error
-			}
-
-		}
-
-		static removeDeadProcessEntry(pid)  {
-			if (!indexingState) {
-				this.getIndexingState()
-			}
-			const processes = indexingState[1]
-			let lastProcessNumber = 0
-			for (let i = 1; i < processes + 1; i++) {
-				let offset = i * 16
-				let slotPid
-				if (slotPid = readUInt(indexingState, offset)) {
-					if (offset != stateOffset && slotPid === pid) {
-						indexingState.fill(0, offset, offset + 16) // clear it out by zeroing
-					} else {
-						lastProcessNumber = i // valid entry, increase last process index
-					}
-				}
-			}
-			indexingState[1] = lastProcessNumber // reset the number of processes since it may have decreased
-		}
-
-		static cleanupDeadProcessReference(pid, initializingProcess) {
-			this.removeDeadProcessEntry(pid)
-			return super.cleanupDeadProcessReference(pid, initializingProcess)
-		}
-
-		static receiveRequest({ id, version, previousVersion, waitFor }) {
-			if (waitFor == 'write') {
-				console.log('received request to wait for write')
-				if (this.queue.size === 0) {
-					console.log('nothing in queue, immediately responding')
-					// if nothing in queue, wait for last write and return
-					return when(this.lastWriteCommitted, () => ({ written: true }))
-				}
-				if (this.queuedRequestForWriteNotification) {
-					console.log('waiting on other processes, immediately responding')
-					// if we are waiting for other processes, let it proceed, so don't deadlock
-					// (it is possible for a sequence of processes to wait on each other, but we won't worry about that for now)
-					return when(this.lastWriteCommitted, () => ({ written: true }))
-				}
-				if (!this.requestForWriteNotification) {
-					this.requestForWriteNotification = []
-				}
-				console.log('adding a requestForWriteNotification')
-				return new Promise(resolve => {
-					this.requestForWriteNotification.push({
-						version,
-						whenWritten: resolve
-					})
-				})
-			}
-			// else if (waitFor == 'index') {
-			const updateInQueue = this.queue.get(id);
-			if (updateInQueue) {
-				if (updateInQueue.version < version) {
-					// update our version number to be the latest
-					updateInQueue.version = version
-				}
-				//console.log('receiveRequest', id, this.name, 'version', version, 'previousVersion', previousVersion, 'will handle')
-				return new Promise(resolve =>
-					(updateInQueue.resolveOnCompletion || (updateInQueue.resolveOnCompletion = [])).push(resolve))
-					.then(() => ({ indexed: true })) // reply when we have finished indexing this
-			}
-			//console.log('receiveRequest', id, this.name, 'version', version, 'previousVersion', previousVersion, 'but not handling')
-
-			return {
-				indexed: false
-			}
-			// else return/reply that the indexing can go ahead, no conflicts here
-		}
 		static loadVersions() {
 			// don't load versions
 		}
@@ -788,10 +609,10 @@ Index.getCurrentStatus = () => {
 	}
 	return allIndices.map(Index => ({
 		name: Index.name,
-		queued: Index.queue.size,
+		//queued: Index.queue.size,
 		state: Index.state,
 		concurrencyLevel: Index.averageConcurrencyLevel,
-		pendingRequests: Array.from(Index.pendingRequests),
+		//pendingRequests: Array.from(Index.pendingRequests),
 	}))
 }
 const allIndices = []
