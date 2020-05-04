@@ -25,11 +25,11 @@ const DEFAULT_INDEXING_DELAY = 20
 const DEFAULT_INDEXING_CONCURRENCY = 40
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
-const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata 1
+const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata
 const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
 // everything after 9 is cleared when a db is cleared
 const SHARED_STRUCTURE_KEY = Buffer.from([1, 10])
-const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 11]) // table metadata 11
+const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 3]) // table metadata 11
 const INITIALIZATION_SOURCE = 'is-initializing'
 const DISCOVERED_SOURCE = 'is-discovered'
 const SHARED_MEMORY_THRESHOLD = 1024
@@ -381,8 +381,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static set doesInitialization(flag) {
 		this._doesInitialization = flag
 	}
-	static initializeDB() {
-		const db = this.db
+	static initializeRootDB() {
+		const db = this.rootDB
+		this.rootStore = this
 
 		if (sharedStructureDirectory) {
 			let sharedFile = sharedStructureDirectory + '/' + this.name + '.dpack'
@@ -399,7 +400,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		}
 
-		const processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
+		// TODO: Might be better use Buffer.allocUnsafeSlow(6)
+		const processKey = this.processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
 		let initializingProcess
 		db.transaction(() => {
 			initializingProcess = db.get(INITIALIZING_PROCESS_KEY)
@@ -418,16 +420,24 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				this.otherProcesses.splice(this.otherProcesses.indexOf(process.pid))
 			}
 		})
-		let versionBuffer = db.get(LAST_VERSION_IN_DB_KEY)
-		this.lastVersion = versionBuffer ? readUInt(versionBuffer) : 0
-		let stateDPack = db.get(DB_VERSION_KEY)
-		let didReset
-		let state = stateDPack && parse(stateDPack)
-		if (state) {
-			this.dbVersion = state.dbVersion
-			this.startVersion = state.startVersion
+		this.initializingProcess = initializingProcess
+		this.whenUpgraded = Promise.resolve()
+		const waitForUpgraded = () => {
+			let whenUpgraded = this.whenUpgraded
+			whenUpgraded.then(() => setTimeout(() => {
+				console.log("checking to see if we are done")
+				if (whenUpgraded == this.whenUpgraded)
+					try {
+						this.db.removeSync(INITIALIZING_PROCESS_KEY)
+						console.log('finished data initialization', this.name)
+					} catch (error) {
+						console.warn(error.toString())
+					}
+				else
+					return waitForUpgraded()
+			}), 10)
 		}
-		return initializingProcess
+		waitForUpgraded()
 	}
 
 	static getStructureVersion() {
@@ -440,7 +450,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return aggregateVersion ^ (this.version || 0)
 	}
-	static openDatabase() {
+	static openRootDatabase() {
 		const options = {}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
@@ -448,13 +458,63 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (this.maxDbs) {
 			options.maxDbs = this.maxDbs
 		}
-		// useWriteMap provides better performance
+		// useWriteMap provides better performance, make it the default
 		options.useWritemap = this.useWritemap == null ? true : this.useWritemap
 		if (clearOnStart) {
 			console.info('Completely clearing', this.name)
 			options.clearOnStart = true
 		}
-		return this.prototype.db = this.db = Persisted.DB.open(this.dbFolder + '/' + this.name + EXTENSION, options)
+		this.rootDB = Persisted.DB.open(this.dbFolder + '/' + this.name + EXTENSION, options)
+		return this.prototype.db = this.db = this.rootDB.openDB(this.name)
+	}
+/*
+	static async needsDBUpgrade() {
+		let needsDBUpgrade
+		if (this.Sources) {
+			for (let Source of this.Sources) {
+				if (await Source.needsDBUpgrade()) {
+					needsDBUpgrade = true
+				}
+			}
+		} else {
+			this.rootDB
+		}
+		let structureVersion = this.getStructureVersion()
+
+	}
+
+	// promise to:
+	// true: aquired lock
+	// false: did not acquire
+	static async upgradeToVersionIfNeeded(version, doUpgrade): Promise<boolean> {
+		let state = stateDPack && parse(stateDPack)
+		this.dbVersion = state && state[name]
+		if (this.dbVersion == version)
+			return
+		if (this.rootStore.whenUpgradesFinished) {
+			let hasLock = await this.rootStore.whenUpgradesFinished
+			if (hasLock) {
+				this.rootStore.whenUpgradesFinished = Promise.resolve(doUpgrade())
+			} else {
+				this.rootDB.transaction(() => {
+					let state = stateDPack && parse(stateDPack)
+					this.dbVersion = state && state[name]
+					if (this.dbVersion == version)
+						return
+
+				}
+			}
+		}
+
+		this.rootDB.transaction(() => {
+
+		})
+
+
+	}*/
+
+	static openDatabase() {
+		this.Sources[0].openChildDB(this)
 	}
 
 	static initialize() {
@@ -472,25 +532,41 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				Source.start()
 			Source.notifies(this)
 		}
-
-		this.openDatabase()
+		let isRoot
+		if (this.Sources && this.Sources.length == 1 && !this.useOwnDatabase) {
+			this.openDatabase()
+		} else {
+			this.openRootDatabase()
+			isRoot = true
+		}
 		this.instancesById.name = this.name
 		let doesInitialization = Persisted.doesInitialization && false
 		return when(this.getStructureVersion(), structureVersion => {
 			this.hashedVersion = (structureVersion || 0) ^ (DB_FORMAT_VERSION << 12)
+			if (isRoot)
+				this.initializeRootDB()
+			let initializingProcess = this.rootStore.initializingProcess
+			let stateDPack = this.db.get(DB_VERSION_KEY)
+			let didReset
+			let state = stateDPack && parse(stateDPack)
+			if (state) {
+				this.dbVersion = state.dbVersion
+				this.startVersion = state.startVersion
+			}
 
-			let initializingProcess = this.initializeDB()
 			const db = this.db
 			registerClass(this)
 
 			let whenEachProcess = []
 			//console.log('Connecting', this.name, 'to processes', this.otherProcesses)
-			for (const pid of this.otherProcesses) {
-				whenEachProcess.push(addProcess(pid, this).catch(() =>
-					this.cleanupDeadProcessReference(pid, initializingProcess)))
+			if (isRoot) {
+				for (const pid of this.otherProcesses) {
+					whenEachProcess.push(addProcess(pid, this).catch(() =>
+						this.cleanupDeadProcessReference(pid, initializingProcess)))
+				}
 			}
 			// make sure these are inherited
-			if (initializingProcess/* || !Persisted.doesInitialization*/) {
+			if (initializingProcess && isRoot/* || !Persisted.doesInitialization*/) {
 				// there is another process handling initialization
 				return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), () => {
 					console.log('Connected to each process complete and finished initialization', this.name)
@@ -506,36 +582,41 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		const versionBuffer = this.db.get(LAST_VERSION_IN_DB_KEY)
 		this.lastVersion = Math.max(this.lastVersion, versionBuffer ? readUInt(versionBuffer) : 0) // re-retrieve this, it could have changed since we got a lock
 		//console.log('start data initialization', this.name, this.lastVersion)
-		const whenFinished = () => {
-			try {
-				this.db.removeSync(INITIALIZING_PROCESS_KEY)
-				//console.log('finished data initialization', this.name)
-			} catch (error) {
-				console.warn(error.toString())
-			}
-		}
+		let whenThisUpgraded
 		try {
-			return when(this.initializeData(), () => {
+
+			whenThisUpgraded = when(this.initializeData(), () => {
 				//console.log('Finished initializeData', this.name)
 				this.updateDBVersion()
-				whenFinished()
 			}, (error) => {
 				console.error('Error initializing database for', this.name, error)
-				whenFinished()
 			})
 		} catch (error) {
 			console.error(error)
-			whenFinished()
+			whenThisUpgraded = Promise.resolve()
 		}
+		this.rootStore.whenUpgraded = this.rootStore.whenUpgraded.then(() => whenThisUpgraded)
 	}
 	static cleanupDeadProcessReference(pid, initializingProcess) {
 		// error connecting to another process, which means it is dead/old and we need to clean up
 		// and possibly take over initialization
 		let index = this.otherProcesses.indexOf(pid)
-		const db = this.db
+		const db = this.rootDB
 		if (index > -1) {
 			this.otherProcesses.splice(index, 1)
-			db.removeSync(Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff]))
+			let deadProcessKey = Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff])
+			let buffer = db.get(deadProcessKey)
+			console.warn('cleaing up process ', pid, deadProcessKey, buffer)
+			if (buffer && buffer.length > 1) {
+				let invalidationState = readUInt(buffer)
+				for (let store of [this, ...this.childStores]) {
+					let divided = invalidationState / store.invalidationIdentifier
+					if (divided >>> 0 == divided) {
+						console.warn('Need to find invalidated entries in ', store.name)
+					}
+				}
+			}
+			db.removeSync(deadProcessKey)
 		}
 		if (initializingProcess == pid) {
 			let doInit
@@ -654,8 +735,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			// if we are being notified of ourself being created, ignore it
 			// do nothing
 		} else if (id) {
-			if (this.updateWithPrevious)
-				nextBy.previousEntry = this.getEntryData(id)
 			this.invalidateEntry(id, event, nextBy)
 		}
 		if (id) {
@@ -685,7 +764,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.db.putSync(DB_VERSION_KEY, serialize({
 			startVersion: version,
 			dbVersion: this.hashedVersion,
-			indices: this.indices && this.indices.map(childStore => ({
+			childStores: this.childStores && this.childStores.map(childStore => ({
 				name: childStore.name,
 				dbVersion: childStore.hashedVersion,
 			}))
@@ -700,7 +779,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let metadata = parse(this.db.get(DB_VERSION_KEY)) || {}
 		this.startVersion = metadata.startVersion
 		this.dbVersion = metadata.dbVersion
-		this.indices = metadata.indices
+		this.childStores = metadata.childStores
 	}
 
 	static writeStoreMetadata() {
@@ -708,9 +787,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.db.putSync(DB_VERSION_KEY, serialize({
 			startVersion: version,
 			dbVersion: this.hashedVersion,
-			indices: this.indices && this.indices.map(childStore => ({
+			childStores: this.childStores && this.childStores.map(childStore => ({
 				name: childStore.name,
 				dbVersion: childStore.hashedVersion,
+				invalidationIdentifier: childStore.invalidationIdentifier
 			}))
 		}))
 	}
@@ -975,7 +1055,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static requestProcessing(nice) {
 		// Indexing is performed one index at a time, until the indexing on that index is completed.
 		// This is to prevent too much processing being consumed by the index processing,
-		// and to allow dependent indices to fully complete before downstream indices start to
+		// and to allow dependent childStores to fully complete before downstream childStores start to
 		// avoid thrashing from repeated changes in values
 		if (this.whenProcessingThisComplete) {
 			// TODO: priority increases need to be transitively applied
@@ -1005,7 +1085,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Base {
 
-	static indices: {
+	static childStores: {
 		forValue: Function
 		prepareCommit: Function
 		lastUpdate: number
@@ -1042,8 +1122,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	static is(id, value, event) {
+		let entry = this.getEntryData(id)
 		if (!event) {
-			let entry = this.getEntryData(id)
 			event = entry ? new ReplacedEvent() : new AddedEvent()
 		}
 		event.triggers = [ DISCOVERED_SOURCE ]
@@ -1070,20 +1150,24 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				valueCache.delete(id)
 			}
 		}
-		return this.saveValue(id, value)
+		return this.saveValue(id, value, entry)
 	}
 
 	_valueCache: Map<any, any>
 
-	static saveValue(id, value, isNew?, beforeCommit?) {
+	static saveValue(id, value, previousEntry, conditionalHeader?, beforeCommit?) {
 		let transition = this.transitions.get(id)
 		let version = transition.fromVersion
-		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, value, this.queue.get(id) || { version })) : []
+		let indexRequest = this.queue && this.queue.get(id) ||
+			{ 
+				version,
+				previousEntry,
+			}
+		console.log('indexRequest', this.indices.length, JSON.stringify(indexRequest))
+		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, value, indexRequest)) : []
 		let promises = forValueResults.filter(promise => promise && promise.then)
 
 		const readyToCommit = (forValueResults) => {
-			const conditionalHeader = isNew === undefined ? undefined : isNew ? null :
-					this.createHeader(transition.fromVersion, process.pid)
 			this.lastIndexedVersion = Math.max(this.lastIndexedVersion || 0, version)
 			for (let result of forValueResults) {
 				result.commit(this.lastIndexedVersion)
@@ -1233,25 +1317,53 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 	}
 
-	static openChildDB(store) {
+	static openChildDB(store, asIndex?) {
 		store.db = this.db.openDB(store.name)
+		store.rootDB = this.rootDB
+		let rootStore = store.rootStore = this.rootStore || this
 		let index
-		if (!this.indices) {
-			this.indices = []
+		if (!rootStore.childStores) {
+			rootStore.childStores = []
 		}
-		this.indices.find((entry, i) => {
+		console.log("openChildDB",this.name, store.name, asIndex)
+		if (asIndex) {
+			if (!this.indices) {
+				this.indices = []
+			}
+			this.indices.push(store)
+		}
+		rootStore.childStores.find((entry, i) => {
 			if (entry.name == store.name) {
 				index = i
 				store.dbVersion = entry.dbVersion
 				return true
 			}
 		})
-		if (index > -1)
-			this.indices[i] = store
-		else {
-			this.indices.push(store)
-			this.writeStoreMetadata()
+		if (index > -1) {
+			Object.assign(store, rootStore.childStores[i])
+			rootStore.childStores[i] = store
 		}
+		else {
+			// TODO: Do in a transation
+			rootStore.childStores.push(store)
+			for (let prime of primes) {
+				if (!rootStore.childStores.some(store => store.invalidationIdentifier == prime) && rootStore.invalidationIdentifier != prime) {
+					store.invalidationIdentifier = prime
+					break
+				}
+			}
+			this.rootDB.putSync(DB_VERSION_KEY, serialize({
+				dbVersion: this.hashedVersion,
+				childStores: this.childStores && this.childStores.map(childStore => ({
+					name: childStore.name,
+					dbVersion: childStore.hashedVersion,
+					invalidationIdentifier: childStore.invalidationIdentifier
+				}))
+			}))
+
+		}
+		if (!store.invalidationIdentifier)
+			throw new Error('Store must have invalidationIdentifier')
 		return store.db
 	}
 
@@ -1300,22 +1412,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this.ready.then(() => this.whenWritten).then(() => {
 			if (verboseLogging)
 				console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
-			let versionBuffer = this.db.get(LAST_VERSION_IN_DB_KEY)
-			let lastVersionFromHeader = this.lastVersion = this.lastVersion || (versionBuffer ? readUInt(versionBuffer) : 0)
-			let isFullReset = this.startVersion > sinceVersion
-			if (this.lastVersion && this.lastVersion <= sinceVersion && !isFullReset) {
-				return []
-			}
-			let idsAndVersions = this.getIdsAndVersionFromKey(Buffer.from([10]), sinceVersion, 3000)
-			if (idsAndVersions.isFullReset) {
-				idsAndVersions = this.getIdsAndVersionFromKey(Buffer.from([10]))
-			}
-			if (idsAndVersions.lastVersion > 0 && idsAndVersions.lastVersion != this.lastVersion) {
-				let versionBuffer = Buffer.alloc(8)
-				writeUInt(versionBuffer, this.lastVersion = idsAndVersions.lastVersion)
-				this.db.putSync(LAST_VERSION_IN_DB_KEY, versionBuffer)
-			}
-			return idsAndVersions
+			return this.getIdsAndVersionFromKey(Buffer.from([10]))
 		})
 	}
 
@@ -1363,11 +1460,13 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return idsAndVersions
 	}
 	static dataVersionBuffer: Buffer
+	static processKey: Buffer
 	static nextInvalidatedVersion: int
 	static lastIndexedVersion: int
-	static initializeDB() {
-		let initializingProcess = super.initializeDB()
-		this.db.on('beforecommit', () => {
+	static initializeRootDB() {
+		let initializingProcess = super.initializeRootDB()
+		this.invalidationIdentifier = 2
+		this.rootDB.on('beforecommit', () => {
 			// before each commit, save the last version as well (if it has changed)
 			/*if (this.lastVersionCommitted === this.lastVersion)
 				return
@@ -1376,19 +1475,21 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			this.db.put(LAST_VERSION_IN_DB_KEY, versionBuffer)
 			this.lastVersionCommitted = this.lastVersion*/
 
-			if (this.indices) {
+			if (this.childStores) {
 				let versionBuffer = this.dataVersionBuffer
-				let indexCount = this.indices.length
+				let indexCount = this.childStores.length
 				if (!versionBuffer || versionBuffer.length < (indexCount + 1) * 8) {
-					versionBuffer = this.dataVersionBuffer = Buffer.allocUnsafeSlow((indexCount + 1) * 8).fill(0) // I think allocUnsafeSlow is better for long-lived buffers
+					// I think allocUnsafeSlow is better for long-lived buffers
+					versionBuffer = this.dataVersionBuffer = Buffer.allocUnsafeSlow(8)
 				}
-				writeUInt(versionBuffer, this.nextInvalidatedVersion || 0)
-				for (let i = 0; i < indexCount; i++) {
-					let childStore = this.indices[i]
-					if (childStore.lastUpdate)
-						writeUInt(versionBuffer, childStore.lastUpdate, 8 * (i + 1))
+				let invalidationState = 1
+				for (let childStore of [this, ...this.childStores]) {
+					console.log('beforecommit', childStore.name, childStore.queue && childStore.queue.size, childStore.invalidationIdentifier)
+					if (childStore.queue && childStore.queue.size > 0)
+						invalidationState *= childStore.invalidationIdentifier
 				}
-				this.db.put(LAST_VERSION_IN_DB_KEY, versionBuffer)
+				writeUInt(versionBuffer, invalidationState)
+				this.rootDB.put(this.processKey, versionBuffer)
 			}
 		})
 	}
@@ -1578,7 +1679,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					return result
 				} // else normal transform path
 				transition.result = result
-				this.saveValue(id, result, isNew, () => {
+				const conditionalHeader = isNew === undefined ? undefined : isNew ? null :
+					this.createHeader(transition.fromVersion, process.pid)
+
+				this.saveValue(id, result, null, conditionalHeader, () => {
 					this.queue.delete(id)
 					this.nextInvalidatedVersion = 0
 					for (let next of this.queue) {
@@ -1611,18 +1715,19 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return this
 	}
 
-	static openChildDB(store) {
+	static openChildDB(store, asIndex) {
 		if (!this.queue) {
 			this.queue = new Map()
 		}
-		return super.openChildDB(store)
+		return super.openChildDB(store, asIndex)
 	}
 
 	static updated(event, by?) {
+		let id = by && (typeof by === 'object' ? by.id : by) // if we are getting an update from a source instance
+		let previousEntry = id && this.getEntryData(id)
+		console.log('updated previousEntry', previousEntry)
 		event = super.updated(event, by)
 		if (this.queue) {
-			let id = by && (typeof by === 'object' ? by.id : by) // if we are getting an update from a source instance
-			let previousEntry = by && by.previousEntry
 			if (by && by.constructor === this || // our own instances can notify us of events, ignore them
 				this.otherProcesses && event.sourceProcess && 
 				!(id && this.queue.has(id)) && // if it is in our queue, we need to update the version number in our queue
@@ -1686,7 +1791,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				this.for(id).updated()
 				continue
 			}
-			const version = this.lastVersion = getNextVersion() // we give each entry its own version so that downstream indices have unique versions to go off of
+			const version = this.lastVersion = getNextVersion() // we give each entry its own version so that downstream childStores have unique versions to go off of
 			this.whenWritten = committed = this.db.put(toBufferKey(id), this.createHeader(version))
 			if (queued++ > 2000) {
 				await this.whenWritten
@@ -2061,3 +2166,4 @@ export class Invalidated {
 }
 Invalidated.prototype.statusByte = INVALIDATED_STATE
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+const primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199]

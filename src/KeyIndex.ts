@@ -105,6 +105,7 @@ export const Index = ({ Source }) => {
 						// use the same mapping function to determine values to remove
 						let previousData = previousEntry.value
 						previousEntries = this.indexBy(previousData, id)
+						console.log({previousEntries})
 						if (previousEntries && previousEntries.then)
 							previousEntries = await previousEntries
 						if (typeof previousEntries == 'object' && previousEntries) {
@@ -161,6 +162,7 @@ export const Index = ({ Source }) => {
 						entries = undefined
 					}
 					entries = this.normalizeEntries(entries)
+					console.log({entries})
 					let first = true
 					for (let entry of entries) {
 						// we use the composite key, so we can quickly traverse all the entries under a certain key
@@ -217,9 +219,11 @@ export const Index = ({ Source }) => {
 				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 				this.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
+			console.log({operations})
 			return {
 				commit: (lastVersion) => {
 					let batchFinished
+					console.log('KeyIndex commit', operations)
 					if (operations.length > 0) {
 						batchFinished = this.db.batch(operations)
 					}
@@ -293,10 +297,10 @@ export const Index = ({ Source }) => {
 			this.state = 'initializing'
 			const db: Database = this.db
 			sourceVersions[Source.name] = lastIndexedVersion
-			let idsAndVersionsToReindex
-			idsAndVersionsToReindex = await Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
+			
 			let idsAndVersionsToInitialize
-			if (lastIndexedVersion == 1 || idsAndVersionsToReindex.isFullReset) {
+			if (lastIndexedVersion == 1) {
+				let idsAndVersionsToReindex = await Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
 				this.log('Starting index from scratch ' + this.name + ' with ' + idsAndVersionsToReindex.length + ' to index')
 				this.state = 'clearing'
 				this.clearAllData()
@@ -331,29 +335,8 @@ export const Index = ({ Source }) => {
 				this.isInitialBuild = false
 				await db.remove(INITIALIZING_LAST_KEY)
 			}
-			if (idsAndVersionsToReindex.length > 0) {
-				this.state = 'resuming'
-				idsAndVersionsToReindex.sort((a, b) => a.version > b.version ? 1 : a.version < b.version ? -1 : 0)
-				this.log('Resuming from ', lastIndexedVersion, 'indexing', idsAndVersionsToReindex.length, this.name)
-				const setOfIds = new Set(idsAndVersionsToReindex.map(({ id }) => id))
-				// clear out all the items that we are indexing, since we don't have their previous state
-				await clearEntries(Buffer.from([2]), (sourceId) => setOfIds.has(sourceId))
-
-				this.state = 'initializing queue'
-				for (let { id, version } of idsAndVersionsToReindex) {
-					if (!version)
-						this.log('resuming without version',this.name, id)
-					this.queue.set(id, new InitializingIndexRequest(version))
-				}
-			} else {
-				this.state = 'ready'
-				return
-			}
-			//this.updateProcessMap(lastIndexedVersion)
-			if (this.queue.size > 0) {
-				this.state = 'processing'
-				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
-			}
+			this.state = 'ready'
+			return
 			function clearEntries(start, condition) {
 				let result
 				db.getRange({
@@ -545,7 +528,7 @@ export const Index = ({ Source }) => {
 		}
 
 		static openDatabase() {
-			return Source.openChildDB(this)
+			return Source.openChildDB(this, true)
 		}
 		static initialize(module) {
 			this.initializing = true
