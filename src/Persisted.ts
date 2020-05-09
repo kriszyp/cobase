@@ -425,7 +425,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				Source.start()
 			Source.notifies(this)
 		}
-		const options = {}
+		const options = {
+			dbName: 'data'
+		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
 		}
@@ -797,6 +799,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (startOfSizeTable - headerSize < 0) {
 				this._dpackStart = sizeTableBuffer.length + headerSize
 				return Buffer.concat([Buffer.alloc(headerSize), sizeTableBuffer, buffer.slice(start)])
+			} else if (this._dpackStart > 20) {
+				this._dpackStart = this._dpackStart - (this._dpackStart >> 5) // gradually draw this down, don't want one large buffer to make this too big
 			}
 			sizeTableBuffer.copy(buffer, startOfSizeTable)
 		}
