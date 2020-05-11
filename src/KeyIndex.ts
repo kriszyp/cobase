@@ -80,16 +80,17 @@ export const Index = ({ Source }) => {
 			indexRequest.value = value
 			return this.indexEntry(id, indexRequest)
 		}
-		static forQueueEntry([id, indexRequest]) {
-			this.indexEntry(id, indexRequest).then(complete => {
+		static forQueueEntry(id) {
+			this.lastIndexingId = id
+			return this.indexEntry(id).then(complete => {
 				if (complete) {
-					this.queue.delete(id)
 					complete.commit()
 				}
 			})
 		}
-		static async indexEntry(id, indexRequest: IndexRequest) {
+		static async indexEntry(id, indexRequest?: IndexRequest) {
 			let { previousEntry, deleted, sources, triggers, version } = indexRequest || {}
+			previousEntry = previousEntry && previousEntry.then ? await previousEntry : previousEntry
 			let operations: OperationsArray = []
 			let previousVersion = previousEntry && previousEntry.version
 			let eventUpdateSources = []
@@ -101,11 +102,10 @@ export const Index = ({ Source }) => {
 				// this is for recording changed entities and removing the values that previously had been indexed
 				let previousEntries
 				try {
-					if (previousEntry !== undefined) { // if no data, then presumably no references to clear
+					if (previousEntry != null) { // if no data, then presumably no references to clear
 						// use the same mapping function to determine values to remove
 						let previousData = previousEntry.value
 						previousEntries = this.indexBy(previousData, id)
-						console.log({previousEntries})
 						if (previousEntries && previousEntries.then)
 							previousEntries = await previousEntries
 						if (typeof previousEntries == 'object' && previousEntries) {
@@ -122,10 +122,10 @@ export const Index = ({ Source }) => {
 				} catch(error) {
 					if (error.isTemporary)
 						throw error
-					if (indexRequest.version !== version) return // don't log errors from invalidated states
+					if (indexRequest && indexRequest.version !== version) return // don't log errors from invalidated states
 					this.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
 				}
-				if (indexRequest.version !== version) return // if at any point it is invalidated, break out
+				if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 				let entries
 				if (!deleted) {
 					let attempts = 0
@@ -141,14 +141,14 @@ export const Index = ({ Source }) => {
 							// try again
 							data = 'value' in indexRequest ? indexRequest.value : await Source.get(id, INDEXING_MODE)
 						} catch(error) {
-							if (indexRequest.version !== version) return // if at any point it is invalidated, break out
+							if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 							this.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
 							data = undefined
 						}
 					}
 					if (Source.whenValueCommitted && Source.whenValueCommitted.then)
 						await Source.whenValueCommitted
-					if (indexRequest.version !== version) return // if at any point it is invalidated, break out
+					if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 					// let the indexBy define how we get the set of values to index
 					try {
 						entries = data === undefined ? data : this.indexBy(data, id)
@@ -157,12 +157,11 @@ export const Index = ({ Source }) => {
 					} catch(error) {
 						if (error.isTemporary)
 							throw error
-						if (indexRequest.version !== version) return // if at any point it is invalidated, break out
+						if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 						this.warn('Error indexing value', error, 'for', this.name, id)
 						entries = undefined
 					}
 					entries = this.normalizeEntries(entries)
-					console.log({entries})
 					let first = true
 					for (let entry of entries) {
 						// we use the composite key, so we can quickly traverse all the entries under a certain key
@@ -206,6 +205,7 @@ export const Index = ({ Source }) => {
 				}
 			} catch(error) {
 				if (error.isTemporary) {
+					indexRequest = indexRequest || {}
 					let retries = indexRequest.retries = (indexRequest.retries || 0) + 1
 					this.state = 'retrying index in ' + retries * 1000 + 'ms'
 					if (retries < 4) {
@@ -216,14 +216,12 @@ export const Index = ({ Source }) => {
 						console.info('Too many retries', this.name, id, retries)
 					}
 				}
-				if (indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
+				if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 				this.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
-			console.log({operations})
 			return {
 				commit: (lastVersion) => {
 					let batchFinished
-					console.log('KeyIndex commit', operations)
 					if (operations.length > 0) {
 						batchFinished = this.db.batch(operations)
 					}
@@ -292,51 +290,56 @@ export const Index = ({ Source }) => {
 			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
 			console.warn(...args)
 		}
+		static queuedBatchFinished() {
+			this.lastCommittedId = this.lastIndexingId
+		}
 		static async resumeIndex() {
 			// TODO: if it is over half the index, just rebuild
 			this.state = 'initializing'
 			const db: Database = this.db
 			sourceVersions[Source.name] = lastIndexedVersion
 			
-			let idsAndVersionsToInitialize
+			let idsToInitiallyIndex
 			if (lastIndexedVersion == 1) {
-				let idsAndVersionsToReindex = await Source.getInstanceIdsAndVersionsSince(lastIndexedVersion)
-				this.log('Starting index from scratch ' + this.name + ' with ' + idsAndVersionsToReindex.length + ' to index')
+				idsToInitiallyIndex = await Source.getIdsFromKey()
+				this.log('Starting index from scratch ' + this.name)
 				this.state = 'clearing'
 				this.clearAllData()
-				if (idsAndVersionsToReindex.length > 0)
-					this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 255]))
+				this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 255]))
 				this.updateDBVersion()
 				this.log('Cleared index', this.name)
-				idsAndVersionsToInitialize = idsAndVersionsToReindex
-				idsAndVersionsToReindex = []
 			} else {
+				await Source.processUnfinishedIds(idsToReindex => {
+					this.state = 'resuming'
+					const setOfIds = new Set(idsToReindex)
+					// clear out all the items that we are indexing, since we don't have their previous state
+					return clearEntries(Buffer.from([2]), (sourceId) => setOfIds.has(sourceId))
+				})
+
 				let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 				if (resumeFromKey) {
-					//await clearEntries(Buffer.from([2]), (sourceId) => sourceId > resumeFromKey)
 					this.log(this.name + ' Resuming from key ' + fromBufferKey(resumeFromKey))
-					idsAndVersionsToInitialize = Source.getIdsAndVersionFromKey(resumeFromKey)
+					idsToInitiallyIndex = await Source.getIdsFromKey(resumeFromKey)
 				}
 			}
 			this.initializing = false
 			let min = Infinity
 			let max = 0
-			if (idsAndVersionsToInitialize && idsAndVersionsToInitialize.length > 0) {
-				this.isInitialBuild = true
-				this.queue = new IteratorThenMap(idsAndVersionsToInitialize.map(({id, version}) =>
-					[id, new InitializingIndexRequest(version)]), idsAndVersionsToInitialize.length, this.queue)
+			if (idsToInitiallyIndex) {
+				const beforeCommit = () => {
+					if (this.lastCommittedId)
+						this.db.put(INITIALIZING_LAST_KEY, toBufferKey(this.lastCommittedId))
+				}
+				this.db.on('beforecommit', beforeCommit)
+				this.queue = idsToInitiallyIndex
 				this.state = 'building'
 				this.log('Created queue for initial index build', this.name)
 				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
-				this.log('Finished initial index build of', this.name, 'with', idsAndVersionsToInitialize.length, 'entries')
-				this.queue.isReplaced = true
-				this.queue = this.queue.deferredMap || new Map()
-				this.queue.isReplaced = false
-				this.isInitialBuild = false
+				this.log('Finished initial index build of', this.name)
+				this.db.off('beforecommit', beforeCommit)
 				await db.remove(INITIALIZING_LAST_KEY)
 			}
 			this.state = 'ready'
-			return
 			function clearEntries(start, condition) {
 				let result
 				db.getRange({
@@ -353,10 +356,14 @@ export const Index = ({ Source }) => {
 				})
 				return result // just need to wait for last one to finish (guarantees all others are finished)
 			}
+			this.state = 'ready'
 		}
 
 		static delay(ms) {
 			return new Promise(resolve => setTimeout(resolve, ms))
+		}
+		static updated(event, by) {
+			// don't do anything, we don't want these events to propagate through here, and we do indexing based on upstream queue
 		}
 
 		static sendUpdates(eventSources) {

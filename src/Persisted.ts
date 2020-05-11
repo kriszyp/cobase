@@ -22,7 +22,7 @@ try {
 }
 
 const DEFAULT_INDEXING_DELAY = 20
-const DEFAULT_INDEXING_CONCURRENCY = 40
+const DEFAULT_INDEXING_CONCURRENCY = 1
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata
@@ -951,6 +951,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (startOfSizeTable - headerSize < 0) {
 				this._dpackStart = sizeTableBuffer.length + headerSize
 				return Buffer.concat([Buffer.alloc(headerSize), sizeTableBuffer, buffer.slice(start)])
+			} else if (this._dpackStart > 20) {
+				this._dpackStart = this._dpackStart - (this._dpackStart >> 5) // gradually draw this down, don't want one large buffer to make this too big
 			}
 			sizeTableBuffer.copy(buffer, startOfSizeTable)
 		}
@@ -1007,6 +1009,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						sinceLastStateUpdate = 0
 						this.state = 'awaiting indexing'
 						await Promise.all(indexingStarted)
+						this.queuedBatchFinished()
 						this.state = 'finished indexing batch'
 						let processedEntries = indexingStarted.length
 						//this.saveLatestVersion(false)
@@ -1029,7 +1032,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						await delay(Math.round((this.nice * niceAdjustment) / (queue.size + 1000))) // short delay for other processing to occur
 					}
 				}
-				this.state = 'waiting on other processes'
 				this.state = 'awaiting final indexing'
 				await Promise.all(indexingInProgress) // then wait for all indexing to finish everything
 			} while (queue.size > 0)
@@ -1048,8 +1050,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static forQueueEntry([ id ]) {
 		return when(this.get(id), () => {
-			this.queue.delete(id)
+//			this.queue.delete(id)
 		})
+	}
+	static queuedBatchFinished() {
 	}
 
 	static requestProcessing(nice) {
@@ -1080,6 +1084,56 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			//this.whenProcessingThisComplete.version = lastIndexedVersion
 		}
 		return this.whenProcessingThisComplete
+	}
+
+	static openChildDB(store, asIndex?) {
+		store.db = this.rootDB.openDB(store.name)
+		store.rootDB = this.rootDB
+		let rootStore = store.rootStore = this.rootStore || this
+		let index
+		if (!rootStore.childStores) {
+			rootStore.childStores = []
+		}
+		console.log("openChildDB",this.name, store.name, asIndex)
+		if (asIndex) {
+			if (!this.indices) {
+				this.indices = []
+			}
+			this.indices.push(store)
+		}
+		rootStore.childStores.find((entry, i) => {
+			if (entry.name == store.name) {
+				index = i
+				store.dbVersion = entry.dbVersion
+				return true
+			}
+		})
+		if (index > -1) {
+			Object.assign(store, rootStore.childStores[i])
+			rootStore.childStores[i] = store
+		}
+		else {
+			// TODO: Do in a transation
+			rootStore.childStores.push(store)
+			for (let prime of primes) {
+				if (!rootStore.childStores.some(store => store.invalidationIdentifier == prime) && rootStore.invalidationIdentifier != prime) {
+					store.invalidationIdentifier = prime
+					break
+				}
+			}
+			this.rootDB.putSync(DB_VERSION_KEY, serialize({
+				dbVersion: this.hashedVersion,
+				childStores: this.childStores && this.childStores.map(childStore => ({
+					name: childStore.name,
+					dbVersion: childStore.hashedVersion,
+					invalidationIdentifier: childStore.invalidationIdentifier
+				}))
+			}))
+
+		}
+		if (!store.invalidationIdentifier)
+			throw new Error('Store must have invalidationIdentifier')
+		return store.db
 	}
 })
 
@@ -1134,7 +1188,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (transition) {
 			transition.invalidating = false
 			transition.result = value
-			transition.fromVersion = transition.newVersion
+			transition.fromVersion = transition.newVersion || event.version
 		} else {
 			transition = {
 				fromVersion: event.version,
@@ -1155,7 +1209,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	_valueCache: Map<any, any>
 
-	static saveValue(id, value, previousEntry, conditionalHeader?, beforeCommit?) {
+	static saveValue(id, value, previousEntry, conditionalHeader?) {
 		let transition = this.transitions.get(id)
 		let version = transition.fromVersion
 		let indexRequest = this.queue && this.queue.get(id) ||
@@ -1163,14 +1217,14 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				version,
 				previousEntry,
 			}
-		console.log('indexRequest', this.indices.length, JSON.stringify(indexRequest))
 		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, value, indexRequest)) : []
 		let promises = forValueResults.filter(promise => promise && promise.then)
 
 		const readyToCommit = (forValueResults) => {
 			this.lastIndexedVersion = Math.max(this.lastIndexedVersion || 0, version)
 			for (let result of forValueResults) {
-				result.commit(this.lastIndexedVersion)
+				if (result)
+					result.commit(this.lastIndexedVersion)
 			}
 			// TODO: Only do this if the version is still the same
 			let committed
@@ -1178,9 +1232,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (value === undefined) {
 				if (conditionalHeader === null) {
 					// already an undefined entry, nothing to do (but clear out the transition)
-					if (this.transitions.get(id) == transition && !transition.invalidating)
-						this.transitions.delete(id)
-					return
+					if (this.transitions.get(id) == transition && !transition.invalidating) 
+						this.transitions.delete(id) {
+						if (this.queue)
+							this.queue.delete(id)
+						return
+					}
 				} else {
 					this.whenWritten = committed = this.db.remove(toBufferKey(id), conditionalHeader)
 				}
@@ -1196,9 +1253,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				expirationStrategy.useEntry(value, buffer.length)
 			}
 			this.whenValueCommitted = committed
+			if (this.queue)
+				this.queue.delete(id)
 
-			if (beforeCommit)
-				beforeCommit()
 			return committed.then((successfulWrite) => {
 				if (this.transitions.get(id) == transition && !transition.invalidating)
 					this.transitions.delete(id)
@@ -1317,56 +1374,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 	}
 
-	static openChildDB(store, asIndex?) {
-		store.db = this.db.openDB(store.name)
-		store.rootDB = this.rootDB
-		let rootStore = store.rootStore = this.rootStore || this
-		let index
-		if (!rootStore.childStores) {
-			rootStore.childStores = []
-		}
-		console.log("openChildDB",this.name, store.name, asIndex)
-		if (asIndex) {
-			if (!this.indices) {
-				this.indices = []
-			}
-			this.indices.push(store)
-		}
-		rootStore.childStores.find((entry, i) => {
-			if (entry.name == store.name) {
-				index = i
-				store.dbVersion = entry.dbVersion
-				return true
-			}
-		})
-		if (index > -1) {
-			Object.assign(store, rootStore.childStores[i])
-			rootStore.childStores[i] = store
-		}
-		else {
-			// TODO: Do in a transation
-			rootStore.childStores.push(store)
-			for (let prime of primes) {
-				if (!rootStore.childStores.some(store => store.invalidationIdentifier == prime) && rootStore.invalidationIdentifier != prime) {
-					store.invalidationIdentifier = prime
-					break
-				}
-			}
-			this.rootDB.putSync(DB_VERSION_KEY, serialize({
-				dbVersion: this.hashedVersion,
-				childStores: this.childStores && this.childStores.map(childStore => ({
-					name: childStore.name,
-					dbVersion: childStore.hashedVersion,
-					invalidationIdentifier: childStore.invalidationIdentifier
-				}))
-			}))
-
-		}
-		if (!store.invalidationIdentifier)
-			throw new Error('Store must have invalidationIdentifier')
-		return store.db
-	}
-
 
 	static getInstanceIds(range: IterableOptions) {
 		let db = this.db
@@ -1407,61 +1414,28 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	/**
 	* Iterate through all instances to find instances since the given version
 	**/
-	static getInstanceIdsAndVersionsSince(sinceVersion: number): { id: number, version: number }[] {
+	static getIdsFromKey(startKey): number[] {
 		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
-		return this.ready.then(() => this.whenWritten).then(() => {
-			if (verboseLogging)
-				console.log('getInstanceIdsAndVersionsSince ready and returning ids', this.name, sinceVersion)
-			return this.getIdsAndVersionFromKey(Buffer.from([10]))
-		})
+		return this.ready.then(() => this.whenWritten).then(() =>
+			this.db.getRange({
+				start: startKey,
+				values: false,
+			}).map(({ key, value }) => {
+				try {
+					return fromBufferKey(key)
+				} catch (error) {
+					console.error('Error reading data from table scan', this.name, fromBufferKey(key), error)
+				}
+			})
+		)
+	}
+	static processUnfinishedIds(prepareIds) {
+		// TODO: If we have invalidated ids that we are cleaning up, do so here
+		//prepareIds([])
 	}
 
-	static getIdsAndVersionFromKey(startKey, sinceVersion = 0, arrayThreshold = 0) {
-		let getIdsAndVersions = () => this.db.getRange({
-			start: startKey
-		}).map(({ key, value }) => {
-			try {
-				const version = readUInt(value)
-				return version > sinceVersion ? {
-					id: fromBufferKey(key),
-					version
-				} : null
-			} catch (error) {
-				console.error('Error reading data from table scan', this.name, fromBufferKey(key), error)
-			}
-		}).filter(idAndVersion => {
-			return idAndVersion
-		})
-		let array = arrayThreshold > 0 ? [] : null
-		let lastVersion = 0
-		let i = 0
-		for (let idAndVersion of getIdsAndVersions()) {
-			if (i >= arrayThreshold) {// stop recording array
-				if (array) {
-					return {
-						isFullReset: true
-					}
-				}
-			} else
-				array.push(idAndVersion)
-			i++
-			lastVersion = Math.max(lastVersion, idAndVersion.version)
-		}
-		if (array) {
-			array.lastVersion = lastVersion
-			return array
-		}
-		if (verboseLogging)
-			console.info('getInstanceIdsAndVersionsSince from ', this.name, 'is a full reset', i)
-		let idsAndVersions = getIdsAndVersions()
-		idsAndVersions.isFullReset = true
-		idsAndVersions.length = i
-		idsAndVersions.lastVersion = lastVersion
-		return idsAndVersions
-	}
 	static dataVersionBuffer: Buffer
 	static processKey: Buffer
-	static nextInvalidatedVersion: int
 	static lastIndexedVersion: int
 	static initializeRootDB() {
 		let initializingProcess = super.initializeRootDB()
@@ -1484,7 +1458,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				}
 				let invalidationState = 1
 				for (let childStore of [this, ...this.childStores]) {
-					console.log('beforecommit', childStore.name, childStore.queue && childStore.queue.size, childStore.invalidationIdentifier)
 					if (childStore.queue && childStore.queue.size > 0)
 						invalidationState *= childStore.invalidationIdentifier
 				}
@@ -1590,14 +1563,17 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					if (entry.processId && entry.processId != process.pid) {
 						// we don't own the invalidation, so wait for the owning process to fulfill this entry
 						try {
-							return this.sendRequestToProcess(entry.processId, {
-								id,
-								waitFor: 'get',
-							}).then(() => this.get(id, mode))
-						} catch {
+							console.log('sendRequestToProcess get', id, entry.processId)
+							if (this.sendRequestToProcess)
+								return this.sendRequestToProcess(entry.processId, {
+									id,
+									waitFor: 'get',
+								}).then(() => this.get(id, mode))
+						} catch(error) {
 							// if the process that invalidated this no longer is running, that's fine, we can take over.
 							console.log(error)
 						}
+
 					}
 					let oldTransition = this.transitions.get(id)
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
@@ -1682,14 +1658,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				const conditionalHeader = isNew === undefined ? undefined : isNew ? null :
 					this.createHeader(transition.fromVersion, process.pid)
 
-				this.saveValue(id, result, null, conditionalHeader, () => {
-					this.queue.delete(id)
-					this.nextInvalidatedVersion = 0
-					for (let next of this.queue) {
-						this.nextInvalidatedVersion = next.version
-						break
-					}
-				})
+				this.saveValue(id, result, null, conditionalHeader)
 				return result
 			}, (error) => {
 				removeTransition()
@@ -1722,10 +1691,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return super.openChildDB(store, asIndex)
 	}
 
+
+
 	static updated(event, by?) {
 		let id = by && (typeof by === 'object' ? by.id : by) // if we are getting an update from a source instance
-		let previousEntry = id && this.getEntryData(id)
-		console.log('updated previousEntry', previousEntry)
+		//console.log('updated previousEntry', previousEntry)
 		event = super.updated(event, by)
 		if (this.queue) {
 			if (by && by.constructor === this || // our own instances can notify us of events, ignore them
@@ -1737,40 +1707,43 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				return event
 			}
 			if (id) {
-				const version = event.version
-				if (!this.nextInvalidatedVersion)
-					this.nextInvalidatedVersion = version
-				// queue up processing the event
-				let indexRequest = this.queue.get(id)
-
-				if (indexRequest) {
-					// put it at that end so version numbers are in order, but don't alter the previous state or version, that is still what we will be diffing from
-					this.queue.delete(id)
-					this.queue.set(id, indexRequest)
-					indexRequest.version = version
-					if (event.triggers)
-						for (let trigger of event.triggers)
-							indexRequest.triggers.add(trigger)
-				} else {
-					this.queue.set(id, indexRequest = {
-						previousEntry,
-						version: version,
-						now: Date.now(),
-						triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
-					})
-					/*if (indexRequest.previousState == INVALIDATED_ENTRY) {
-						indexRequest.previousValues = event.previousValues // need to have a shared map to update
-						indexRequest.by = by
-					}*/
-					this.requestProcessing(DEFAULT_INDEXING_DELAY)
-				}
-				if (!version) {
-					throw new Error('missing version')
-				}
-				indexRequest.deleted = event.type == 'deleted'
+				// TODO: only need this for is-discovered and created events, otherwise invalidateEntry handles for us
+				this.enqueue(id, event)
 			}
 		}
 		return event
+	}
+
+	static enqueue(id, event, previousEntry?) {
+		const version = event.version
+		// queue up processing the event
+		let indexRequest = this.queue.get(id)
+
+		if (indexRequest) {
+			// put it at that end so version numbers are in order, but don't alter the previous state or version, that is still what we will be diffing from
+			this.queue.delete(id)
+			this.queue.set(id, indexRequest)
+			indexRequest.version = version
+			if (event.triggers)
+				for (let trigger of event.triggers)
+					indexRequest.triggers.add(trigger)
+		} else {
+			this.queue.set(id, indexRequest = {
+				version: version,
+				previousEntry,
+				now: Date.now(),
+				triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
+			})
+			/*if (indexRequest.previousState == INVALIDATED_ENTRY) {
+				indexRequest.previousValues = event.previousValues // need to have a shared map to update
+				indexRequest.by = by
+			}*/
+			this.requestProcessing(DEFAULT_INDEXING_DELAY)
+		}
+		if (!version) {
+			throw new Error('missing version')
+		}
+		indexRequest.deleted = event.type == 'deleted'
 	}
 
 
@@ -1869,8 +1842,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			this.whenWritten = written
 			if (!event.whenWritten)
 				event.whenWritten = written
-			if (by.previousEntry) {
-				by.previousEntry = written.then((result) => {
+			if (this.queue) {
+				this.enqueue(id, event, written.then((result) => {
 					if (result === false) {
 						console.log('Value had changed during invalidation', id, this.name, version)
 						this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
@@ -1888,7 +1861,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						}
 					}
 					return previousEntry
-				})
+				}))
 			}
 			const finished = (result) => {
 				//console.log('invalidateEntry finished with', id, this.name, result)
@@ -1975,35 +1948,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let receivedPendingVersion = []
 			let isFullReset
 			let clearDb
+			let readyPromises = []
 			for (let Source of this.Sources || []) {
-				let lastVersion = this.lastVersion
-
-				receivedPendingVersion.push(Source.getInstanceIdsAndVersionsSince && Source.getInstanceIdsAndVersionsSince(lastVersion).then(async (ids) => {
-					if (verboseLogging)
-						console.log('getInstanceIdsAndVersionsSince',lastVersion, 'for', this.name, ids.length)
-					let min = Infinity
-					let max = 0
-					let queued = 0
-					for (let { id, version } of ids) {
-						//min = Math.min(version, min)
-						this.lastVersion = Math.max(this.lastVersion, version)
-						let inMemoryInstance = this.instancesById && this.instancesById.get(id)
-						if (inMemoryInstance) {
-							let event = new ReplacedEvent()
-							event.triggers = [ INITIALIZATION_SOURCE ]
-							inMemoryInstance.updated(event)
-						} else {
-							this.whenWritten = this.db.put(toBufferKey(id), this.createHeader(version))
-						}
-						if (queued++ > 2000) {
-							await this.whenWritten
-							queued = 0
-						}
-					}
-					await this.whenWritten
-					if (verboseLogging)
-						console.log('getInstanceIdsAndVersionsSince min/max for', this.name, min, max)
-				}))
+				// TODO: We need to check if the upstream source is an index that failed to send all of its events
+				// and we have to rebuild
+				readyPromises.push(Source.ready)
 			}
 			if (receivedPendingVersion.length > 0) {
 				return Promise.all(receivedPendingVersion)
