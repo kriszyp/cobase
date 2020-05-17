@@ -77,7 +77,9 @@ export class JSONStream extends Readable {
 			}
 			containsVariables = containsVariables || object.containsVariables
 			object = object.valueOf()
-			if (object.then) {
+			if (!object)
+				yield JSON.stringify(object)
+			else if (object.then) {
 				try {
 					yield this.context.executeWithin(() =>
 						object.then(object => this.serialize(object, containsVariables), handleError))

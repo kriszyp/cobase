@@ -201,19 +201,9 @@ function onMessage(message, stream) {
 		}
 		let target = classMap.get(className)
 		if (target) {
-			if (instanceId) {
-				//console.log('<<<', message.type, message.className, message.instanceId)
-				if (!target.instancesById) {
-					console.log('Process proxy didnt have instancesById', target.name)
-					target.initialize()
-				}
-				target = target.instancesById.get(instanceId)
-				if (!target) {
-					return
-				}
-			}
 			if (requestId) {
 				when(target.receiveRequest(message), (result) => {
+					result = result || {}
 					result.responseId = requestId
 					stream.write(result)
 				})
@@ -229,7 +219,7 @@ function onMessage(message, stream) {
 							constructor: classMap.get(source.typeName)
 						}))
 					}
-					target.updated(event)
+					target.updated(event, instanceId && { id: instanceId })
 				} else if (message.pid) {
 					attachClass(stream, target, message.pid)
 				} else {

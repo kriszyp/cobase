@@ -105,7 +105,7 @@ export const Index = ({ Source }) => {
 					if (previousEntry != null) { // if no data, then presumably no references to clear
 						// use the same mapping function to determine values to remove
 						let previousData = previousEntry.value
-						previousEntries = this.indexBy(previousData, id)
+						previousEntries = previousData === undefined ? previousData : this.indexBy(previousData, id)
 						if (previousEntries && previousEntries.then)
 							previousEntries = await previousEntries
 						if (typeof previousEntries == 'object' && previousEntries) {
@@ -131,7 +131,7 @@ export const Index = ({ Source }) => {
 					let attempts = 0
 					let data
 					try {
-						data = Source.get(id, INDEXING_MODE)
+						data = indexRequest ? indexRequest.value : Source.get(id, INDEXING_MODE)
 						if (data && data.then)
 							data = await data
 					} catch(error) {
@@ -139,7 +139,7 @@ export const Index = ({ Source }) => {
 							throw error
 						try {
 							// try again
-							data = 'value' in indexRequest ? indexRequest.value : await Source.get(id, INDEXING_MODE)
+							data = indexRequest ? indexRequest.value : await Source.get(id, INDEXING_MODE)
 						} catch(error) {
 							if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 							this.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
@@ -290,9 +290,6 @@ export const Index = ({ Source }) => {
 			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
 			console.warn(...args)
 		}
-		static queuedBatchFinished() {
-			this.lastCommittedId = this.lastIndexingId
-		}
 		static async resumeIndex() {
 			// TODO: if it is over half the index, just rebuild
 			this.state = 'initializing'
@@ -318,7 +315,7 @@ export const Index = ({ Source }) => {
 
 				let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 				if (resumeFromKey) {
-					this.log(this.name + ' Resuming from key ' + fromBufferKey(resumeFromKey))
+					console.log(this.name + ' Resuming from key ' + fromBufferKey(resumeFromKey))
 					idsToInitiallyIndex = await Source.getIdsFromKey(resumeFromKey)
 				}
 			}
@@ -326,18 +323,7 @@ export const Index = ({ Source }) => {
 			let min = Infinity
 			let max = 0
 			if (idsToInitiallyIndex) {
-				const beforeCommit = () => {
-					if (this.lastCommittedId)
-						this.db.put(INITIALIZING_LAST_KEY, toBufferKey(this.lastCommittedId))
-				}
-				this.db.on('beforecommit', beforeCommit)
-				this.queue = idsToInitiallyIndex
-				this.state = 'building'
-				this.log('Created queue for initial index build', this.name)
-				await this.requestProcessing(DEFAULT_INDEXING_DELAY)
-				this.log('Finished initial index build of', this.name)
-				this.db.off('beforecommit', beforeCommit)
-				await db.remove(INITIALIZING_LAST_KEY)
+				await this.resumeQueue(idsToInitiallyIndex)
 			}
 			this.state = 'ready'
 			function clearEntries(start, condition) {
@@ -543,7 +529,6 @@ export const Index = ({ Source }) => {
 			/*if (this.Sources[0].updatingProcessModule && !this.updatingProcessModule) {
 				this.updatingProcessModule = this.Sources[0].updatingProcessModule
 			}*/
-			allIndices.push(this)
 			return when(super.initialize(module), () => {
 				this.initializing = false
 			})
@@ -593,19 +578,6 @@ export const Index = ({ Source }) => {
 	}
 }
 Index.from = (Source) => Index({ Source })
-Index.getCurrentStatus = () => {
-	function estimateSize(size, previousState) {
-		return (previousState ? JSON.stringify(previousState).length : 1) + size
-	}
-	return allIndices.map(Index => ({
-		name: Index.name,
-		//queued: Index.queue.size,
-		state: Index.state,
-		concurrencyLevel: Index.averageConcurrencyLevel,
-		//pendingRequests: Array.from(Index.pendingRequests),
-	}))
-}
-const allIndices = []
 export default Index
 
 const withTimeout = (promise, ms) => Promise.race([promise, new Promise((resolve, reject) =>
