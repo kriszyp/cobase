@@ -22,7 +22,7 @@ try {
 }
 
 const DEFAULT_INDEXING_DELAY = 20
-const DEFAULT_INDEXING_CONCURRENCY = 1
+const DEFAULT_INDEXING_CONCURRENCY = 20
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const instanceIdsMap = new WeakValueMap()
 const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata
@@ -587,22 +587,27 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return whenThisUpgraded
 	}
 	static findOwnedInvalidations(pid) {
-		this.unfinishedIds = []
+		let unfinishedIds = new Set()
 		let lastWrite
 		for (let { key, value } of this.db.getRange({
 			start: Buffer.from([1, 255])
 		})) {
 			if (value[0] == INVALIDATED_STATE && value.length > 8/* && value.readUInt32BE(4) == pid*/) { // looking for owned invalidated entries
 				let id = fromBufferKey(key)
-				this.unfinishedIds.push(id)
+				unfinishedIds.add(id)
 				if (this.queue)
 					this.queue.set(id, null)
 				this.clearEntryCache(id)
-				this.transitions.delete(id)
+				if (this.transitions) // TODO: Remove if once we aren't calling this on indices
+					this.transitions.delete(id)
 			}
 		}
-		if (this.unfinishedIds.length > 0)
+		if (unfinishedIds.size > 0) {
+			for (let index of this.indices) {
+				index.clearEntries(unfinishedIds)
+			}
 			this.requestProcessing(30)
+		}
 	}
 	static cleanupDeadProcessReference(pid, initializingProcess) {
 		// error connecting to another process, which means it is dead/old and we need to clean up
@@ -618,7 +623,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				let invalidationState = readUInt(buffer)
 				for (let store of [this, ...this.childStores]) {
 					let divided = invalidationState / store.invalidationIdentifier
-					if (true || divided >>> 0 == divided) {
+					if (divided >>> 0 == divided) {
 						console.warn('Need to find invalidated entries in ', store.name)
 						store.findOwnedInvalidations(pid)
 					}
@@ -654,21 +659,20 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			// and we have to rebuild
 			readyPromises.push(Source.ready)
 		}
-		let needsReset
-		(await Promise.all(readyPromises)).forEach(reset => needsReset = needsReset || reset)
+		await Promise.all(readyPromises)
 		const db = this.db
 		//console.log('comparing db versions', this.name, this.dbVersion, this.expectedDBVersion)
-		if (this.dbVersion == this.expectedDBVersion && !needsReset) {
+		if (this.dbVersion == this.expectedDBVersion) {
 			// up to date, all done
-			return false
 		} else {
 			console.log('transform/database version mismatch, reseting db table', this.name, this.expectedDBVersion, this.dbVersion, this.version)
+			this.wasReset = true
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
 			await this.resetAll(clearDb)
 			this.updateDBVersion()
-			return true
 		}
+		this.resumePromise = this.resumeQueue() // don't wait for this, it has its own separate promise system
 	}
 
 	valueOf(mode) {
@@ -797,30 +801,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}))
 		let versionBuffer = Buffer.allocUnsafe(8)
 		writeUInt(versionBuffer, this.lastVersion)
-		this.db.putSync(LAST_VERSION_IN_DB_KEY, versionBuffer)
+		if (this.indices || this.needsRebuild) {
+			console.log('Will rebuild with own queue', this.name)
+			this.db.putSync(LAST_VERSION_IN_DB_KEY, versionBuffer)
+		}
 		return version
 	}
-
-	static readStoreMetadata() {
-		let metadata = parse(this.db.get(DB_VERSION_KEY)) || {}
-		this.startVersion = metadata.startVersion
-		this.dbVersion = metadata.dbVersion
-		this.childStores = metadata.childStores
-	}
-
-	static writeStoreMetadata() {
-		let version = this.startVersion
-		this.db.putSync(DB_VERSION_KEY, serialize({
-			startVersion: version,
-			dbVersion: this.expectedDBVersion,
-			childStores: this.childStores && this.childStores.map(childStore => ({
-				name: childStore.name,
-				dbVersion: childStore.expectedDBVersion,
-				invalidationIdentifier: childStore.invalidationIdentifier
-			}))
-		}))
-	}
-
 
 	notifies(target) {
 		let context = currentContext
@@ -1039,7 +1025,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						} catch(error) {
 							console.error('Error indexing', this.name, id)
 						}
-						this.lastCommittedId = this.lastIndexingId
+						if (this.resumeFromKey) // only update if we are actually resuming
+							this.resumeFromKey = toBufferKey(this.lastIndexingId)
 						this.state = 'finished indexing batch'
 						let processedEntries = indexingStarted.length
 						//this.saveLatestVersion(false)
@@ -1073,8 +1060,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.warn('Error occurred in processing index queue for', this.name, error)
 		}
 		this.state = 'processed'
-		if (this.unfinishedIds)
-			this.unfinishedIds = null
 		if (this.onStateChange) {
 			this.onStateChange({ processing: true, started: false })
 		}
@@ -1120,6 +1105,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					event.sourceVersions[this.name] = lastIndexedVersion
 					super.updated(event, this)*/
 				})
+			this.whenProcessingThisComplete.queue = queue
 			//this.whenProcessingThisComplete.version = lastIndexedVersion
 		}
 		return this.whenProcessingThisComplete
@@ -1175,11 +1161,23 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return store.db
 	}
 
-	static async resumeQueue(idsToInitiallyIndex) {
+	static async resumeQueue() {
 		let db = this.db
+		this.state = 'waiting for sources to build index'
+		for (let source of this.Sources || []) {
+			await source.resumePromise
+		}
+		this.resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
+		if (!this.resumeFromKey) {
+			this.state = 'ready'
+			return
+		}
+		console.log(this.name + ' Resuming from key ' + fromBufferKey(this.resumeFromKey))
+		let idsToInitiallyIndex = this.getIdsFromKey(this.resumeFromKey)
+
 		const beforeCommit = () => {
-			if (this.lastCommittedId)
-				db.put(INITIALIZING_LAST_KEY, toBufferKey(this.lastCommittedId))
+			if (this.resumeFromKey)
+				db.put(INITIALIZING_LAST_KEY, this.resumeFromKey)
 		}
 		db.on('beforecommit', beforeCommit)
 		this.state = 'building'
@@ -1191,6 +1189,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}))
 		console.log('Finished initial index build of', this.name)
 		this.db.off('beforecommit', beforeCommit)
+		this.resumeFromKey = null
 		await db.remove(INITIALIZING_LAST_KEY)
 		this.state = 'ready'
 	}
@@ -1274,9 +1273,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 		const readyToCommit = (forValueResults) => {
 			this.lastIndexedVersion = Math.max(this.lastIndexedVersion || 0, version)
+			if (transition.invalidating)
+				return
+
 			for (let result of forValueResults) {
 				if (result)
-					result.commit(this.lastIndexedVersion)
+					result.commit()
 			}
 			// TODO: Only do this if the version is still the same
 			let committed
@@ -1291,12 +1293,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 						return
 					}
 				} else {
-					this.whenWritten = committed = this.db.remove(toBufferKey(id), conditionalHeader)
+					transition.committed = this.whenWritten = committed = this.db.remove(toBufferKey(id), conditionalHeader)
 				}
 			} else {
 				value = convertToBlocks(value)
 				let buffer = this.serializeEntryValue(value, version, typeof mode === 'object', id)
-				this.whenWritten = committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
+				transition.committed = this.whenWritten = committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
 				let entryCache = this._entryCache
 				if (entryCache) {
 					let entry = {
@@ -1335,18 +1337,18 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			})
 		}
 		if (promises.length == 0)
-			return transition.committed = readyToCommit(forValueResults)
+			return readyToCommit(forValueResults)
 		else // TODO: if 1
-			return transition.committed = Promise.all(promises).then(readyToCommit)
+			return Promise.all(promises).then(readyToCommit)
 	}
 
-	static getEntryData(id, conditional?) {
+	static getEntryData(id, onlyCommitted) {
 		let context = currentContext
 		let transition = this.transitions.get(id) // if we are transitioning, return the transition result
 		if (transition) {
 			if (transition.invalidating) {
 				return new Invalidated(transition.newVersion, transition.processId)
-			} else {
+			} else if (!onlyCommitted || transition.committed) {
 				return {
 					value: transition.result,
 					version: transition.fromVersion
@@ -1490,11 +1492,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				console.error('Error reading data from table scan', this.name, fromBufferKey(key), error)
 			}
 		})
-	}
-	static processUnfinishedIds(prepareIds) {
-		if (this.unfinishedIds) {
-			prepareIds(this.unfinishedIds)
-		}
 	}
 
 	static dataVersionBuffer: Buffer
@@ -1783,7 +1780,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static enqueue(id, event, previousEntry?) {
-		if (this.initializing) // during initialization, we ignore updates because we are going rebuild
+		if (this.resumeFromKey && this.resumeFromKey.compare(toBufferKey(id) == -1)) // during initialization, we ignore updates because we are going rebuild
 			return
 		const version = event.version
 		// queue up processing the event
@@ -1852,8 +1849,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		let previousEntry
 		let previousVersion, previousStatusByte
 		if (this.indices && !(event && event.sourceProcess)) {
-			previousEntry = by.previousEntry = this.getEntryData(id) 
-			if (previousEntry && !previousVersion) {
+			previousEntry = this.getEntryData(id, true)
+			if (previousEntry) {
 				previousVersion = previousEntry.version
 				previousStatusByte = previousEntry.statusByte
 			}
@@ -1862,7 +1859,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			if (transition.invalidating) {
 				previousVersion = transition.newVersion
 				previousStatusByte = INVALIDATED_STATE
-			} else if (transition.result && transition.result.then) {
+			} else if (!transition.committed) {
 				// still resolving but this gives us the immediate version
 				previousVersion = transition.fromVersion
 				previousStatusByte = INVALIDATED_STATE
@@ -1926,9 +1923,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					} else {
 						// it was no longer the same as what we read, re-run, as we have a more recent update
 						if (this.indices)
-							by.previousEntry = this.getEntryData(id)
+							previousEntry = this.getEntryData(id)
 						this.invalidateEntry(id, event, by)
-						return by.previousEntry
+						return previousEntry
 					}
 				}
 				return previousEntry
@@ -2013,29 +2010,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		if (this.indices)
 			this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 255]))
 		super.updateDBVersion()
-	}
-
-	static async initializeData() {
-		this.initializing = true
-		if (verboseLogging)
-			console.log('initializeData', this.name)
-		let wasReset  = await super.initializeData()
-		this.initializing = false
-		if (this.indices) {
-			let idsToInitiallyIndex
-			if (wasReset) {
-				idsToInitiallyIndex = this.getIdsFromKey(Buffer.from([1, 255]))
-			} else {
-				let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
-				if (resumeFromKey) {
-					console.log(this.name + ' Resuming from key ' + fromBufferKey(resumeFromKey))
-					idsToInitiallyIndex = this.getIdsFromKey(resumeFromKey)
-				}
-			}
-			if (idsToInitiallyIndex)
-				await this.resumeQueue(idsToInitiallyIndex)
-		}
-		return wasReset
 	}
 
 	static get whenProcessingComplete() {
@@ -2148,7 +2122,7 @@ export function getCurrentStatus() {
 		name: store.name,
 		indexed: store.initialIndexCount,
 		queueSize: store.queue && store.queue.size,
-		stats: store.db.getStats(),
+		size: store.db.getStats().entryCount,
 		state: store.state,
 		concurrencyLevel: store.averageConcurrencyLevel,
 		//pendingRequests: Array.from(Index.pendingRequests),

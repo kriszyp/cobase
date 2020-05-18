@@ -220,13 +220,12 @@ export const Index = ({ Source }) => {
 				this.warn('Error indexing', Source.name, 'for', this.name, id, error)
 			}
 			return {
-				commit: (lastVersion) => {
+				commit: () => {
 					let batchFinished
 					if (operations.length > 0) {
 						batchFinished = this.db.batch(operations)
 					}
 					if (eventUpdateSources.length > 0) {
-						this.lastUpdate = lastVersion
 						return (batchFinished || Promise.resolve()).then(() =>
 							this.sendUpdates(eventUpdateSources))
 					}
@@ -281,6 +280,10 @@ export const Index = ({ Source }) => {
 			return this.resumeIndex()
 		}
 
+		static get needsResume() {
+			return !Source.wasReset
+		}
+
 
 		static log(...args) {
 			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
@@ -312,37 +315,32 @@ export const Index = ({ Source }) => {
 					// clear out all the items that we are indexing, since we don't have their previous state
 					return clearEntries(Buffer.from([2]), (sourceId) => setOfIds.has(sourceId))
 				})
-
-				let resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
-				if (resumeFromKey) {
-					console.log(this.name + ' Resuming from key ' + fromBufferKey(resumeFromKey))
-					idsToInitiallyIndex = await Source.getIdsFromKey(resumeFromKey)
-				}
 			}
 			this.initializing = false
 			let min = Infinity
 			let max = 0
 			if (idsToInitiallyIndex) {
-				await this.resumeQueue(idsToInitiallyIndex)
+				await (this.resumePromise = this.resumeQueue(idsToInitiallyIndex))
 			}
 			this.state = 'ready'
-			function clearEntries(start, condition) {
-				let result
-				db.getRange({
-					start
-				}).forEach(({ key, value }) => {
-					try {
-						let [, sourceId] = fromBufferKey(key, true)
-						if (condition(sourceId)) {
-							result = db.remove(key)
-						}
-					} catch(error) {
-						console.error(error)
+			this.state = 'ready'
+		}
+		static clearEntries(set) {
+			let result
+			let db = this.db
+			db.getRange({
+				start: Buffer.from([2])
+			}).forEach(({ key, value }) => {
+				try {
+					let [, sourceId] = fromBufferKey(key, true)
+					if (set.has(sourceId)) {
+						result = db.remove(key)
 					}
-				})
-				return result // just need to wait for last one to finish (guarantees all others are finished)
-			}
-			this.state = 'ready'
+				} catch(error) {
+					console.error(error)
+				}
+			})
+			return result // just need to wait for last one to finish (guarantees all others are finished)
 		}
 
 		static delay(ms) {
@@ -523,6 +521,9 @@ export const Index = ({ Source }) => {
 		static openDatabase() {
 			return Source.openChildDB(this, true)
 		}
+		static getIdsFromKey(key) {
+			return Source.getIdsFromKey(key)
+		}
 		static initialize(module) {
 			this.initializing = true
 			this.Sources[0].start()
@@ -531,11 +532,6 @@ export const Index = ({ Source }) => {
 			}*/
 			return when(super.initialize(module), () => {
 				this.initializing = false
-			})
-		}
-		static initializeData() {
-			return when(super.initializeData(), () => {
-				return this.resumeIndex()
 			})
 		}
 		static myEarliestPendingVersion = 0 // have we registered our process, and at what version
