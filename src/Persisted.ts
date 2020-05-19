@@ -458,7 +458,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			options.clearOnStart = true
 		}
 		this.rootDB = Persisted.DB.open(this.dbFolder + '/' + this.name + EXTENSION, options)
-		return this.prototype.db = this.db = this.rootDB.openDB(this.name)
+		return this.prototype.db = this.db = this.rootDB.openDB(this.dbName || this.name)
 	}
 /*
 	static async needsDBUpgrade() {
@@ -1023,7 +1023,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						try {
 							await Promise.all(indexingStarted)
 						} catch(error) {
-							console.error('Error indexing', this.name, id)
+							console.error('Error indexing', this.name, id, error)
 						}
 						if (this.resumeFromKey) // only update if we are actually resuming
 							this.resumeFromKey = toBufferKey(this.lastIndexingId)
@@ -1161,9 +1161,22 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return store.db
 	}
 
+	static removeUnusedDBs() {
+		let unusedDBs = new Set()
+		for (let { key } of this.rootDB.getRange({
+			start: Buffer.from([2])
+		})) {
+			unusedDBs.add(key.toString())
+		}
+		for (let store of [this, ...(this.childStores || [])]) {
+			unusedDBs.delete(store.dbName || store.name)
+		}
+		console.log('Removing unused dbs', Array.from(unusedDBs))
+	}
+
 	static async resumeQueue() {
 		let db = this.db
-		this.state = 'waiting for sources to build index'
+		this.state = 'waiting for upstream source to build'
 		for (let source of this.Sources || []) {
 			await source.resumePromise
 		}
