@@ -13,6 +13,8 @@ import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
 import { registerClass, addProcess } from './util/process'
 import { DEFAULT_CONTEXT, RequestContext } from './RequestContext'
+
+let getCurrentContext = () => currentContext
 let lz4Compress, lz4Uncompress
 try {
 	lz4Compress = require('lz4').encodeBlock
@@ -694,7 +696,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (!event.source) {
 			event.source = this
 		}
-		let context = currentContext
+		let context = getCurrentContext()
 		if (context && !event.triggers && context.connectionId) {
 			event.triggers = [ context.connectionId ]
 		}
@@ -742,7 +744,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			return event
 		}
 		event.visited.add(this)
-		let context = currentContext
+		let context = getCurrentContext()
 		if (context && !event.triggers && context.connectionId) {
 			event.triggers = [ context.connectionId ]
 		}
@@ -809,7 +811,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	notifies(target) {
-		let context = currentContext
+		let context = getCurrentContext()
 		if (context) {
 			(this.listenersWithContext || (this.listenersWithContext = new Map())).set(target, context)
 		}
@@ -836,7 +838,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static notifies(target) {
-		let context = currentContext
+		let context = getCurrentContext()
 		if (context) {
 			(this.listenersWithContext || (this.listenersWithContext = new Map())).set(target, context)
 		}
@@ -866,6 +868,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			whenReady = promises[0]
 		}
 		if (waitForIndexing) {
+			let currentContext = getCurrentContext()
 			let updateContext = (currentContext && currentContext.expectedVersions) ? currentContext : DEFAULT_CONTEXT
 			return when(whenReady, () => {
 				for (const sourceName in updateContext.expectedVersions) {
@@ -888,7 +891,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	exclusiveLock(executeWithLock: () => any) {
 		let promisedResult
 		if (this.currentLock) {
-			let context = currentContext
+			let context = getCurrentContext()
 			const executeInContext = () => context.executeWithin(executeWithLock)
 			promisedResult = this.currentLock.then(executeInContext, executeInContext)
 		} else {
@@ -1220,11 +1223,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this._transitions || (this._transitions = new Map())
 	}
 	static get(id, mode?) {
-		let context = currentContext
-		/*
-		if (context && !this.allowDirectJSON && context.ifModifiedSince > -1) {
-			context.ifModifiedSince = undefined
-		}*/
+		let context = getCurrentContext()
 		let entry = this.getEntryData(id)
 		if (entry) {
 			if (context) {
@@ -1356,7 +1355,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	static getEntryData(id, onlyCommitted) {
-		let context = currentContext
+		let context = getCurrentContext()
 		let transition = this.transitions.get(id) // if we are transitioning, return the transition result
 		if (transition) {
 			if (transition.invalidating) {
@@ -1628,7 +1627,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static fetchAllIds: () => {}[]
 
 	static get(id, mode?) {
-		let context = currentContext		
+		let context = getCurrentContext()
 		return when(this.whenUpdatedInContext(context), () => {
 			let entry = this.getEntryData(id)
 			if (entry) {
@@ -1722,7 +1721,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			transition.result = when(when(hasPromises ? Promise.all(inputData) : inputData, inputData => {
 				if (inputData.length > 0 && inputData[0] === undefined && !this.sourceOptional) // first input is undefined, we pass through
 					return
-				let context = currentContext
+				let context = getCurrentContext()
 				let transformContext = context ? context.newContext() : new RequestContext(null, null)
 				transformContext.abortables = transition.abortables
 				return transformContext.executeWithin(() => this.prototype.transform.apply({ id }, inputData.map(copy)))
@@ -2060,7 +2059,7 @@ export function secureAccess<T>(Class: T): T & Secured {
 				}
 				if (typeof value === 'function') {
 					return function() {
-						let context = currentContext
+						let context = getCurrentContext()
 						// create a new derivative context that includes the session, but won't
 						// update the version/timestamp
 						return context.newContext().executeWithin(() => {
@@ -2160,6 +2159,8 @@ export function configure(options) {
 	if (options.storesObject) {
 		storesObject = options.storesObject
 	}
+	if (options.getCurrentContext)
+		getCurrentContext = options.getCurrentContext
 	if (options.sharedStructureDirectory)
 		sharedStructureDirectory = options.sharedStructureDirectory
 	if (options.sharedInstrumenting) {

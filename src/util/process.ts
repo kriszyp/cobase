@@ -179,7 +179,7 @@ function attachClass(stream, Class, processId) {
 			return new Promise((resolve, reject) => waitingRequests.set(requestId, { resolve, reject }))
 		}))
 	}
-	stream.setMaxListeners(100) // we are going to be adding a lot here
+	stream.setMaxListeners(1000) // we are going to be adding a lot here
 	stream.on('close', () => {
 		Class.stopNotifies(updater)
 		streams.splice(streams.indexOf(stream), 1)

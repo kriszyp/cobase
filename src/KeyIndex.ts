@@ -1,4 +1,4 @@
-import { currentContext, VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
+import { VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
 import { serialize, parse, parseLazy, createParser, asBlock } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
 import { ShareChangeError } from './util/errors'
@@ -416,10 +416,10 @@ export const Index = ({ Source }) => {
 		}
 
 		static parseEntryValue(buffer) {
-			let statusByte = buffer[0]
+/*			let statusByte = buffer[0]
 			if (statusByte >= COMPRESSED_STATUS_24) {
 				buffer = this.uncompressEntry(buffer, statusByte, 0)
-			}
+			}*/
 			return parseLazy(buffer, { shared: this.sharedStructure })
 		}
 		static getIndexedValues(range: IterableOptions) {
@@ -442,6 +442,13 @@ export const Index = ({ Source }) => {
 			const db: Database = this.db
 			let approximateSize = 0
 			let promises = []
+			range.copy = (buffer) => {
+				let statusByte = buffer[0]
+				if (statusByte >= COMPRESSED_STATUS_24) {
+					return this.uncompressEntry(buffer, statusByte, 0)
+				} else
+					return Buffer.from(buffer)
+			}
 			return db.getRange(range).map(({ key, value }) => {
 				let [, sourceId] = fromBufferKey(key, true)
 				/*if (range.recordApproximateSize) {
