@@ -1072,6 +1072,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.lastIndexingId = id
 		try {
 			return when(this.get(id), () => {
+				let transition = this.transitions.get(id)
+				if (transition)
+					return transition.whenIndexed
 	//			this.queue.delete(id)
 			}, error => {
 				console.error('Error indexing', this.name, id)
@@ -1351,7 +1354,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (promises.length == 0)
 			return readyToCommit(forValueResults)
 		else // TODO: if 1
-			return Promise.all(promises).then(readyToCommit)
+			return (transition.whenIndexed = Promise.all(promises)).then(readyToCommit)
 	}
 
 	static getEntryData(id, onlyCommitted) {
@@ -1792,7 +1795,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static enqueue(id, event, previousEntry?) {
-		if (this.resumeFromKey && this.resumeFromKey.compare(toBufferKey(id) == -1)) // during initialization, we ignore updates because we are going rebuild
+		if (this.resumeFromKey && this.resumeFromKey.compare(toBufferKey(id)) == -1) // during initialization, we ignore updates because we are going rebuild
 			return
 		const version = event.version
 		// queue up processing the event
