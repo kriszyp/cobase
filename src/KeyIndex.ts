@@ -96,128 +96,111 @@ export const Index = ({ Source }) => {
 			let eventUpdateSources = []
 			let idAsBuffer = toBufferKey(id)
 
+			let toRemove = new Map()
+			// TODO: handle delta, for optimized index updaes
+			// this is for recording changed entities and removing the values that previously had been indexed
+			let previousEntries
 			try {
-				let toRemove = new Map()
-				// TODO: handle delta, for optimized index updaes
-				// this is for recording changed entities and removing the values that previously had been indexed
-				let previousEntries
-				try {
-					if (previousEntry != null) { // if no data, then presumably no references to clear
-						// use the same mapping function to determine values to remove
-						let previousData = previousEntry.value
-						previousEntries = previousData === undefined ? previousData : this.indexBy(previousData, id)
-						if (previousEntries && previousEntries.then)
-							previousEntries = await previousEntries
-						if (typeof previousEntries == 'object' && previousEntries) {
-							previousEntries = this.normalizeEntries(previousEntries)
-							for (let entry of previousEntries) {
-								let previousValue = entry.value
-								previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, false, 0)
-								toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
-							}
-						} else if (previousEntries != null) {
-							toRemove.set(previousEntries, EMPTY_BUFFER)
+				if (previousEntry != null) { // if no data, then presumably no references to clear
+					// use the same mapping function to determine values to remove
+					let previousData = previousEntry.value
+					previousEntries = previousData === undefined ? previousData : this.indexBy(previousData, id)
+					if (previousEntries && previousEntries.then)
+						previousEntries = await previousEntries
+					if (typeof previousEntries == 'object' && previousEntries) {
+						previousEntries = this.normalizeEntries(previousEntries)
+						for (let entry of previousEntries) {
+							let previousValue = entry.value
+							previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, false, 0)
+							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 						}
+					} else if (previousEntries != null) {
+						toRemove.set(previousEntries, EMPTY_BUFFER)
 					}
+				}
+			} catch(error) {
+				if (error.isTemporary)
+					throw error
+				if (indexRequest && indexRequest.version !== version) return // don't log errors from invalidated states
+				this.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
+			}
+			if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
+			let entries
+			if (!deleted) {
+				let attempts = 0
+				let data
+				try {
+					data = indexRequest ? indexRequest.value : Source.get(id, INDEXING_MODE)
+					if (data && data.then)
+						data = await data
 				} catch(error) {
 					if (error.isTemporary)
 						throw error
-					if (indexRequest && indexRequest.version !== version) return // don't log errors from invalidated states
-					this.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
-				}
-				if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
-				let entries
-				if (!deleted) {
-					let attempts = 0
-					let data
 					try {
-						data = indexRequest ? indexRequest.value : Source.get(id, INDEXING_MODE)
-						if (data && data.then)
-							data = await data
+						// try again
+						data = indexRequest ? indexRequest.value : await Source.get(id, INDEXING_MODE)
 					} catch(error) {
-						if (error.isTemporary)
-							throw error
-						try {
-							// try again
-							data = indexRequest ? indexRequest.value : await Source.get(id, INDEXING_MODE)
-						} catch(error) {
-							if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
-							this.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
-							data = undefined
-						}
-					}
-					if (Source.whenValueCommitted && Source.whenValueCommitted.then)
-						await Source.whenValueCommitted
-					if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
-					// let the indexBy define how we get the set of values to index
-					try {
-						entries = data === undefined ? data : this.indexBy(data, id)
-						if (entries && entries.then)
-							entries = await entries
-					} catch(error) {
-						if (error.isTemporary)
-							throw error
 						if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
-						this.warn('Error indexing value', error, 'for', this.name, id)
-						entries = undefined
+						this.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
+						data = undefined
 					}
-					entries = this.normalizeEntries(entries)
-					let first = true
-					for (let entry of entries) {
-						// we use the composite key, so we can quickly traverse all the entries under a certain key
-						let key = typeof entry === 'object' ? entry.key : entry // TODO: Maybe at some point we support dates as keys
-						// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
-						let removedValue = toRemove.get(key)
-						// a value of '' is treated as a reference to the source object, so should always be treated as a change
-						let dpackStart = this._dpackStart
-						let value = entry.value == null ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), first, dpackStart)
-						first = false
-						if (removedValue != null)
-							toRemove.delete(key)
-						let isChanged = removedValue == null || !value.slice(dpackStart).equals(removedValue)
-						if (isChanged || value.length === 0 || this.alwaysUpdate) {
-							if (isChanged) {
-								let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
-								value = this.setupSizeTable(value, dpackStart, 0)
-								if (value.length > COMPRESSION_THRESHOLD) {
-									value = this.compressEntry(value, 0)
-								}
-								operations.push({
-									type: 'put',
-									key: fullKey,
-									value: value
-								})
-								operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
+				}
+				if (Source.whenValueCommitted && Source.whenValueCommitted.then)
+					await Source.whenValueCommitted
+				if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
+				// let the indexBy define how we get the set of values to index
+				try {
+					entries = data === undefined ? data : this.indexBy(data, id)
+					if (entries && entries.then)
+						entries = await entries
+				} catch(error) {
+					if (error.isTemporary)
+						throw error
+					if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
+					this.warn('Error indexing value', error, 'for', this.name, id)
+					entries = undefined
+				}
+				entries = this.normalizeEntries(entries)
+				let first = true
+				for (let entry of entries) {
+					// we use the composite key, so we can quickly traverse all the entries under a certain key
+					let key = typeof entry === 'object' ? entry.key : entry // TODO: Maybe at some point we support dates as keys
+					// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
+					let removedValue = toRemove.get(key)
+					// a value of '' is treated as a reference to the source object, so should always be treated as a change
+					let dpackStart = this._dpackStart
+					let value = entry.value == null ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), first, dpackStart)
+					first = false
+					if (removedValue != null)
+						toRemove.delete(key)
+					let isChanged = removedValue == null || !value.slice(dpackStart).equals(removedValue)
+					if (isChanged || value.length === 0 || this.alwaysUpdate) {
+						if (isChanged) {
+							let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
+							value = this.setupSizeTable(value, dpackStart, 0)
+							if (value.length > COMPRESSION_THRESHOLD) {
+								value = this.compressEntry(value, 0)
 							}
-							eventUpdateSources.push({ key, sources, triggers })
+							operations.push({
+								type: 'put',
+								key: fullKey,
+								value: value
+							})
+							operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
 						}
+						eventUpdateSources.push({ key, sources, triggers })
 					}
 				}
-				for (let [key] of toRemove) {
-					operations.push({
-						type: 'del',
-						key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
-					})
-					eventUpdateSources.push({ key, sources, triggers })
-				}
-				if (Index.onIndexEntry) {
-					Index.onIndexEntry(this.name, id, version, previousEntries, entries)
-				}
-			} catch(error) {
-				if (error.isTemporary) {
-					indexRequest = indexRequest || {}
-					let retries = indexRequest.retries = (indexRequest.retries || 0) + 1
-					this.state = 'retrying index in ' + retries * 1000 + 'ms'
-					if (retries < 4) {
-						await this.delay(retries * 1000)
-						console.info('Retrying index entry', this.name, id, error)
-						return
-					} else {
-						console.info('Too many retries', this.name, id, retries)
-					}
-				}
-				if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
-				this.warn('Error indexing', Source.name, 'for', this.name, id, error)
+			}
+			for (let [key] of toRemove) {
+				operations.push({
+					type: 'del',
+					key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
+				})
+				eventUpdateSources.push({ key, sources, triggers })
+			}
+			if (Index.onIndexEntry) {
+				Index.onIndexEntry(this.name, id, version, previousEntries, entries)
 			}
 			return {
 				commit: () => {
@@ -343,9 +326,6 @@ export const Index = ({ Source }) => {
 			return result // just need to wait for last one to finish (guarantees all others are finished)
 		}
 
-		static delay(ms) {
-			return new Promise(resolve => setTimeout(resolve, ms))
-		}
 		static updated(event, by) {
 			// don't do anything, we don't want these events to propagate through here, and we do indexing based on upstream queue
 		}

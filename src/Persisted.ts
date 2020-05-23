@@ -984,6 +984,35 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
+	static tryForQueueEntry(id) {
+		const onQueueError = async (error) => {
+			let indexRequest = this.queue.get(id) || {}
+			let version = indexRequest.version
+			if (error.isTemporary) {
+				let retries = indexRequest.retries = (indexRequest.retries || 0) + 1
+				this.state = 'retrying index in ' + retries * 1000 + 'ms'
+				if (retries < 4) {
+					await delay(retries * 1000)
+					console.info('Retrying index entry', this.name, id, error)
+					return this.tryForQueueEntry(id)
+				} else {
+					console.info('Too many retries', this.name, id, retries)
+				}
+			}
+			if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
+			console.warn('Error indexing', this.name, id, error)
+			if (this.queue.delete)
+				this.queue.delete(id) // give up and delete it
+		}
+		try {
+			let result = this.forQueueEntry(id)
+			if (result && result.catch)
+				return result.catch(error => onQueueError(error))
+		} catch(error) {
+			return onQueueError(error)
+		}
+	}
+
 	static queue: Map<any, IndexRequest>
 	static async processQueue(queue) {
 		this.state = 'processing'
@@ -1014,7 +1043,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						return
 					sinceLastStateUpdate++
 					this.state = 'initiating indexing of entry'
-					indexingInProgress.push(this.forQueueEntry(id))
+					indexingInProgress.push(this.tryForQueueEntry(id))
 					if (sinceLastStateUpdate > (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * concurrencyAdjustment) {
 						// we have process enough, commit our changes so far
 						this.onBeforeCommit && this.onBeforeCommit(id)
@@ -1023,11 +1052,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						this.averageConcurrencyLevel = ((this.averageConcurrencyLevel || 0) + sinceLastStateUpdate) / 2
 						sinceLastStateUpdate = 0
 						this.state = 'awaiting indexing'
-						try {
-							await Promise.all(indexingStarted)
-						} catch(error) {
-							console.error('Error indexing', this.name, id, error)
-						}
+						await Promise.all(indexingStarted)
 						if (this.resumeFromKey) // only update if we are actually resuming
 							this.resumeFromKey = toBufferKey(this.lastIndexingId)
 						this.state = 'finished indexing batch'
@@ -1070,18 +1095,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static forQueueEntry(id) {
 		this.lastIndexingId = id
-		try {
-			return when(this.get(id), () => {
-				let transition = this.transitions.get(id)
-				if (transition)
-					return transition.whenIndexed
-	//			this.queue.delete(id)
-			}, error => {
-				console.error('Error indexing', this.name, id)
+		return when(this.get(id), () => {
+			let transition = this.transitions.get(id)
+			return when(transition && transition.whenIndexed, () => {
+				if (this.queue)
+					this.queue.delete(id)
 			})
-		} catch (error) {
-			console.error('Error indexing', this.name, id)
-		}
+		})
 	}
 	static queuedBatchFinished() {
 	}
@@ -1183,10 +1203,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static async resumeQueue() {
 		let db = this.db
 		this.state = 'waiting for upstream source to build'
+		this.resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 		for (let source of this.Sources || []) {
 			await source.resumePromise
 		}
-		this.resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 		if (!this.resumeFromKey) {
 			this.state = 'ready'
 			return
@@ -1303,8 +1323,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					// already an undefined entry, nothing to do (but clear out the transition)
 					if (this.transitions.get(id) == transition && !transition.invalidating) {
 						this.transitions.delete(id)
-						if (this.queue)
-							this.queue.delete(id)
 						return
 					}
 				} else {
@@ -1327,8 +1345,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				}
 			}
 			this.whenValueCommitted = committed
-			if (this.queue)
-				this.queue.delete(id)
 
 			return committed.then((successfulWrite) => {
 				if (this.transitions.get(id) == transition && !transition.invalidating)
@@ -1668,9 +1684,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						}
 					}
 					return transition.result
-				} else if (this.queue && this.queue.get(id)) {
-					console.warn(this.name,id, 'should not be in process queue (not invalidated), but was')
-					this.queue.delete(id)
 				}
 				if (context) {
 					context.setVersion(entry.version)
@@ -1925,7 +1938,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		this.whenWritten = written
 		if (!event.whenWritten)
 			event.whenWritten = written
-		if (ownEntry && this.queue) {
+		if (ownEntry !== false && this.queue) {
 			this.enqueue(id, event, written.then((result) => {
 				if (result === false) {
 					console.log('Value had changed during invalidation', id, this.name, previousVersion, version, conditionalHeader)
@@ -2023,7 +2036,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static updateDBVersion() {
 		if (this.indices)
-			this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 255]))
+			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
 		super.updateDBVersion()
 	}
 
