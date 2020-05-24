@@ -188,7 +188,8 @@ export const Index = ({ Source }) => {
 							})
 							operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
 						}
-						eventUpdateSources.push({ key, sources, triggers })
+						if (!this.resumePromise)
+							eventUpdateSources.push({ key, sources, triggers })
 					}
 				}
 			}
@@ -197,7 +198,8 @@ export const Index = ({ Source }) => {
 					type: 'del',
 					key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
 				})
-				eventUpdateSources.push({ key, sources, triggers })
+				if (!this.resumePromise)
+					eventUpdateSources.push({ key, sources, triggers })
 			}
 			if (Index.onIndexEntry) {
 				Index.onIndexEntry(this.name, id, version, previousEntries, entries)

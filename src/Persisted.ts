@@ -671,7 +671,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.wasReset = true
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
-			await this.resetAll(clearDb)
+			this.clearAllData()
 			this.updateDBVersion()
 		}
 		this.resumePromise = this.resumeQueue() // don't wait for this, it has its own separate promise system
@@ -1035,6 +1035,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let indexingInOtherProcess = [] // TODO: Need to have whenUpdated wait on this too
 			let actionsInProgress = []
 			let sinceLastStateUpdate = 0
+			let lastTime = Date.now()
 			do {
 				if (this.nice > 0)
 					await delay(this.nice) // short delay for other processing to occur
@@ -1043,6 +1044,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						return
 					sinceLastStateUpdate++
 					this.state = 'initiating indexing of entry'
+					let now = Date.now()
+					let delayMs = Math.min((now - lastTime) / 4, 100)
+					lastTime = now + delayMs
 					indexingInProgress.push(this.tryForQueueEntry(id))
 					if (sinceLastStateUpdate > (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * concurrencyAdjustment) {
 						// we have process enough, commit our changes so far
@@ -1065,7 +1069,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						let timeUsed = currentTime - lastTime
 						lastTime = currentTime
 						// calculate an indexing adjustment based on cpu usage and queue size (which we don't want to get too big)
-						concurrencyAdjustment = (concurrencyAdjustment + 1000 / (1000 + timeUsed)) / 2
+						concurrencyAdjustment = (concurrencyAdjustment + 20000 / (20000 + timeUsed)) / 2
 						niceAdjustment = (niceAdjustment + (cpuTotalUsage - lastCpuUsage) / (timeUsed + 10) / 20) / 2
 						/* Can be used to measure performance
 						let [seconds, billionths] = process.hrtime(lastStart)
@@ -1074,8 +1078,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 							console.log('speed adjustment', { concurrencyAdjustment, niceAdjustment, timeUsed, cpuTime: (cpuTotalUsage - lastCpuUsage) })
 							niceAdjustment = 10
 						}
-						await delay(Math.round((this.nice * niceAdjustment) / (queue.size + 1000))) // short delay for other processing to occur
+						await delay(Math.round((this.nice * niceAdjustment) / (queue.size + 3000))) // short delay for other processing to occur
+						lastTime = Date.now()
 					}
+					await delay(delayMs)
 				}
 				this.state = 'awaiting final indexing'
 				await Promise.all(indexingInProgress) // then wait for all indexing to finish everything
@@ -1209,8 +1215,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		if (!this.resumeFromKey) {
 			this.state = 'ready'
+			this.resumePromise = undefined
 			return
 		}
+		this.state = 'reseting/loading all ids'
+		if (this.resumeFromKey[0] == 1 && this.resumeFromKey[1] == 254) {
+			await this.resetAll()
+		}
+		this.db.put(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
 		console.log(this.name + ' Resuming from key ' + fromBufferKey(this.resumeFromKey))
 		let idsToInitiallyIndex = this.getIdsFromKey(this.resumeFromKey)
 
@@ -1231,6 +1243,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.resumeFromKey = null
 		await db.remove(INITIALIZING_LAST_KEY)
 		this.state = 'ready'
+		this.resumePromise = undefined
 	}
 })
 
@@ -1339,7 +1352,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 						statusByte: buffer[0],
 						value
 					}
-					value[ENTRY] = entry
+					if (value)
+						value[ENTRY] = entry
 					entryCache.set(id, entry)
 					expirationStrategy.useEntry(entry, buffer.length)
 				}
@@ -1486,7 +1500,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			if (range.limit)
 				options.limit = range.limit
 		}
-		return db.getRange(options).map(({ key }) => fromBufferKey(key)).asArray
+		let iterable = db.getRange(options).map(({ key }) => fromBufferKey(key))
+		if (range && range.asIterable)
+			return iterable
+		return iterable.asArray
 	}
 
 	static entries(opts) {
@@ -1842,17 +1859,16 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 
-	static async resetAll(clearDb) {
+	static async resetAll() {
 		if (verboseLogging)
 			console.log('reseting', this.name)
 		let version = this.startVersion = getNextVersion()
-		//if (clearDb) {TODO: if not clearDb, verify that there are no entries; if there are, remove them
-		this.clearAllData()
-		let allIds = await (this.fetchAllIds ? this.fetchAllIds() :
-			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ? this.Sources[0].getInstanceIds() : [])
+		let allIds = this.fetchAllIds ? await this.fetchAllIds() :
+			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ? (
+				(await this.Sources[0].resumePromise), this.Sources[0].getInstanceIds({ asIterable: true })) : []
 		let committed
 		let queued = 0
-		console.info('reseting', this.name, 'with', allIds.length, 'ids')
+		console.info('loading ids for', this.name, 'with', allIds.length, 'ids')
 		for (let id of allIds) {
 			if (this.instancesById.get(id)) {
 				// instance already in memory
@@ -1866,7 +1882,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				queued = 0
 			}
 		}
-		console.info('Finished reseting', this.name)
+		console.info('Finished loading all ids', this.name)
 		return committed
 	}
 
@@ -1887,7 +1903,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			if (transition.invalidating) {
 				previousVersion = transition.newVersion
 				previousStatusByte = INVALIDATED_STATE
-			} else if (!transition.committed) {
+			} else if (transition.committed) {
+				if (transition.result === undefined)
+					previousVersion = null
+			} else {
 				// still resolving but this gives us the immediate version
 				previousVersion = transition.fromVersion
 				previousStatusByte = INVALIDATED_STATE
@@ -2036,7 +2055,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static updateDBVersion() {
 		if (this.indices)
-			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
+			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 254]))
 		super.updateDBVersion()
 	}
 
@@ -2211,5 +2230,5 @@ export class Invalidated {
 	processId: number
 }
 Invalidated.prototype.statusByte = INVALIDATED_STATE
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+const delay = ms => new Promise(resolve => ms >= 1 ? setTimeout(resolve, ms) : setImmediate(resolve))
 const primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199]
