@@ -1031,11 +1031,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (initialQueueSize > 100) {
 				console.log('Indexing', initialQueueSize, this.name, 'for', this.name)
 			}
-			let indexingInProgress = []
-			let indexingInOtherProcess = [] // TODO: Need to have whenUpdated wait on this too
-			let actionsInProgress = []
+			let actionsInProgress = new Set()
 			let sinceLastStateUpdate = 0
 			let lastTime = Date.now()
+			let delayMs = 10
+			let indexed = 0
 			do {
 				if (this.nice > 0)
 					await delay(this.nice) // short delay for other processing to occur
@@ -1045,22 +1045,35 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					sinceLastStateUpdate++
 					this.state = 'initiating indexing of entry'
 					let now = Date.now()
-					let delayMs = Math.min((now - lastTime) / 4, 100)
+					indexed++
+					delayMs = Math.max(delayMs, 1) * (actionsInProgress.size / (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1)
+					if (!this.delays)
+						this.delays = []
+					this.delays.push({
+						delayMs,
+						outstanding: actionsInProgress.size
+					})
 					lastTime = now + delayMs
-					indexingInProgress.push(this.tryForQueueEntry(id))
+					let completion = this.tryForQueueEntry(id)
+					if (completion && completion.then) {
+						actionsInProgress.add(completion)
+						completion.then(() => actionsInProgress.delete(completion))
+					}
+
 					if (sinceLastStateUpdate > (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * concurrencyAdjustment) {
 						// we have process enough, commit our changes so far
 						this.onBeforeCommit && this.onBeforeCommit(id)
-						let indexingStarted = indexingInProgress
-						indexingInProgress = []
 						this.averageConcurrencyLevel = ((this.averageConcurrencyLevel || 0) + sinceLastStateUpdate) / 2
+						/*let indexingStarted = indexingInProgress
+						indexingInProgress = []
+						
 						sinceLastStateUpdate = 0
 						this.state = 'awaiting indexing'
-						await Promise.all(indexingStarted)
+						await Promise.all(indexingStarted)*/
 						if (this.resumeFromKey) // only update if we are actually resuming
 							this.resumeFromKey = toBufferKey(this.lastIndexingId)
 						this.state = 'finished indexing batch'
-						let processedEntries = indexingStarted.length
+						//let processedEntries = indexingStarted.length
 						//this.saveLatestVersion(false)
 						cpuUsage = process.cpuUsage()
 						let lastCpuUsage = cpuTotalUsage
@@ -1084,7 +1097,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					await delay(delayMs)
 				}
 				this.state = 'awaiting final indexing'
-				await Promise.all(indexingInProgress) // then wait for all indexing to finish everything
+				await Promise.all(actionsInProgress) // then wait for all indexing to finish everything
 			} while (queue.size > 0)
 			await this.lastWriteCommitted
 			if (initialQueueSize > 100) {
@@ -1310,6 +1323,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	static saveValue(id, value, previousEntry, conditionalHeader?) {
 		let transition = this.transitions.get(id)
+		if (!transition)
+			return
 		let version = transition.fromVersion
 		let indexRequest = this.queue && this.queue.get(id) ||
 			{ 
