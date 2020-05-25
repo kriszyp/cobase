@@ -1046,11 +1046,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					this.state = 'initiating indexing of entry'
 					let now = Date.now()
 					indexed++
-					delayMs = Math.max(delayMs, 1) * (actionsInProgress.size / (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1)
+					let desiredConcurrentRatio = actionsInProgress.size / Math.min(indexed, this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY)
+					delayMs = Math.max(delayMs, 1) * (desiredConcurrentRatio + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1)
 					if (!this.delays)
 						this.delays = []
 					this.delays.push({
 						delayMs,
+						id,
+						queue,
 						outstanding: actionsInProgress.size
 					})
 					lastTime = now + delayMs
@@ -1094,7 +1097,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 						await delay(Math.round((this.nice * niceAdjustment) / (queue.size + 3000))) // short delay for other processing to occur
 						lastTime = Date.now()
 					}
-					await delay(delayMs)
+					await delay(delayMs * desiredConcurrentRatio)
 				}
 				this.state = 'awaiting final indexing'
 				await Promise.all(actionsInProgress) // then wait for all indexing to finish everything
@@ -1976,7 +1979,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			this.enqueue(id, event, written.then((result) => {
 				if (result === false) {
 					console.log('Value had changed during invalidation', id, this.name, previousVersion, version, conditionalHeader)
-					this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
+					if (this.transitions.get(id) == transition)
+						this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
 					let newVersion = db.get(keyAsBuffer, existingBuffer =>
 						existingBuffer ? readUInt(existingBuffer) : 0)						
 					if (newVersion > version) {
