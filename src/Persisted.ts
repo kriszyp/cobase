@@ -1050,22 +1050,22 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					delayMs = Math.max(delayMs, 1) * (desiredConcurrentRatio + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1)
 					lastTime = now + delayMs
 					let completion = this.tryForQueueEntry(id)
-					completion.id = id
 					if (completion && completion.then) {
+						completion.id = id
 						actionsInProgress.add(completion)
 						completion.then(() => actionsInProgress.delete(completion))
 					}
 
 					if (sinceLastStateUpdate > (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY)) {
 						// we have process enough, commit our changes so far
-						this.onBeforeCommit && this.onBeforeCommit(id)
 						this.averageConcurrencyLevel = ((this.averageConcurrencyLevel || 0) + actionsInProgress.size) / 2
-						for (let last in actionsInProgress) {
-							this.lastIndexingId = last.id
-							break
-						}
-						if (this.resumeFromKey) // only update if we are actually resuming
+						if (this.resumeFromKey) {// only update if we are actually resuming
+							for (let last in actionsInProgress) {
+								this.lastIndexingId = last.id
+								break
+							}
 							this.resumeFromKey = toBufferKey(this.lastIndexingId)
+						}
 					}
 					await delay(delayMs * desiredConcurrentRatio)
 				}
