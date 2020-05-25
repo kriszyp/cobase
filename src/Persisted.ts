@@ -1205,11 +1205,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static async resumeQueue() {
 		let db = this.db
-		this.state = 'waiting for upstream source to build'
 		this.resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
-		for (let source of this.Sources || []) {
-			await source.resumePromise
-		}
 		if (!this.resumeFromKey) {
 			this.state = 'ready'
 			this.resumePromise = undefined

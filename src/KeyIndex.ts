@@ -268,6 +268,14 @@ export const Index = ({ Source }) => {
 		static get needsResume() {
 			return !Source.wasReset
 		}
+		static async resumeQueue() {
+			this.state = 'waiting for upstream source to build'
+			for (let source of this.Sources || []) {
+				await source.resumePromise
+			}
+			return super.resumeQueue()
+		}
+
 
 
 		static log(...args) {
