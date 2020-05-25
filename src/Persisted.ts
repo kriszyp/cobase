@@ -31,7 +31,6 @@ const DB_VERSION_KEY = Buffer.from([1, 1]) // table metadata
 const INITIALIZING_PROCESS_KEY = Buffer.from([1, 4])
 // everything after 9 is cleared when a db is cleared
 const SHARED_STRUCTURE_KEY = Buffer.from([1, 10])
-const LAST_VERSION_IN_DB_KEY = Buffer.from([1, 3]) // table metadata 11
 const INITIALIZING_LAST_KEY = Buffer.from([1, 7])
 const INITIALIZATION_SOURCE = 'is-initializing'
 const DISCOVERED_SOURCE = 'is-discovered'
@@ -654,6 +653,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 
 	}
+
+	static reset() {
+		this.clearAllData()
+		this.updateDBVersion()
+		this.resumeInitialization()
+	}
 	static async initializeData() {
 		let readyPromises = []
 		for (let Source of this.Sources || []) {
@@ -816,10 +821,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}))
 		let versionBuffer = Buffer.allocUnsafe(8)
 		writeUInt(versionBuffer, this.lastVersion)
-		if (this.indices || this.needsRebuild) {
-			console.log('Will rebuild with own queue', this.name)
-			this.db.putSync(LAST_VERSION_IN_DB_KEY, versionBuffer)
-		}
 		return version
 	}
 
@@ -1245,6 +1246,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.state = 'ready'
 		this.resumePromise = undefined
 	}
+
+	static resetAll(): any {
+	}
 })
 
 const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Base {
@@ -1365,7 +1369,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				if (this.transitions.get(id) == transition && !transition.invalidating)
 					this.transitions.delete(id)
 				if (!successfulWrite) {
-					console.log('unsuccessful write of transform, data changed, updating', id, this.name, this.db.get(toBufferKey(id)))
+					console.log('unsuccessful write of transform, data changed, updating', id, this.name, version, conditionalHeader, this.db.get(toBufferKey(id)))
 					let entry = this.getEntryData(id)
 					if (entry.statusByte != INVALIDATED_STATE) {
 						this.clearEntryCache(id)
@@ -1619,8 +1623,6 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 }) {
 	db: any
 	static dbFolder = 'db'
-	static resetAll(clearDb): any {
-	}
 
 	static clearAllData() {
 	}
@@ -1896,6 +1898,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				queued = 0
 			}
 		}
+		await this.whenWritten
 		console.info('Finished loading all ids', this.name)
 		return committed
 	}

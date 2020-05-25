@@ -250,31 +250,6 @@ export const Index = ({ Source }) => {
 					throw error
 			}
 		}
-		static rebuildIndex() {
-			this.rebuilt = true
-			lastIndexedVersion = 1
-
-			// restart from scratch
-			this.log('rebuilding index', this.name, 'Source version', Source.startVersion, 'index version')
-			// first cancel any existing indexing
-			this.clearAllData()
-		}
-
-		static reset() {
-			this.rebuildIndex()
-			return this.resumeIndex()
-		}
-
-		static get needsResume() {
-			return !Source.wasReset
-		}
-		static resumeInitialization() {
-			this.state = 'waiting for upstream source to build'
-			this.resumePromise = when(Source.resumePromise, () =>
-				super.resumeInitialization())
-		}
-
-
 
 		static log(...args) {
 			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
@@ -283,55 +258,6 @@ export const Index = ({ Source }) => {
 		static warn(...args) {
 			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
 			console.warn(...args)
-		}
-		static async resumeIndex() {
-			// TODO: if it is over half the index, just rebuild
-			this.state = 'initializing'
-			const db: Database = this.db
-			sourceVersions[Source.name] = lastIndexedVersion
-			
-			let idsToInitiallyIndex
-			if (lastIndexedVersion == 1) {
-				idsToInitiallyIndex = await Source.getIdsFromKey()
-				this.log('Starting index from scratch ' + this.name)
-				this.state = 'clearing'
-				this.clearAllData()
-				this.db.putSync(INITIALIZING_LAST_KEY, Buffer.from([1, 255]))
-				this.updateDBVersion()
-				this.log('Cleared index', this.name)
-			} else {
-				await Source.processUnfinishedIds(idsToReindex => {
-					this.state = 'resuming'
-					const setOfIds = new Set(idsToReindex)
-					// clear out all the items that we are indexing, since we don't have their previous state
-					return clearEntries(Buffer.from([2]), (sourceId) => setOfIds.has(sourceId))
-				})
-			}
-			this.initializing = false
-			let min = Infinity
-			let max = 0
-			if (idsToInitiallyIndex) {
-				await (this.resumePromise = this.resumeQueue(idsToInitiallyIndex))
-			}
-			this.state = 'ready'
-			this.state = 'ready'
-		}
-		static clearEntries(set) {
-			let result
-			let db = this.db
-			db.getRange({
-				start: Buffer.from([2])
-			}).forEach(({ key, value }) => {
-				try {
-					let [, sourceId] = fromBufferKey(key, true)
-					if (set.has(sourceId)) {
-						result = db.remove(key)
-					}
-				} catch(error) {
-					console.error(error)
-				}
-			})
-			return result // just need to wait for last one to finish (guarantees all others are finished)
 		}
 
 		static updated(event, by) {
@@ -466,11 +392,6 @@ export const Index = ({ Source }) => {
 		static indexBy(data: {}, sourceKey: string | number | boolean): Array<{ key: string | number, value: any} | string | number> | IterableIterator<any> | string | number	{
 			return null
 		}
-		static resetAll() {
-			// rebuild index
-			this.log('Index', this.name, 'resetAll')
-			return this.rebuildIndex()
-		}
 
 		static whenUpdatedInContext(context?) {
 			return Source.whenUpdatedInContext(true)
@@ -519,16 +440,37 @@ export const Index = ({ Source }) => {
 		static getIdsFromKey(key) {
 			return Source.getIdsFromKey(key)
 		}
-		static initialize(module) {
-			this.initializing = true
-			this.Sources[0].start()
-			/*if (this.Sources[0].updatingProcessModule && !this.updatingProcessModule) {
-				this.updatingProcessModule = this.Sources[0].updatingProcessModule
-			}*/
-			return when(super.initialize(module), () => {
-				this.initializing = false
-			})
+		static updateDBVersion() {
+			if (!Source.wasReset)
+				this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 254]))
+			super.updateDBVersion()
 		}
+
+		static resumeInitialization() {
+			this.state = 'waiting for upstream source to build'
+			// explicitly wait for source to finish resuming before our own resuming
+			this.resumePromise = when(Source.resumePromise, () =>
+				super.resumeInitialization())
+		}
+
+		static clearEntries(set) {
+			let result
+			let db = this.db
+			db.getRange({
+				start: Buffer.from([2])
+			}).forEach(({ key, value }) => {
+				try {
+					let [, sourceId] = fromBufferKey(key, true)
+					if (set.has(sourceId)) {
+						result = db.remove(key)
+					}
+				} catch(error) {
+					console.error(error)
+				}
+			})
+			return result // just need to wait for last one to finish (guarantees all others are finished)
+		}
+
 		static myEarliestPendingVersion = 0 // have we registered our process, and at what version
 		static whenAllConcurrentlyIndexing?: Promise<any> // promise if we are waiting for the initial indexing process to join the concurrent indexing mode
 		static loadVersions() {
