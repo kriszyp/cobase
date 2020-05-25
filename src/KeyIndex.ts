@@ -268,12 +268,10 @@ export const Index = ({ Source }) => {
 		static get needsResume() {
 			return !Source.wasReset
 		}
-		static async resumeQueue() {
+		static resumeInitialization() {
 			this.state = 'waiting for upstream source to build'
-			for (let source of this.Sources || []) {
-				await source.resumePromise
-			}
-			return super.resumeQueue()
+			this.resumePromise = when(Source.resumePromise, () =>
+				super.resumeInitialization())
 		}
 
 
@@ -553,14 +551,18 @@ export const Index = ({ Source }) => {
 				start: Buffer.from([2]),
 				values: false
 			}
+			let whenReady = this.whenProcessingComplete
 			if (range) {
 				if (range.start != null)
 					options.start = toBufferKey(range.start)
 				if (range.end != null)
 					options.end = toBufferKey(range.end)
+				if (range.waitForAllIds) {
+					whenReady = when(Source.resumePromise, () => this.whenProcessingComplete)
+				}
 			}
 			let lastKey
-			return when(this.whenProcessingComplete, () =>
+			return when(whenReady, () =>
 				db.getRange(options).map(({ key }) => fromBufferKey(key, true)[0]).filter(key => {
 					if (key !== lastKey) { // skip multiple entries under one key
 						lastKey = key

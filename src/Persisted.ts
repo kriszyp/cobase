@@ -677,7 +677,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if ((this.rootStore == this || !this.rootStore) && this.rootDB.get(Buffer.from('data'))) {
 			this.migrateOldData()
 		}
-		this.resumePromise = this.resumeQueue() // don't wait for this, it has its own separate promise system
+		this.resumeInitialization() // don't wait for this, it has its own separate promise system
 	}
 	static migrateOldData() {
 		this.rootDB.transaction(() => {
@@ -1203,8 +1203,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		console.log('Removing unused dbs', Array.from(unusedDBs))
 	}
 
-	static async resumeQueue() {
-		let db = this.db
+	static resumeInitialization() {
 		this.resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 		if (!this.resumeFromKey) {
 			this.state = 'ready'
@@ -1213,11 +1212,19 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		this.state = 'reseting/loading all ids'
 		if (this.resumeFromKey[0] == 1 && this.resumeFromKey[1] == 254) {
-			await this.resetAll()
+			return this.resumePromise = when(this.loadIdsPromise = this.resetAll(), () => {
+				this.db.put(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
+				return this.resumeQueue()
+			})
 		}
 		this.db.put(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
+		this.resumePromise = this.resumeQueue()
+	}
+
+	static async resumeQueue() {
 		console.log(this.name + ' Resuming from key ' + fromBufferKey(this.resumeFromKey))
 		let idsToInitiallyIndex = this.getIdsFromKey(this.resumeFromKey)
+		let db = this.db
 
 		const beforeCommit = () => {
 			if (this.resumeFromKey)
@@ -1232,7 +1239,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			return [ id ]
 		}))
 		console.log('Finished initial index build of', this.name)
-		this.db.off('beforecommit', beforeCommit)
+		db.off('beforecommit', beforeCommit)
 		this.resumeFromKey = null
 		await db.remove(INITIALIZING_LAST_KEY)
 		this.state = 'ready'
@@ -1482,6 +1489,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				options.end = toBufferKey(range.end)
 			if (range.limit)
 				options.limit = range.limit
+			if (range.waitForAllIds && this.loadIdsPromise) {
+				delete range.waitForAllIds
+				return when(this.loadIdsPromise, () => this.getInstanceIds(range))
+			}
 		}
 		let iterable = db.getRange(options).map(({ key }) => fromBufferKey(key))
 		if (range && range.asIterable)
@@ -1864,8 +1875,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			console.log('reseting', this.name)
 		let version = this.startVersion = getNextVersion()
 		let allIds = this.fetchAllIds ? await this.fetchAllIds() :
-			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ? (
-				(await this.Sources[0].resumePromise), this.Sources[0].getInstanceIds({ asIterable: true })) : []
+			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ?
+				await this.Sources[0].getInstanceIds({
+					asIterable: true,
+					waitForAllIds: true,
+				}) : []
 		let committed
 		let queued = 0
 		console.info('loading ids for', this.name, 'with', allIds.length, 'ids')
