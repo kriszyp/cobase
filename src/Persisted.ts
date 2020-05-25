@@ -1046,6 +1046,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				console.log('Indexing', initialQueueSize, this.name, 'for', this.name)
 			}
 			let actionsInProgress = new Set()
+			this.actionsInProgress = actionsInProgress
 			let sinceLastStateUpdate = 0
 			let lastTime = Date.now()
 			let delayMs = 10
@@ -1061,7 +1062,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					let now = Date.now()
 					indexed++
 					let desiredConcurrentRatio = actionsInProgress.size / Math.min(indexed, this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY)
-					delayMs = Math.max(delayMs, 1) * (desiredConcurrentRatio + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1)
+					delayMs = Math.min(Math.max(delayMs, 1) * (desiredConcurrentRatio + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1), (actionsInProgress.size + 4) * 100)
+					this.delayMs = delayMs
 					lastTime = now + delayMs
 					let completion = this.tryForQueueEntry(id)
 					if (completion && completion.then) {
@@ -1218,7 +1220,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				return this.resumeQueue()
 			})
 		}
-		this.db.put(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
 		this.resumePromise = this.resumeQueue()
 	}
 
@@ -1349,6 +1350,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			} else {
 				value = convertToBlocks(value)
 				let buffer = this.serializeEntryValue(value, version, typeof mode === 'object', id)
+				transition.statusByte = buffer[0]
 				transition.committed = this.whenWritten = committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
 				let entryCache = this._entryCache
 				if (entryCache) {
@@ -1401,7 +1403,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			} else if (!onlyCommitted || transition.committed) {
 				return {
 					value: transition.result,
-					version: transition.fromVersion
+					version: transition.fromVersion,
+					statusByte: transition.statusByte,
 				}
 			}
 		}
@@ -1898,7 +1901,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				queued = 0
 			}
 		}
-		await this.whenWritten
 		console.info('Finished loading all ids', this.name)
 		return committed
 	}
@@ -2189,7 +2191,7 @@ export function getCurrentStatus() {
 		queueSize: store.queue && store.queue.size,
 		size: store.db.getStats().entryCount,
 		state: store.state,
-		concurrencyLevel: store.averageConcurrencyLevel,
+		concurrencyLevel: store.actionsInProgress ? store.actionsInProgress.size : 0,
 		//pendingRequests: Array.from(Index.pendingRequests),
 	}))
 }
