@@ -1048,54 +1048,24 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					indexed++
 					let desiredConcurrentRatio = actionsInProgress.size / Math.min(indexed, this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY)
 					delayMs = Math.max(delayMs, 1) * (desiredConcurrentRatio + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1)
-					if (!this.delays)
-						this.delays = []
-					this.delays.push({
-						delayMs,
-						id,
-						queue,
-						outstanding: actionsInProgress.size
-					})
 					lastTime = now + delayMs
 					let completion = this.tryForQueueEntry(id)
+					completion.id = id
 					if (completion && completion.then) {
 						actionsInProgress.add(completion)
 						completion.then(() => actionsInProgress.delete(completion))
 					}
 
-					if (sinceLastStateUpdate > (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY) * concurrencyAdjustment) {
+					if (sinceLastStateUpdate > (this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY)) {
 						// we have process enough, commit our changes so far
 						this.onBeforeCommit && this.onBeforeCommit(id)
-						this.averageConcurrencyLevel = ((this.averageConcurrencyLevel || 0) + sinceLastStateUpdate) / 2
-						/*let indexingStarted = indexingInProgress
-						indexingInProgress = []
-						
-						sinceLastStateUpdate = 0
-						this.state = 'awaiting indexing'
-						await Promise.all(indexingStarted)*/
+						this.averageConcurrencyLevel = ((this.averageConcurrencyLevel || 0) + actionsInProgress.size) / 2
+						for (let last in actionsInProgress) {
+							this.lastIndexingId = last.id
+							break
+						}
 						if (this.resumeFromKey) // only update if we are actually resuming
 							this.resumeFromKey = toBufferKey(this.lastIndexingId)
-						this.state = 'finished indexing batch'
-						//let processedEntries = indexingStarted.length
-						//this.saveLatestVersion(false)
-						cpuUsage = process.cpuUsage()
-						let lastCpuUsage = cpuTotalUsage
-						cpuTotalUsage = cpuUsage.user + cpuUsage.system
-						let currentTime = Date.now()
-						let timeUsed = currentTime - lastTime
-						lastTime = currentTime
-						// calculate an indexing adjustment based on cpu usage and queue size (which we don't want to get too big)
-						concurrencyAdjustment = (concurrencyAdjustment + 20000 / (20000 + timeUsed)) / 2
-						niceAdjustment = (niceAdjustment + (cpuTotalUsage - lastCpuUsage) / (timeUsed + 10) / 20) / 2
-						/* Can be used to measure performance
-						let [seconds, billionths] = process.hrtime(lastStart)
-						lastStart = process.hrtime()
-						*/if (isNaN(niceAdjustment)) {
-							console.log('speed adjustment', { concurrencyAdjustment, niceAdjustment, timeUsed, cpuTime: (cpuTotalUsage - lastCpuUsage) })
-							niceAdjustment = 10
-						}
-						await delay(Math.round((this.nice * niceAdjustment) / (queue.size + 3000))) // short delay for other processing to occur
-						lastTime = Date.now()
 					}
 					await delay(delayMs * desiredConcurrentRatio)
 				}
