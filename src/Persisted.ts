@@ -674,8 +674,21 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.clearAllData()
 			this.updateDBVersion()
 		}
+		if ((this.rootStore == this || !this.rootStore) && this.rootDB.get(Buffer.from('data'))) {
+			this.migrateOldData()
+		}
 		this.resumePromise = this.resumeQueue() // don't wait for this, it has its own separate promise system
 	}
+	static migrateOldData() {
+		this.rootDB.transaction(() => {
+			let oldData = this.rootDB.openDB('data')
+			if (this.rootDB.get(Buffer.from('data'))) {
+				console.warn('Deleting old db')
+				oldData.deleteDB()
+			}
+		})
+	}
+
 
 	valueOf(mode) {
 		return super.valueOf(mode || true)
@@ -1602,6 +1615,9 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	static resetAll(clearDb): any {
 	}
 
+	static clearAllData() {
+	}
+
 	static set(id, value, event) {
 		return this.is(id, value, event)
 	}
@@ -1615,6 +1631,20 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	}
 	static DB = lmdb
 	static syncVersion = 10
+	static migrateOldData() {
+		this.rootDB.transaction(() => {
+			if (this.rootDB.get(Buffer.from('data'))) {
+				let oldData = this.rootDB.openDB('data')
+				console.warn('Migrating old data', this.name)
+				for (let { key, value } of oldData.getRange({})) {
+					this.db.putSync(key, value)
+				}
+				console.warn('Finished migrating old data, deleting old db')
+				oldData.deleteDB()
+			}
+		})
+	}
+
 }
 
 export default Persisted
