@@ -1043,7 +1043,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					if (queue.isReplaced)
 						return
 					sinceLastStateUpdate++
-					this.state = 'initiating indexing of entry'
+					this.state = 'indexing entry ' + id
 					let now = Date.now()
 					indexed++
 					let desiredConcurrentRatio = actionsInProgress.size / Math.min(indexed, this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY)
@@ -1069,7 +1069,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					}
 					await delay(delayMs * desiredConcurrentRatio)
 				}
-				this.state = 'awaiting final indexing'
+				this.state = 'awaiting final indexing of ' + actionsInProgress.size
 				await Promise.all(actionsInProgress) // then wait for all indexing to finish everything
 			} while (queue.size > 0)
 			await this.lastWriteCommitted
@@ -1094,8 +1094,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					this.queue.delete(id)
 			})
 		})
-	}
-	static queuedBatchFinished() {
 	}
 
 	static requestProcessing(nice, queue) {
@@ -1316,7 +1314,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				if (result)
 					result.commit()
 			}
-			// TODO: Only do this if the version is still the same
 			let committed
 			//console.log('conditional header for writing transform ' + (value ? 'write' : 'delete'), id, this.name, conditionalHeader)
 			if (value === undefined) {
@@ -1430,17 +1427,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			// stored as an invalidated version
 			let processId = buffer.length > 8 ? buffer.readUInt32BE(8) : 0
 			return new Invalidated(version, processId)
-		} else if (false && buffer.length > SHARED_MEMORY_THRESHOLD) {
-			// use shared memory
-			valueBuffer = buffer.slice(8)
-			this.db.notifyOnInvalidation(buffer, function(forceCopy) {
-				// TODO: if state byte indicates it is still fresh && !forceCopy:
-				// TODO: Move this into cobase and search through cached blocks to find ones that need reassignment
-				// return false
-				// calling Buffer.from on ArrayBuffer returns NodeBuffer, calling again copies it
-				data && reassignBuffers(data, Buffer.from(Buffer.from(this)), this)
-				this.onInvalidation = null // nothing more we can do at this point
-			})
 		} else { 
 			// Do a memcpy of the memory so we aren't using a shared memory
 			valueBuffer = Buffer.from(buffer.slice(8))
