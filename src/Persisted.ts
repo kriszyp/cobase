@@ -1391,10 +1391,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		if (promises.length == 0)
 			return readyToCommit(forValueResults)
-		else if (promises.length == 1)
-			(transition.whenIndexed = promises[0]).then(readyToCommit)
 		else
-			return (transition.whenIndexed = Promise.all(promises)).then(readyToCommit)
+			return (transition.whenIndexed = Promise.all(forValueResults)).then(readyToCommit)
 	}
 
 	static getEntryData(id, onlyCommitted) {
