@@ -1730,7 +1730,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let version = getNextVersion()
 			if (context)
 				context.setVersion(version)
-			let transition = this.runTransform(id, null, true, mode)
+			let transition = this.runTransform(id, version, true, mode)
 			when(transition.result, (result) => {
 				if (result !== undefined && !transition.invalidating) {
 					let event = new DiscoveredEvent()
@@ -1753,6 +1753,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			fromVersion,
 			abortables: []
 		}
+		if (isNew)
+			transition.isNew = true
 		this.transitions.set(id, transition)
 		const removeTransition = () => {
 			if (this.transitions.get(id) === transition && !transition.invalidating)
@@ -1926,11 +1928,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			} else if (transition.committed) {
 				if (transition.result === undefined)
 					previousVersion = null
-			} else {
+			} else if (!transition.isNew) {
 				// still resolving but this gives us the immediate version
 				previousVersion = transition.fromVersion
 				previousStatusByte = INVALIDATED_STATE
-			}// else the previousEntry should have correct version and status
+			}// else the previousEntry should have correct version and status (or non at all if new)
 			transition.invalidating = true
 			transition.newVersion = version
 		}
@@ -1966,9 +1968,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			// completely empty entry for deleted items
 			written = db.remove(keyAsBuffer)
 		} else {
-			conditionalHeader = previousVersion ? this.createHeader(previousVersion, previousEntry && previousEntry.processId) : null
+			conditionalHeader = previousVersion && this.createHeader(previousVersion, previousEntry && previousEntry.processId)
 			if (conditionalHeader) {
 				conditionalHeader[0] = previousStatusByte
+			} else if (conditionalHeader === 0) {
+				conditionalHeader = undefined // TODO: Remove this, should even be doing this in practice
 			}
 			//console.log('conditional header for invaliding entry ', id, this.name, conditionalHeader)
 			// if we have downstream indices, we mark this entry as "owned" by this process
