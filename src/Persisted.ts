@@ -998,7 +998,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 	}
 
-	static tryForQueueEntry(id) {
+	static tryForQueueEntry(id, action) {
 		const onQueueError = async (error) => {
 			let indexRequest = this.queue.get(id) || {}
 			let version = indexRequest.version
@@ -1008,7 +1008,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				if (retries < 4) {
 					await delay(retries * 1000)
 					console.info('Retrying index entry', this.name, id, error)
-					return this.tryForQueueEntry(id)
+					return this.tryForQueueEntry(id, action)
 				} else {
 					console.info('Too many retries', this.name, id, retries)
 				}
@@ -1019,7 +1019,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				this.queue.delete(id) // give up and delete it
 		}
 		try {
-			let result = this.forQueueEntry(id)
+			let result = action(id)
 			if (result && result.catch)
 				return result.catch(error => onQueueError(error))
 		} catch(error) {
@@ -1065,7 +1065,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					delayMs = Math.min(Math.max(delayMs, 1) * (desiredConcurrentRatio + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1), (actionsInProgress.size + 4) * 100)
 					this.delayMs = delayMs
 					lastTime = now + delayMs
-					let completion = this.tryForQueueEntry(id)
+					let completion = this.forQueueEntry(id)
 					if (completion && completion.then) {
 						completion.id = id
 						actionsInProgress.add(completion)
@@ -1103,13 +1103,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static forQueueEntry(id) {
 		this.lastIndexingId = id
-		return when(this.get(id), () => {
-			let transition = this.transitions.get(id)
-			return when(transition && transition.whenIndexed, () => {
-				if (this.queue)
-					this.queue.delete(id)
-			})
-		})
+		return this.tryForQueueEntry(id, () =>
+			when(this.get(id), () => {
+				let transition = this.transitions.get(id)
+				return when(transition && transition.whenIndexed, () => {
+					if (this.queue)
+						this.queue.delete(id)
+				})
+			}))
 	}
 
 	static requestProcessing(nice, queue) {
@@ -1390,7 +1391,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		if (promises.length == 0)
 			return readyToCommit(forValueResults)
-		else // TODO: if 1
+		else if (promises.length == 1)
+			(transition.whenIndexed = promises[0]).then(readyToCommit)
+		else
 			return (transition.whenIndexed = Promise.all(promises)).then(readyToCommit)
 	}
 
@@ -1729,7 +1732,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let version = getNextVersion()
 			if (context)
 				context.setVersion(version)
-			let transition = this.runTransform(id, version, true, mode)
+			let transition = this.runTransform(id, null, true, mode)
 			when(transition.result, (result) => {
 				if (result !== undefined && !transition.invalidating) {
 					let event = new DiscoveredEvent()
@@ -1965,7 +1968,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			// completely empty entry for deleted items
 			written = db.remove(keyAsBuffer)
 		} else {
-			conditionalHeader = previousVersion && this.createHeader(previousVersion, previousEntry && previousEntry.processId)
+			conditionalHeader = previousVersion ? this.createHeader(previousVersion, previousEntry && previousEntry.processId) : null
 			if (conditionalHeader) {
 				conditionalHeader[0] = previousStatusByte
 			}

@@ -78,15 +78,17 @@ export const Index = ({ Source }) => {
 
 		static forValue(id, value, indexRequest) {
 			indexRequest.value = value
-			return this.indexEntry(id, indexRequest)
+			return this.tryForQueueEntry(id, () => this.indexEntry(id, indexRequest))
 		}
 		static forQueueEntry(id) {
 			this.lastIndexingId = id
-			return this.indexEntry(id).then(complete => {
-				if (complete) {
-					complete.commit()
-				}
-			})
+			return this.tryForQueueEntry(id, () =>
+				this.indexEntry(id).then(complete => {
+					if (complete) {
+						complete.commit()
+					}
+				})
+			)
 		}
 		static async indexEntry(id, indexRequest?: IndexRequest) {
 			let { previousEntry, deleted, sources, triggers, version } = indexRequest || {}
