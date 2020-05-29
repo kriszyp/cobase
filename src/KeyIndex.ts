@@ -502,7 +502,7 @@ export const Index = ({ Source }) => {
 				if (range.end != null)
 					options.end = toBufferKey(range.end)
 				if (range.waitForAllIds) {
-					whenReady = when(Source.resumePromise, () => this.whenProcessingComplete)
+					whenReady = when(this.resumePromise, () => this.whenProcessingComplete)
 				}
 			}
 			let lastKey

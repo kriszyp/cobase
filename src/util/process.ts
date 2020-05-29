@@ -48,7 +48,7 @@ function startPipeClient(processId, Class) {
 					}
 				}).on('connect', () => {
 					connected = true
-					console.log('Connected to process', processId)
+					console.debug('Connected to process', processId)
 					resolve(serializingStream)
 				})
 				socket.on('close', (event) => {

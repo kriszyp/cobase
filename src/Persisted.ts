@@ -350,7 +350,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		db.transaction(() => {
 			db.clear()
 		})
-		console.info('Cleared the database', this.name, ', rebuilding')
+		console.debug('Cleared the database', this.name, ', rebuilding')
 	}
 
 	static register(sourceCode?: { id?: string, version?: number }) {
@@ -562,7 +562,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), (results) => {
 					let wasReset = results && results.includes(true)
 					if (wasReset)
-						console.log('Connected to each process complete and finished reset initialization')
+						console.debug('Connected to each process complete and finished reset initialization')
 					return wasReset
 				})
 			}
@@ -688,7 +688,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.rootDB.transaction(() => {
 			let oldData = this.rootDB.openDB('data')
 			if (this.rootDB.get(Buffer.from('data'))) {
-				console.warn('Deleting old db')
+				console.log('Deleting old db data', this.name)
 				oldData.deleteDB()
 			}
 		})
@@ -933,7 +933,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return promisedResult
 	}
 	static compressEntry(buffer, headerSize) {
-		//console.log('compressing', this.name, buffer.length, typeof mode == 'object' && buffer.length > 1024)
 		let compressedData = Buffer.allocUnsafe(buffer.length - 100)
 		let uncompressedLength = buffer.length - headerSize
 		let longSize = uncompressedLength >= 0x1000000
@@ -1042,7 +1041,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			queue = queue || this.queue
 			let initialQueueSize = queue.size
 			//currentlyProcessing.add(this)
-			if (initialQueueSize > 100) {
+			if (initialQueueSize > 100 || initialQueueSize == undefined) {
 				console.log('Indexing', initialQueueSize, this.name, 'for', this.name)
 			}
 			let actionsInProgress = new Set()
@@ -1089,7 +1088,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				await Promise.all(actionsInProgress) // then wait for all indexing to finish everything
 			} while (queue.size > 0)
 			await this.lastWriteCommitted
-			if (initialQueueSize > 100) {
+			if (initialQueueSize > 100 || initialQueueSize == undefined) {
 				console.log('Finished indexing', initialQueueSize, 'for', this.name)
 			}
 		} catch (error) {
@@ -1225,7 +1224,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static async resumeQueue() {
-		console.log(this.name + ' Resuming from key ' + fromBufferKey(this.resumeFromKey))
+		console.debug(this.name + ' Resuming from key ' + fromBufferKey(this.resumeFromKey))
 		let idsToInitiallyIndex = this.getIdsFromKey(this.resumeFromKey)
 		let db = this.db
 
@@ -1235,13 +1234,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		db.on('beforecommit', beforeCommit)
 		this.state = 'building'
-		console.log('Created queue for initial index build', this.name)
+		console.debug('Created queue for initial index build', this.name)
 		this.initialIndexCount = 0
 		await this.requestProcessing(30, idsToInitiallyIndex.map(id => {
 			this.initialIndexCount++
 			return [ id ]
 		}))
-		console.log('Finished initial index build of', this.name)
+		console.debug('Finished initial index build of', this.name)
 		db.off('beforecommit', beforeCommit)
 		this.resumeFromKey = null
 		await db.remove(INITIALIZING_LAST_KEY)
@@ -1825,7 +1824,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static updated(event, by?) {
 		let id = by && (typeof by === 'object' ? by.id : by) // if we are getting an update from a source instance
-		//console.log('updated previousEntry', previousEntry)
 		event = super.updated(event, by)
 		if (this.queue) {
 			if (by && by.constructor === this || // our own instances can notify us of events, ignore them
@@ -1879,8 +1877,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 
 	static async resetAll() {
-		if (verboseLogging)
-			console.log('reseting', this.name)
+		console.debug('reseting', this.name)
 		let version = this.startVersion = getNextVersion()
 		let allIds = this.fetchAllIds ? await this.fetchAllIds() :
 			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ?
@@ -1890,7 +1887,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				}) : []
 		let committed
 		let queued = 0
-		console.info('loading ids for', this.name, 'with', allIds.length, 'ids')
+		console.debug('loading ids for', this.name, 'with', allIds.length, 'ids')
 		for (let id of allIds) {
 			if (this.instancesById.get(id)) {
 				// instance already in memory
@@ -1904,7 +1901,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				queued = 0
 			}
 		}
-		console.info('Finished loading all ids', this.name)
 		return committed
 	}
 
