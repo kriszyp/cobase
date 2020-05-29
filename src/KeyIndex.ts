@@ -443,16 +443,16 @@ export const Index = ({ Source }) => {
 			return Source.getIdsFromKey(key)
 		}
 		static updateDBVersion() {
-			if (!Source.wasReset)
-				this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 254]))
+			if (!Source.wasReset) // only reindex if the source didn't do it for use
+				this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
 			super.updateDBVersion()
 		}
 
-		static resumeInitialization() {
+		static resumeQueue() {
 			this.state = 'waiting for upstream source to build'
 			// explicitly wait for source to finish resuming before our own resuming
-			this.resumePromise = when(Source.resumePromise, () =>
-				super.resumeInitialization())
+			return when(Source.resumePromise, () =>
+				super.resumeQueue())
 		}
 
 		static clearEntries(set) {

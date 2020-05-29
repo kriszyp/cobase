@@ -333,10 +333,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (!this.hasOwnProperty('_ready')) {
 			let resolver
 			this._ready = Promise.resolve(this.initialize())
-			this._ready.then((wasReset) => {
+			this._ready.then(() => {
 				//console.log(this.name, 'is ready and initialized')
 				this.initialized = true
-				return wasReset
 			}, (error) => {
 				console.error('Error initializing', this.name, error)
 			})
@@ -560,10 +559,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (initializingProcess/* || !Persisted.doesInitialization*/) {
 				// there is another process handling initialization
 				return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), (results) => {
-					let wasReset = results && results.includes(true)
-					if (wasReset)
-						console.debug('Connected to each process complete and finished reset initialization')
-					return wasReset
+					console.debug('Connected to each process complete and finished reset initialization')
 				})
 			}
 			return this.doDataInitialization()
@@ -657,16 +653,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static reset() {
 		this.clearAllData()
 		this.updateDBVersion()
-		this.resumeInitialization()
+		this.resumeQueue()
 	}
 	static async initializeData() {
-		let readyPromises = []
-		for (let Source of this.Sources || []) {
-			// TODO: We need to check if the upstream source is an index that failed to send all of its events
-			// and we have to rebuild
-			readyPromises.push(Source.ready)
-		}
-		await Promise.all(readyPromises)
 		const db = this.db
 		//console.log('comparing db versions', this.name, this.dbVersion, this.expectedDBVersion)
 		if (this.dbVersion == this.expectedDBVersion) {
@@ -677,12 +666,20 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
 			this.clearAllData()
+			await this.resetAll()
 			this.updateDBVersion()
 		}
 		if ((this.rootStore == this || !this.rootStore) && this.rootDB.get(Buffer.from('data'))) {
 			this.migrateOldData()
 		}
-		this.resumeInitialization() // don't wait for this, it has its own separate promise system
+		let readyPromises = []
+		for (let Source of this.Sources || []) {
+			// TODO: We need to check if the upstream source is an index that failed to send all of its events
+			// and we have to rebuild
+			readyPromises.push(Source.ready)
+		}
+		await Promise.all(readyPromises)
+		this.resumePromise = this.resumeQueue() // don't wait for this, it has its own separate promise system
 	}
 	static migrateOldData() {
 		this.rootDB.transaction(() => {
@@ -1042,7 +1039,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let initialQueueSize = queue.size
 			//currentlyProcessing.add(this)
 			if (initialQueueSize > 100 || initialQueueSize == undefined) {
-				console.log('Indexing', initialQueueSize, this.name, 'for', this.name)
+				console.log('Indexing', initialQueueSize || '', this.name, 'for', this.name)
 			}
 			let actionsInProgress = new Set()
 			this.actionsInProgress = actionsInProgress
@@ -1089,7 +1086,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			} while (queue.size > 0)
 			await this.lastWriteCommitted
 			if (initialQueueSize > 100 || initialQueueSize == undefined) {
-				console.log('Finished indexing', initialQueueSize, 'for', this.name)
+				console.log('Finished indexing', initialQueueSize || '', 'for', this.name)
 			}
 		} catch (error) {
 			console.warn('Error occurred in processing index queue for', this.name, error)
@@ -1206,24 +1203,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		console.log('Removing unused dbs', Array.from(unusedDBs))
 	}
 
-	static resumeInitialization() {
+	static async resumeQueue() {
 		this.resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 		if (!this.resumeFromKey) {
 			this.state = 'ready'
 			this.resumePromise = undefined
 			return
 		}
-		this.state = 'reseting/loading all ids'
-		if (this.resumeFromKey[0] == 1 && this.resumeFromKey[1] == 254) {
-			return this.resumePromise = when(this.loadIdsPromise = this.resetAll(), () => {
-				this.db.put(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
-				return this.resumeQueue()
-			})
-		}
-		this.resumePromise = this.resumeQueue()
-	}
-
-	static async resumeQueue() {
 		console.debug(this.name + ' Resuming from key ' + fromBufferKey(this.resumeFromKey))
 		let idsToInitiallyIndex = this.getIdsFromKey(this.resumeFromKey)
 		let db = this.db
@@ -1496,9 +1482,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				options.end = toBufferKey(range.end)
 			if (range.limit)
 				options.limit = range.limit
-			if (range.waitForAllIds && this.loadIdsPromise) {
+			if (range.waitForAllIds && this.ready) {
 				delete range.waitForAllIds
-				return when(this.loadIdsPromise, () => this.getInstanceIds(range))
+				return when(this.ready, () => this.getInstanceIds(range))
 			}
 		}
 		let iterable = db.getRange(options).map(({ key }) => fromBufferKey(key))
@@ -2076,7 +2062,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static updateDBVersion() {
 		if (this.indices)
-			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 254]))
+			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
 		super.updateDBVersion()
 	}
 
