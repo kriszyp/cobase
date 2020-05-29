@@ -16,14 +16,14 @@
   "types": "./dist/index.d.ts",
   "dependencies": {
     "dpack": "^0.6.20",
-    "lmdb-store": "^0.3.18",
+    "lmdb-store": "^0.3.19",
     "ordered-binary": "^0.1.1"
   },
   "peerDependencies": {
     "alkali": "^0.21.20"
   },
   "optionalDependencies": {
-    "lz4": "^0.6.2",
+    "lz4": "^0.6.3",
     "weakvaluemap": "^0.3.2"
   },
   "devDependencies": {
