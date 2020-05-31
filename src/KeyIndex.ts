@@ -464,7 +464,7 @@ export const Index = ({ Source }) => {
 				try {
 					let [, sourceId] = fromBufferKey(key, true)
 					if (set.has(sourceId)) {
-						result = db.remove(key)
+						result = db.removeSync(key)
 					}
 				} catch(error) {
 					console.error(error)
@@ -512,7 +512,7 @@ export const Index = ({ Source }) => {
 						lastKey = key
 						return true
 					}
-				}).asArray)
+				}))
 		}
 	}
 }

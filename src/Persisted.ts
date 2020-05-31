@@ -406,7 +406,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				end: INITIALIZING_PROCESS_KEY,
 			}).map(({key, value}) => (key[2] << 24) + (key[3] << 16) + (key[4] << 8) + key[5])).filter(pid => !isNaN(pid))
 			db.putSync(processKey, Buffer.from([])) // register process, in ready state
-			if (!initializingProcess || !this.otherProcesses.includes(initializingProcess)) {
+			if ((!initializingProcess || !this.otherProcesses.includes(initializingProcess)) && this.doesInitialization !== false) {
 				initializingProcess = null
 				db.putSync(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
 			}
@@ -533,7 +533,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			isRoot = true
 		}
 		this.instancesById.name = this.name
-		let doesInitialization = Persisted.doesInitialization && false
 		return when(this.getStructureVersion(), structureVersion => {
 			this.expectedDBVersion = (structureVersion || 0) ^ (DB_FORMAT_VERSION << 12)
 			if (isRoot)
@@ -556,7 +555,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					this.cleanupDeadProcessReference(pid, initializingProcess)))
 			}
 			// make sure these are inherited
-			if (initializingProcess/* || !Persisted.doesInitialization*/) {
+			if (initializingProcess || this.doesInitialization === false) {
 				// there is another process handling initialization
 				return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), (results) => {
 					console.debug('Connected to each process complete and finished reset initialization')
@@ -615,20 +614,25 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.otherProcesses.splice(index, 1)
 			let deadProcessKey = Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff])
 			let buffer = db.get(deadProcessKey)
-//			console.warn('cleaing up process ', pid, deadProcessKey, buffer)
-			if (buffer && buffer.length > 1) {
-				let invalidationState = readUInt(buffer)
-				for (let store of [this, ...this.childStores]) {
-					let divided = invalidationState / store.invalidationIdentifier
-					if (divided >>> 0 == divided) {
-						console.warn('Need to find invalidated entries in ', store.name)
-						store.findOwnedInvalidations(pid)
+			if (buffer && this.doesInitialization !== false) {
+				db.transaction(() => {
+					let buffer = db.get(deadProcessKey)
+		//			console.warn('cleaing up process ', pid, deadProcessKey, buffer)
+					if (buffer && buffer.length > 1) {
+						let invalidationState = readUInt(buffer)
+						for (let store of [this, ...this.childStores]) {
+							let divided = invalidationState / store.invalidationIdentifier
+							if (divided >>> 0 == divided) {
+								console.warn('Need to find invalidated entries in ', store.name)
+								store.findOwnedInvalidations(pid)
+							}
+						}
 					}
-				}
+					db.removeSync(deadProcessKey)
+				})
 			}
-			db.removeSync(deadProcessKey)
 		}
-		if (initializingProcess == pid) {
+		if (initializingProcess == pid && this.doesInitialization !== false) {
 			let doInit
 			db.transaction(() => {
 				// make sure it is still the initializing process
@@ -996,7 +1000,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static tryForQueueEntry(id, action) {
 		const onQueueError = async (error) => {
-			let indexRequest = this.queue.get(id) || {}
+			let indexRequest = this.queue && this.queue.get(id) || {}
 			let version = indexRequest.version
 			if (error.isTemporary) {
 				let retries = indexRequest.retries = (indexRequest.retries || 0) + 1
@@ -1488,9 +1492,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			}
 		}
 		let iterable = db.getRange(options).map(({ key }) => fromBufferKey(key))
-		if (range && range.asIterable)
-			return iterable
-		return iterable.asArray
+		return iterable
 	}
 
 	static entries(opts) {
@@ -1673,15 +1675,19 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					if (entry.processId && entry.processId != process.pid) {
 						// we don't own the invalidation, so wait for the owning process to fulfill this entry
 						try {
-							console.log('sendRequestToProcess get', id, entry.processId)
-							if (this.sendRequestToProcess)
-								return this.sendRequestToProcess(entry.processId, {
+							console.debug('sendRequestToProcess get', this.name, id, entry.processId)
+							if (this.sendRequestToProcess) {
+								let response = this.sendRequestToProcess(entry.processId, {
 									id,
 									waitFor: 'get',
-								}).then(() => {
-									this.clearEntryCache(id)
-									return this.get(id, mode)
 								})
+								if (response) {
+									return response.then(() => {
+										this.clearEntryCache(id)
+										return this.get(id, mode)
+									})
+								}
+							}
 						} catch(error) {
 							// if the process that invalidated this no longer is running, that's fine, we can take over.
 							console.log(error)
@@ -1868,7 +1874,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		let allIds = this.fetchAllIds ? await this.fetchAllIds() :
 			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ?
 				await this.Sources[0].getInstanceIds({
-					asIterable: true,
 					waitForAllIds: true,
 				}) : []
 		let committed

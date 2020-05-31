@@ -165,8 +165,7 @@ function attachClass(stream, Class, processId) {
 		message.className = Class.name
 		const stream = streamByPidClass.get(pid + '-' + className)
 		if (!stream) {
-			// TODO: If it is undefined wait for a connection
-			throw new Error('No socket to process ' + pid)
+			return // TODO: If it is undefined wait for a connection
 		}
 		stream.write(message)
 		return new Promise((resolve, reject) => waitingRequests.set(requestId, { resolve, reject }))
