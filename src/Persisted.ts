@@ -1338,7 +1338,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					transition.committed = this.whenWritten = committed = this.db.remove(toBufferKey(id), conditionalHeader)
 				}
 			} else {
-				value = convertToBlocks(value)
+				if (this.lazy)
+					value = convertToBlocks(value)
 				let buffer = this.serializeEntryValue(value, version, typeof mode === 'object', id)
 				transition.statusByte = buffer[0]
 				transition.committed = this.whenWritten = committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
@@ -1449,7 +1450,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			version,
 			statusByte,
 			getData: () => {
-				return parseLazy(valueBuffer, {
+				return ((valueBuffer[0] & 0x80) ? parseLazy : parse)(valueBuffer, {
 					shared: this.sharedStructure
 				})
 				let type = typeof data
@@ -1878,8 +1879,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				}) : []
 		let committed
 		let queued = 0
-		console.debug('loading ids for', this.name, 'with', allIds.length, 'ids')
+		console.log('loading ids for', this.name, 'with', allIds.length, 'ids')
+		let idCount = 0
 		for (let id of allIds) {
+			idCount++
 			if (this.instancesById.get(id)) {
 				// instance already in memory
 				this.for(id).updated()
@@ -1892,6 +1895,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				queued = 0
 			}
 		}
+		console.log('loaded ids for', this.name, 'with', idCount, 'ids')
 		return committed
 	}
 
@@ -2009,14 +2013,17 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return buffer
 	}
 
-	static receiveRequest({ id, waitFor }) {
+	static async receiveRequest({ id, waitFor }) {
 		if (waitFor == 'get') {
-			console.log('waiting for entity to commit', id)
-			this.get(id)
-			if (this.transitions.has(id))
-				return when(this.transitions.get(id).committed, () => {
-					// return nothing, so we don't create any overhead between processes
-				})
+			console.log('waiting for entity to commit', this.name, id)
+			await this.get(id)
+			let transition = this.transitions.get(id)
+			if (transition) {
+				// wait for get to truly finish and be committed
+				await transition.whenIndexed
+				await transition.committed
+			}
+			// return nothing, so we don't create any overhead between processes
 		}
 	}
 
