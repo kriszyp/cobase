@@ -85,7 +85,7 @@ class InstanceIds extends Transform.as(VArray) {
 	cachedValue: any
 	cachedVersion: any
 	transform() {
-		return when(when(this.Class.resetProcess, () => this.Class.whenWritten), () => this.Class.getInstanceIds())
+		return when(when(this.Class.resetProcess, () => this.Class.whenWritten), () => this.Class.getInstanceIds().asArray)
 	}
 	getValue() {
 		return when(super.getValue(true), ids => {
