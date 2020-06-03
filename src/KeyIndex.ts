@@ -459,8 +459,9 @@ export const Index = ({ Source }) => {
 			let result
 			let db = this.db
 			db.getRange({
-				start: Buffer.from([2])
-			}).forEach(({ key, value }) => {
+				start: Buffer.from([2]),
+				values: false,
+			}).forEach(({ key }) => {
 				try {
 					let [, sourceId] = fromBufferKey(key, true)
 					if (set.has(sourceId)) {
