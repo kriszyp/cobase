@@ -582,9 +582,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.rootStore.whenUpgraded = this.rootStore.whenUpgraded.then(() => whenThisUpgraded)
 		return whenThisUpgraded
 	}
-	static findOwnedInvalidations(pid) {
+	static async findOwnedInvalidations(pid) {
 		let unfinishedIds = new Set()
 		let lastWrite
+		let i = 0;
 		for (let { key, value } of this.db.getRange({
 			start: Buffer.from([1, 255])
 		})) {
@@ -597,10 +598,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				if (this.transitions) // TODO: Remove if once we aren't calling this on indices
 					this.transitions.delete(id)
 			}
+			if (i++ % 1000 == 0)
+				await delay(0)
 		}
 		if (unfinishedIds.size > 0) {
 			for (let index of this.indices) {
-				index.clearEntries(unfinishedIds)
+				await index.clearEntries(unfinishedIds)
 			}
 			this.requestProcessing(30)
 		}
@@ -615,7 +618,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let deadProcessKey = Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff])
 			let buffer = db.get(deadProcessKey)
 			if (buffer && this.doesInitialization !== false) {
-				db.transaction(() => {
+				db.transaction(async () => {
 					let buffer = db.get(deadProcessKey)
 		//			console.warn('cleaing up process ', pid, deadProcessKey, buffer)
 					if (buffer && buffer.length > 1) {
@@ -624,7 +627,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 							let divided = invalidationState / store.invalidationIdentifier
 							if (divided >>> 0 == divided) {
 								console.warn('Need to find invalidated entries in ', store.name)
-								store.findOwnedInvalidations(pid)
+								await store.findOwnedInvalidations(pid)
 							}
 						}
 					}
@@ -661,6 +664,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	static async initializeData() {
 		const db = this.db
+		this.state = 'initializing data'
 		//console.log('comparing db versions', this.name, this.dbVersion, this.expectedDBVersion)
 		if (this.dbVersion == this.expectedDBVersion) {
 			// up to date, all done

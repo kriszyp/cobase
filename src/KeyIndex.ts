@@ -455,22 +455,25 @@ export const Index = ({ Source }) => {
 				super.resumeQueue())
 		}
 
-		static clearEntries(set) {
+		static async clearEntries(set) {
 			let result
 			let db = this.db
-			db.getRange({
-				start: Buffer.from([2]),
-				values: false,
-			}).forEach(({ key }) => {
-				try {
+			let i = 1
+			try {
+				for (let { key } of db.getRange({
+					start: Buffer.from([2]),
+					values: false,
+				})) {
 					let [, sourceId] = fromBufferKey(key, true)
 					if (set.has(sourceId)) {
 						result = db.removeSync(key)
 					}
-				} catch(error) {
-					console.error(error)
+					if (i++ % 1000 == 0)
+						await delay()
 				}
-			})
+			} catch(error) {
+				console.error(error)
+			}
 			return result // just need to wait for last one to finish (guarantees all others are finished)
 		}
 
@@ -503,7 +506,7 @@ export const Index = ({ Source }) => {
 				if (range.end != null)
 					options.end = toBufferKey(range.end)
 				if (range.waitForAllIds) {
-					whenReady = when(this.resumePromise, () => this.whenProcessingComplete)
+					whenReady = when(this.ready, () => when(this.resumePromise, () => this.whenProcessingComplete))
 				}
 			}
 			let lastKey
@@ -577,3 +580,4 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 		return this.deferredMap.delete(id)
 	}
 }
+const delay = () => new Promise(resolve => setImmediate(resolve))
