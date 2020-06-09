@@ -1689,6 +1689,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 								if (response) {
 									return response.then(() => {
 										this.clearEntryCache(id)
+										this.transitions.delete(id)
 										return this.get(id, mode)
 									})
 								}
