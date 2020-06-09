@@ -1,29 +1,38 @@
 import { Cached } from './Persisted'
+import when from './util/when'
+const INITIALIZING_LAST_KEY = Buffer.from([1, 7])
 
 export class Aggregator extends Cached {
-	static updateAggregate(id, indexRequest) {
+	static updateAggregate(previousEntry, entry) {
 	}
 	static forValue(id, value, indexRequest) {
 		indexRequest.value = value
-		return this.tryForQueueEntry(id, () => this.updateAggregate(id, indexRequest))
+		return this.tryForQueueEntry(id, () => {
+			return when(this.Sources[0].get(id), value => this.updateAggregate(indexRequest && indexRequest.previousEntry && indexRequest.previousEntry.value, value))
+		})
 	}
 	static forQueueEntry(id) {
-		return this.tryForQueueEntry(id, () =>
-			this.updateAggregate(id).then(complete => {
-				if (complete) {
-					complete.commit()
-				}
-			})
-		)
+		return this.tryForQueueEntry(id, () => {
+			return when(this.Sources[0].get(id), value => this.updateAggregate(null, value))
+//				if (complete) {
+	//				complete.commit()
+		//		}
+		})
+	}
+	static runTransform() {
+		return {}
+	}
+	static fetchAllIds() {
+		return [] // start with nothing
 	}
 	static openDatabase() {
-		return Source.openChildDB(this, true)
+		return this.Sources[0].openChildDB(this, true)
 	}
 	static getIdsFromKey(key) {
-		return Source.getIdsFromKey(key)
+		return this.Sources[0].getIdsFromKey(key)
 	}
 	static updateDBVersion() {
-		if (!Source.wasReset) // only reindex if the source didn't do it for use
+		if (!this.Sources[0].wasReset) // only reindex if the source didn't do it for us
 			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
 		super.updateDBVersion()
 	}
@@ -31,7 +40,7 @@ export class Aggregator extends Cached {
 	static resumeQueue() {
 		this.state = 'waiting for upstream source to build'
 		// explicitly wait for source to finish resuming before our own resuming
-		return when(Source.resumePromise, () =>
+		return when(this.Sources[0].resumePromise, () =>
 			super.resumeQueue())
 	}
 

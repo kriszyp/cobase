@@ -81,7 +81,6 @@ export const Index = ({ Source }) => {
 			return this.tryForQueueEntry(id, () => this.indexEntry(id, indexRequest))
 		}
 		static forQueueEntry(id) {
-			this.lastIndexingId = id
 			return this.tryForQueueEntry(id, () =>
 				this.indexEntry(id).then(complete => {
 					if (complete) {

@@ -1003,6 +1003,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static tryForQueueEntry(id, action) {
+		this.lastIndexingId = id
 		const onQueueError = async (error) => {
 			let indexRequest = this.queue && this.queue.get(id) || {}
 			let version = indexRequest.version
@@ -1019,7 +1020,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 			if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out, don't log errors from invalidated states
 			console.warn('Error indexing', this.name, id, error)
-			if (this.queue.delete)
+			if (this.queue && this.queue.delete)
 				this.queue.delete(id) // give up and delete it
 		}
 		try {
@@ -1106,7 +1107,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static forQueueEntry(id) {
-		this.lastIndexingId = id
 		return this.tryForQueueEntry(id, () =>
 			when(this.get(id), () => {
 				let transition = this.transitions.get(id)
@@ -2192,7 +2192,7 @@ export function getCurrentStatus() {
 		name: store.name,
 		indexed: store.initialIndexCount,
 		queueSize: store.queue && store.queue.size,
-		size: store.db.getStats().entryCount,
+		size: global.skipDBStats ? 0 : store.db.getStats().entryCount,
 		state: store.state,
 		concurrencyLevel: store.actionsInProgress ? store.actionsInProgress.size : 0,
 		//pendingRequests: Array.from(Index.pendingRequests),
