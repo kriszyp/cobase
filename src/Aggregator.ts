@@ -8,7 +8,8 @@ export class Aggregator extends Cached {
 	static forValue(id, value, indexRequest) {
 		indexRequest.value = value
 		return this.tryForQueueEntry(id, () => {
-			return when(this.Sources[0].get(id), value => this.updateAggregate(indexRequest && indexRequest.previousEntry && indexRequest.previousEntry.value, value))
+			return when(indexRequest && indexRequest.previousEntry, previousEntry => when(this.Sources[0].get(id), value =>
+				this.updateAggregate(previousEntry && previousEntry.value, value)))
 		})
 	}
 	static forQueueEntry(id) {
@@ -37,6 +38,9 @@ export class Aggregator extends Cached {
 		super.updateDBVersion()
 	}
 
+	static clearEntries() {
+		// don't really have any way of doing this right now
+	}
 	static resumeQueue() {
 		this.state = 'waiting for upstream source to build'
 		// explicitly wait for source to finish resuming before our own resuming
