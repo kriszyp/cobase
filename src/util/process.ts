@@ -201,11 +201,23 @@ function onMessage(message, stream) {
 		let target = classMap.get(className)
 		if (target) {
 			if (requestId) {
-				when(target.receiveRequest(message), (result) => {
-					result = result || {}
-					result.responseId = requestId
-					stream.write(result)
-				})
+				try {
+					when(target.receiveRequest(message), (result) => {
+						result = result || {}
+						result.responseId = requestId
+						stream.write(result)
+					}, (error) => {
+						stream.write({
+							error,
+							responseId: requestId
+						})
+					})
+				} catch (error) {
+					stream.write({
+						error,
+						responseId: requestId
+					})					
+				}
 			} else {
 				if (message.type) {
 					const event = new UpdateEvent()
