@@ -1629,10 +1629,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 
 	patch(properties) {
 		return this.then((value) => {
-			let copied = copy(value)
-			if (copied == value)
-				value = Object.assign({}, value)
-			return when(this.put(value = Object.assign(value, properties)), () => value)
+			return when(this.put(value = Object.assign({}, value, properties)), () => value)
 		})
 
 	}
