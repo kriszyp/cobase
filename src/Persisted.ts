@@ -1455,7 +1455,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			statusByte,
 			getData: () => {
 				return ((valueBuffer[0] & 0x80) ? parseLazy : parse)(valueBuffer, {
-					shared: this.sharedStructure
+					shared: this.sharedStructure,
 				})
 				let type = typeof data
 				if (type === 'object') {
@@ -1628,8 +1628,13 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	}
 
 	patch(properties) {
-		return this.then((value) =>
-			when(this.put(value = Object.assign(value ? copy(value) : {}, properties)), () => value))
+		return this.then((value) => {
+			let copied = copy(value)
+			if (copied == value)
+				value = Object.assign({}, value)
+			return when(this.put(value = Object.assign(value, properties)), () => value)
+		})
+
 	}
 	put(value, event) {
 		return this.constructor.is(this.id, value, event)
