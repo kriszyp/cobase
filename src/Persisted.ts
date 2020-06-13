@@ -890,10 +890,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let currentContext = getCurrentContext()
 			let updateContext = (currentContext && currentContext.expectedVersions) ? currentContext : DEFAULT_CONTEXT
 			return when(whenReady, () => {
-				for (const sourceName in updateContext.expectedVersions) {
+				if (updateContext.expectedVersions && updateContext.expectedVersions[this.name] > this.lastIndexedVersion && this.queue && this.queue.size > 0) {
 					// if the expected version is behind, wait for processing to finish
-					//if (updateContext.expectedVersions[sourceName] > (sourceVersions[sourceName] || 0) && this.queue.size > 0)
-					//	return this.requestProcessing(1) // up the priority
+					return this.requestProcessing(1) // up the priority
 				}
 			})
 		}
@@ -1093,7 +1092,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				this.state = 'awaiting final indexing of ' + actionsInProgress.size
 				await Promise.all(actionsInProgress) // then wait for all indexing to finish everything
 			} while (queue.size > 0)
-			await this.lastWriteCommitted
+			await this.whenValueCommitted
+			this.lastIndexedVersion = this.highestVersionToIndex
 			if (initialQueueSize > 100 || initialQueueSize == undefined) {
 				console.log('Finished indexing', initialQueueSize || '', 'for', this.name)
 			}
@@ -1317,11 +1317,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				version: version || 0,
 				previousEntry,
 			}
+		this.highestVersionToIndex = Math.max(this.highestVersionToIndex || 0, indexRequest.version || 0)
 		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, value, indexRequest)) : []
 		let promises = forValueResults.filter(promise => promise && promise.then)
 
 		const readyToCommit = (forValueResults) => {
-			this.lastIndexedVersion = Math.max(this.lastIndexedVersion || 0, version)
 			if (transition.invalidating)
 				return
 
@@ -1675,7 +1675,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static get(id, mode?) {
 		let context = getCurrentContext()
-		return when(this.whenUpdatedInContext(context), () => {
+		return when(this.whenUpdatedInContext(), () => {
 			let entry = this.getEntryData(id)
 			if (entry) {
 				if (entry.statusByte === INVALIDATED_STATE) {

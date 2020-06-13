@@ -396,8 +396,6 @@ export const Index = ({ Source }) => {
 
 		static whenUpdatedInContext(context?) {
 			return Source.whenUpdatedInContext(true)
-				/*if (context)
-					context.setVersion(lastIndexedVersion)*/
 		}
 
 		// static returnsIterables = true // maybe at some point default this to on
