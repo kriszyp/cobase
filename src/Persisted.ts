@@ -39,7 +39,7 @@ export const INVALIDATED_ENTRY = { state: 'invalidated'}
 const INVALIDATED_STATE = 1
 const COMPRESSED_STATUS_24 = 254
 const COMPRESSED_STATUS_48 = 255
-const COMPRESSION_THRESHOLD = 512
+const COMPRESSION_THRESHOLD = 2000
 const AS_SOURCE = {}
 const EXTENSION = '.mdpack'
 const DB_FORMAT_VERSION = 0
@@ -451,8 +451,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (this.maxDbs) {
 			options.maxDbs = this.maxDbs
 		}
-		// useWriteMap provides better performance, make it the default
-		options.useWritemap = this.useWritemap == null ? true : this.useWritemap
+		if (this.useWritemap)
+			options.useWritemap = this.useWritemap
 		if (clearOnStart) {
 			console.info('Completely clearing', this.name)
 			options.clearOnStart = true
