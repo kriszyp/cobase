@@ -2,7 +2,6 @@ import { VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
 import { serialize, parse, parseLazy, createParser, asBlock } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
 import { ShareChangeError } from './util/errors'
-import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
 import { OperationsArray, IterableOptions, Database } from './storage/Database'
@@ -95,7 +94,6 @@ export const Index = ({ Source }) => {
 			let operations: OperationsArray = []
 			let previousVersion = previousEntry && previousEntry.version
 			let eventUpdateSources = []
-			let idAsBuffer = toBufferKey(id)
 
 			let toRemove = new Map()
 			// TODO: handle delta, for optimized index updaes
@@ -177,7 +175,7 @@ export const Index = ({ Source }) => {
 					let isChanged = removedValue == null || !value.slice(dpackStart).equals(removedValue)
 					if (isChanged || value.length === 0 || this.alwaysUpdate) {
 						if (isChanged) {
-							let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
+							let fullKey = [ key, id ]
 							value = this.setupSizeTable(value, dpackStart, 0)
 							if (value.length > COMPRESSION_THRESHOLD) {
 								value = this.compressEntry(value, 0)
@@ -197,7 +195,7 @@ export const Index = ({ Source }) => {
 			for (let [key] of toRemove) {
 				operations.push({
 					type: 'del',
-					key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
+					key: [ key, id ]
 				})
 				if (!this.resumePromise)
 					eventUpdateSources.push({ key, sources, triggers })
@@ -312,42 +310,32 @@ export const Index = ({ Source }) => {
 		static get(id) {
 			// First: ensure that all the source instances are up-to-date
 			return when(Source.whenUpdatedInContext(true), () => {
-				let keyPrefix = toBufferKey(id)
 				let iterable = this._getIndexedValues({
-					start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
-					end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
+					start: id, // the range of everything starting with id-
+					end: [id, Buffer.from([ 255 ])],
 				})
 				return this.returnsIterables ? iterable : iterable.asArray
 			})
 		}
 
 		static getIndexedKeys(id) {
-			let keyPrefix = toBufferKey(id)
 			return this._getIndexedValues({
-				start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
-				end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
+				start: id, // the range of everything starting with id-
+				end: [id, Buffer.from([ 255 ])],
 				values: false,
 			}, true).map(({ key, value }) => key)
 		}
 
-		static parseEntryValue(buffer) {
-/*			let statusByte = buffer[0]
-			if (statusByte >= COMPRESSED_STATUS_24) {
-				buffer = this.uncompressEntry(buffer, statusByte, 0)
-			}*/
-			return parseLazy(buffer, { shared: this.sharedStructure })
+		static parseEntryValue(asString) {
+			return parseLazy(asString, { shared: this.sharedStructure })
 		}
 		static getIndexedValues(range: IterableOptions) {
 			range = range || {}
 			if (!this.initialized && range.waitForInitialization) {
 				return this.start().then(() => this.getIndexedValues(range))
 			}
-			if (range.start !== undefined)
-				range.start = toBufferKey(range.start)
-			else
+			if (range.start === undefined)
 				range.start = Buffer.from([2])
-			if (range.end !== undefined)
-				range.end = toBufferKey(range.end)
 			return when(!range.noWait && this.whenUpdatedInContext(), () =>
 				this._getIndexedValues(range, !range.onlyValues))
 		}
@@ -357,19 +345,12 @@ export const Index = ({ Source }) => {
 			const db: Database = this.db
 			let approximateSize = 0
 			let promises = []
-			range.copy = (buffer) => {
-				let statusByte = buffer[0]
-				if (statusByte >= COMPRESSED_STATUS_24) {
-					return this.uncompressEntry(buffer, statusByte, 0)
-				} else
-					return Buffer.from(buffer)
-			}
 			return db.getRange(range).map(({ key, value }) => {
-				let [, sourceId] = fromBufferKey(key, true)
+				let [, sourceId] = key
 				/*if (range.recordApproximateSize) {
 					let approximateSize = approximateSize += key.length + (value && value.length || 10)
 				}*/
-				let parsedValue = value !== null ? value.length > 0 ? this.parseEntryValue(value) : Source.get(sourceId) : value
+				let parsedValue = value !== undefined ? value.length > 0 ? this.parseEntryValue(value) : Source.get(sourceId) : value
 				if (parsedValue && parsedValue.then) {
 					return parsedValue.then(parsedValue => returnFullKeyValue ? {
 						key: sourceId,
@@ -461,7 +442,7 @@ export const Index = ({ Source }) => {
 					start: Buffer.from([2]),
 					values: false,
 				})) {
-					let [, sourceId] = fromBufferKey(key, true)
+					let [, sourceId] = key
 					if (set.has(sourceId)) {
 						result = db.removeSync(key)
 					}
@@ -492,23 +473,16 @@ export const Index = ({ Source }) => {
 
 		static getInstanceIds(range?: IterableOptions) {
 			let db = this.db
-			let options: IterableOptions = {
-				start: Buffer.from([2]),
-				values: false
-			}
-			let whenReady = this.whenProcessingComplete
-			if (range) {
-				if (range.start != null)
-					options.start = toBufferKey(range.start)
-				if (range.end != null)
-					options.end = toBufferKey(range.end)
-				if (range.waitForAllIds) {
-					whenReady = when(this.ready, () => when(this.resumePromise, () => this.whenProcessingComplete))
-				}
+			range = range || {}
+			if (range.start === undefined)
+				range.start = Buffer.from([2])
+			if (range.waitForAllIds) {
+				whenReady = when(this.ready, () => when(this.resumePromise, () => this.whenProcessingComplete))
 			}
 			let lastKey
+			range.values = false
 			return when(whenReady, () =>
-				db.getRange(options).map(({ key }) => fromBufferKey(key, true)[0]).filter(key => {
+				db.getRange(range).map(({ key }) => key[0]).filter(key => {
 					if (key !== lastKey) { // skip multiple entries under one key
 						lastKey = key
 						return true
