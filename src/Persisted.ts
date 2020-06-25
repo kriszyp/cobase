@@ -1328,6 +1328,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					result.commit()
 			}
 			let committed
+			transition.fromVersion = (version -= 100000000000000)
 			//console.log('conditional header for writing transform ' + (value ? 'write' : 'delete'), id, this.name, conditionalVersion)
 			if (value === undefined) {
 				if (conditionalVersion === null) {
@@ -1341,7 +1342,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				}
 			} else {
 				let serialized = serialize(value, { shared: this.sharedStructure })
-				transition.committed = this.whenWritten = committed = this.db.put(id, serialized, version, )
+				transition.committed = this.whenWritten = committed = this.db.put(id, serialized, version, conditionalVersion)
 				let entryCache = this._entryCache
 				if (entryCache) {
 					let entry = {
@@ -1417,26 +1418,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			shared: this.sharedStructure,
 		})
 		let type = typeof value
-		if (type === 'object') {
-			// nothing to change
-			if (!value) {
-				return null // can't assign version to null
-			}
-		} else if (type === 'number') {
-			value = new Number(data)
-		} else if (type === 'string') {
-			value = new String(value)
-		} else if (type === 'boolean') {
-			value = new Boolean(value)
-		} else {
-			return value // can't assign a version to undefined
-		}
 		let version = getLastVersion()
 		let entry = {
 			value,
 			version
 		}
-		if (value) {
+		if (value && typeof value == 'object') {
 			entryCache.set(id, entry)
 			value[ENTRY] = entry
 			expirationStrategy.useEntry(entry, size/* >> (entryBuffer.buffer.onInvalidation ? 2 : 0)*/)
@@ -1697,7 +1684,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				} // else normal transform path
 				transition.result = result
 				const conditionalVersion = isNew === undefined ? undefined : isNew ? null :
-					this.createHeader(transition.fromVersion, process.pid)
+					transition.fromVersion
 
 				this.saveValue(id, result, null, conditionalVersion)
 				return result
@@ -1819,28 +1806,25 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static invalidateEntry(id, event, by) {
-		let version = event.version
+		let version = event.version + 100000000000000
 		let transition = this.transitions.get(id)
 		let previousEntry
-		let previousVersion, previousStatusByte
+		let previousVersion
 		if (this.indices && !(event && event.sourceProcess)) {
 			previousEntry = this.getEntryData(id, true)
 			if (previousEntry) {
 				previousVersion = previousEntry.version
-				previousStatusByte = previousEntry.statusByte
 			}
 		}
 		if (transition) {
 			if (transition.invalidating) {
 				previousVersion = transition.newVersion
-				previousStatusByte = INVALIDATED_STATE
 			} else if (transition.committed) {
 				if (transition.result === undefined)
 					previousVersion = null
 			} else if (!transition.isNew) {
 				// still resolving but this gives us the immediate version
 				previousVersion = transition.fromVersion
-				previousStatusByte = INVALIDATED_STATE
 			}// else the previousEntry should have correct version and status (or non at all if new)
 			transition.invalidating = true
 			transition.newVersion = version
@@ -1851,8 +1835,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			return
 		}
 		// true = own, false = another process owns, null = public
-		let ownEntry = previousEntry ? (previousEntry.statusByte == INVALIDATED_STATE ?
-			previousEntry.processId ? previousEntry.processId == process.pid : null : true) : null
+		let ownEntry = previousEntry ? previousEntry.processId ? previousEntry.processId == process.pid : null : true
 
 		//console.log('invalidateEntry previous transition', id, this.name, 'from', previousVersion, 'to', version, ownEntry)
 		if (!transition) {
@@ -1877,15 +1860,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			// completely empty entry for deleted items
 			written = db.remove(id)
 		} else {
-			conditionalVersion = previousVersion && this.createHeader(previousVersion, previousEntry && previousEntry.processId)
-			if (conditionalVersion) {
-				conditionalVersion[0] = previousStatusByte
-			} else if (conditionalVersion === 0) {
-				conditionalVersion = undefined // TODO: Remove this, should even be doing this in practice
-			}
 			//console.log('conditional header for invaliding entry ', id, this.name, conditionalVersion)
 			// if we have downstream indices, we mark this entry as "owned" by this process
-			written = db.put(id, this.createHeader(version, ownEntry ? process.pid : (ownEntry === false && previousEntry.processId)), conditionalVersion)
+			written = db.put(id, ownEntry ? process.pid.toString() : ownEntry === false ? previousEntry.processId.toString() : '', version, previousVersion)
 		}
 		this.whenWritten = written
 		if (!event.whenWritten)
@@ -1896,8 +1873,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					console.log('Value had changed during invalidation', id, this.name, previousVersion, version, conditionalVersion)
 					if (this.transitions.get(id) == transition)
 						this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
-					let newVersion = db.get(id, existingBuffer =>
-						existingBuffer ? readUInt(existingBuffer) : 0)						
+					db.get(id)
+					let newVersion = getLastVersion()
 					if (newVersion > version) {
 						// don't do anything further, other db process is ahead of us, and we should take no indexing action
 						return new Invalidated(newVersion)
@@ -1919,16 +1896,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			}
 		}
 		written.then(finished, finished)
-	}
-
-	static createHeader(version, processId) {
-		const buffer = Buffer.allocUnsafe(processId ? 12 : 8)
-		writeUInt(buffer, version)
-		buffer[0] = INVALIDATED_STATE
-		buffer[1] = 0
-		if (processId)
-			buffer.writeInt32BE(processId, 8)
-		return buffer
 	}
 
 	static async receiveRequest({ id, waitFor }) {
