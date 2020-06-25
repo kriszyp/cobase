@@ -465,7 +465,7 @@ export const Index = ({ Source }) => {
 					if (set.has(sourceId)) {
 						result = db.removeSync(key)
 					}
-					if (i++ % 1000 == 0)
+					if (i++ % 100000 == 0)
 						await delay()
 				}
 			} catch(error) {
