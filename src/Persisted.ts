@@ -1348,7 +1348,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				transition.statusByte = buffer[0]
 				transition.committed = this.whenWritten = committed = this.db.put(toBufferKey(id), buffer, conditionalHeader)
 				let entryCache = this._entryCache
-				if (entryCache) {
+				if (entryCache && value && typeof value == 'object') {
 					let entry = {
 						version,
 						statusByte: buffer[0],
@@ -1427,7 +1427,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			return entry
 
 		let value = entry.value = entry.getData()
-		if (value) {
+		if (value && typeof value == 'object') {
 			entryCache.set(id, entry)
 			value[ENTRY] = entry
 			expirationStrategy.useEntry(entry, size/* >> (entryBuffer.buffer.onInvalidation ? 2 : 0)*/)
@@ -1500,23 +1500,31 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return iterable
 	}
 
-	static entries(opts) {
+	static entries(range) {
 		let db = this.db
-		return when(when(this.resetProcess, () => this.whenWritten || Promise.resolve()), () => db.getRange({
-			start: Buffer.from([2])
-		}).map(({ key, value }) => {
-			let entry = this.copyAndParseValue(value)
-			return (entry && entry.getData) ?
-			{
-				key: fromBufferKey(key),
-				value: entry.getData(),
-				version: entry.version
-			} : {
-				key: fromBufferKey(key),
-				value: entry,
-				version: entry && entry.version,
-			}
-		}).asArray)
+		range = range || {}
+		if (range.start != null)
+			range.start = toBufferKey(range.start)
+		if (range.end != null)
+			range.end = toBufferKey(range.end)
+		return when(when(this.resetProcess, () => this.whenWritten || Promise.resolve()), () => {
+			let iterable = db.getRange(Object.assign({
+				start: Buffer.from([2])
+			}, range)).map(({ key, value }) => {
+				let entry = this.copyAndParseValue(value)
+				return (entry && entry.getData) ?
+				{
+					key: fromBufferKey(key),
+					value: entry.getData(),
+					version: entry.version
+				} : {
+					key: fromBufferKey(key),
+					value: entry,
+					version: entry && entry.version,
+				}
+			})
+			return range.asIterable ? iterable : iterable.asArray
+		})
 	}
 
 	/**
