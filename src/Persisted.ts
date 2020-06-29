@@ -14,13 +14,6 @@ import { registerClass, addProcess } from './util/process'
 import { DEFAULT_CONTEXT, RequestContext } from './RequestContext'
 
 let getCurrentContext = () => currentContext
-let lz4Compress, lz4Uncompress
-try {
-	lz4Compress = require('lz4').encodeBlock
-	lz4Uncompress = require('lz4').decodeBlock
-} catch(error) {
-	lz4Compress = () => 0 // compression always fails if not loaded
-}
 
 const DEFAULT_INDEXING_DELAY = 20
 const DEFAULT_INDEXING_CONCURRENCY = 20
@@ -407,7 +400,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			db.putSync(processKey, Buffer.from([])) // register process, in ready state
 			if ((!initializingProcess || !this.otherProcesses.includes(initializingProcess)) && this.doesInitialization !== false) {
 				initializingProcess = null
-				db.putSync(INITIALIZING_PROCESS_KEY, Buffer.from(process.pid.toString()))
+				db.putSync(INITIALIZING_PROCESS_KEY, process.pid.toString())
 			}
 			if (this.otherProcesses.includes(process.pid)) {
 				//console.warn('otherProcesses includes self')
@@ -443,7 +436,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return aggregateVersion ^ (this.version || 0)
 	}
 	static openRootDatabase() {
-		const options = {}
+		const options = {
+		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
 		}
@@ -457,7 +451,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			options.clearOnStart = true
 		}
 		this.rootDB = open(this.dbFolder + '/' + this.name + EXTENSION, options)
-		return this.prototype.db = this.db = this.rootDB.openDB(this.dbName || this.name)
+		return this.prototype.db = this.db = this.rootDB.openDB(this.dbName || this.name, {
+			useVersions: true,
+			compressionThreshold: 2000,
+		})
 	}
 /*
 	static async needsDBUpgrade() {
@@ -643,7 +640,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					// take over the initialization process
 //					console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
 					initializingProcess = process.pid
-					db.putSync(INITIALIZING_PROCESS_KEY, Buffer.from(initializingProcess.toString()))
+					db.putSync(INITIALIZING_PROCESS_KEY, initializingProcess.toString())
 					doInit = true
 					
 				}
@@ -675,9 +672,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			await this.resetAll()
 			this.updateDBVersion()
 		}
-		if ((this.rootStore == this || !this.rootStore) && this.rootDB.get(Buffer.from('data'))) {
-			this.migrateOldData()
-		}
 		let readyPromises = []
 		for (let Source of this.Sources || []) {
 			// TODO: We need to check if the upstream source is an index that failed to send all of its events
@@ -686,15 +680,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		await Promise.all(readyPromises)
 		this.resumePromise = this.resumeQueue() // don't wait for this, it has its own separate promise system
-	}
-	static migrateOldData() {
-		this.rootDB.transaction(() => {
-			let oldData = this.rootDB.openDB('data')
-			if (this.rootDB.get(Buffer.from('data'))) {
-				console.log('Deleting old db data', this.name)
-				oldData.deleteDB()
-			}
-		})
 	}
 
 
@@ -934,44 +919,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return promisedResult
 	}
-	static compressEntry(buffer, headerSize) {
-		let compressedData = Buffer.allocUnsafe(buffer.length - 100)
-		let uncompressedLength = buffer.length - headerSize
-		let longSize = uncompressedLength >= 0x1000000
-		let prefixSize = (longSize ? 8 : 4) + headerSize
-		let compressedLength = lz4Compress(headerSize ? buffer.slice(headerSize) : buffer, compressedData, prefixSize, compressedData.length)
-		if (compressedLength) {
-			if (headerSize)
-				buffer.copy(compressedData, 0, 0, headerSize)
-			if (longSize) {
-				writeUInt(compressedData, uncompressedLength, headerSize)
-				compressedData[0] = COMPRESSED_STATUS_48
-			} else {
-				compressedData.writeUInt32BE(uncompressedLength, headerSize)
-				compressedData[0] = COMPRESSED_STATUS_24
-			}
-			buffer = compressedData.slice(0, prefixSize + compressedLength)
-		} // else it didn't compress any smaller, bail out
-		return buffer
-	}
-
-	static uncompressEntry(buffer, statusByte, headerSize) {
-		// uncompress from the shared memory
-		// TODO: Do this on-access
-		let uncompressedLength, prefixSize
-		if (statusByte == COMPRESSED_STATUS_24) {
-			uncompressedLength = buffer.readUIntBE(headerSize + 1, 3)
-			prefixSize = headerSize + 4
-		} else if (statusByte == COMPRESSED_STATUS_48) {
-			uncompressedLength = readUInt(buffer, headerSize)
-			prefixSize = headerSize + 8
-		} else {
-			throw new Error('Unknown status byte ' + statusByte)
-		}
-		let uncompressedBuffer = Buffer.allocUnsafe(uncompressedLength)
-		lz4Uncompress(buffer.slice(prefixSize), uncompressedBuffer)
-		return uncompressedBuffer			
-	}
 
 	static _dpackStart = 8
 	static setupSizeTable(buffer, start, headerSize) {
@@ -1147,7 +1094,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static openChildDB(store, asIndex?) {
-		store.db = this.rootDB.openDB(store.name)
+		store.db = this.rootDB.openDB(store.name, {
+			useVersions: !asIndex,
+			compressionThreshold: 2000,
+		})
 		store.rootDB = this.rootDB
 		let rootStore = store.rootStore = this.rootStore || this
 		store.otherProcesses = rootStore.otherProcesses
@@ -1352,7 +1302,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					if (value)
 						value[ENTRY] = entry
 					entryCache.set(id, entry)
-					expirationStrategy.useEntry(entry, buffer.length)
+					expirationStrategy.useEntry(entry, serialized.length)
 				}
 			}
 			this.whenValueCommitted = committed
@@ -1450,6 +1400,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			start: Buffer.from([2])
 		}).map(entry => {
 			entry.version = getLastVersion() // TODO: This will only work if we are doing per-item iteration
+			entry.value = parse(entry.value, {
+				shared: this.sharedStructure,
+			})
 			return entry
 		}).asArray)
 	}
@@ -1535,22 +1488,7 @@ export class Persisted extends KeyValued(MakePersisted(Variable), {
 	put(value, event) {
 		return this.constructor.is(this.id, value, event)
 	}
-	static DB = lmdb
 	static syncVersion = 10
-	static migrateOldData() {
-		this.rootDB.transaction(() => {
-			if (this.rootDB.get(Buffer.from('data'))) {
-				let oldData = this.rootDB.openDB('data')
-				console.warn('Migrating old data', this.name)
-				for (let { key, value } of oldData.getRange({})) {
-					this.db.putSync(key, value)
-				}
-				console.warn('Finished migrating old data, deleting old db')
-				oldData.deleteDB()
-			}
-		})
-	}
-
 }
 
 export default Persisted
