@@ -476,6 +476,7 @@ export const Index = ({ Source }) => {
 			range = range || {}
 			if (range.start === undefined)
 				range.start = Buffer.from([2])
+			let whenReady
 			if (range.waitForAllIds) {
 				whenReady = when(this.ready, () => when(this.resumePromise, () => this.whenProcessingComplete))
 			}
