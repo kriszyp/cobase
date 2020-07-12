@@ -1,6 +1,6 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { createSerializer, createSharedStructure, readSharedStructure, serialize, parse, parseLazy, asBlock, isBlock, copy, reassignBuffers } from 'dpack'
-import { open, getLastVersion} from 'lmdb-store'
+import { createSerializer, createSharedStructure, readSharedStructure, asBlock, isBlock, copy, reassignBuffers } from 'dpack'
+import { open, getLastVersion, compareKey } from 'lmdb-store'
 import when from './util/when'
 import { WeakValueMap } from './util/WeakValueMap'
 import ExpirationStrategy from './ExpirationStrategy'
@@ -622,13 +622,15 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.otherProcesses.splice(index, 1)
 			let deadProcessKey = Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff])
 			let invalidationState = db.get(deadProcessKey)
-			if (invalidationState > 0 && this.doesInitialization !== false) {
+			if (this.doesInitialization !== false) {
 				db.transaction(async () => {
-					for (let store of [this, ...this.childStores]) {
-						let divided = invalidationState / store.invalidationIdentifier
-						if (divided >>> 0 == divided) {
-							console.warn('Need to find invalidated entries in ', store.name)
-							await store.findOwnedInvalidations(pid)
+					if (invalidationState > 1) {
+						for (let store of [this, ...this.childStores]) {
+							let divided = invalidationState / store.invalidationIdentifier
+							if (divided >>> 0 == divided) {
+								console.warn('Need to find invalidated entries in ', store.name)
+								await store.findOwnedInvalidations(pid)
+							}
 						}
 					}
 					db.removeSync(deadProcessKey)
@@ -1134,14 +1136,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					break
 				}
 			}
-			this.rootDB.putSync(DB_VERSION_KEY, serialize({
+			this.rootDB.putSync(DB_VERSION_KEY, {
 				dbVersion: this.expectedDBVersion,
 				childStores: this.childStores && this.childStores.map(childStore => ({
 					name: childStore.name,
 					dbVersion: childStore.expectedDBVersion,
 					invalidationIdentifier: childStore.invalidationIdentifier
 				}))
-			}))
+			})
 
 		}
 		if (!store.invalidationIdentifier)
@@ -1294,7 +1296,10 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					transition.committed = this.whenWritten = committed = this.db.remove(id, conditionalVersion)
 				}
 			} else {
-				let serialized = serialize(value, { shared: this.sharedStructure })
+				let serialized = serialize(value, {
+					shared: this.sharedStructure,
+					lazy: true,
+				})
 				transition.committed = this.whenWritten = committed = this.db.put(id, serialized, version, conditionalVersion)
 				let entryCache = this._entryCache
 				if (entryCache) {
@@ -1315,9 +1320,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					this.transitions.delete(id)
 				if (!successfulWrite) {
 					console.log('unsuccessful write of transform, data changed, updating', id, this.name, version, conditionalVersion, this.db.get(id))
+					this.clearEntryCache(id)
 					let entry = this.getEntryData(id)
 					if (entry.version > 0) {
-						this.clearEntryCache(id)
 						return
 					}
 					entry.value = value // use the new value since indices already committed there updates
@@ -1364,12 +1369,11 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let db = this.db
 		let size
 		let entryAsString = db.get(id)
-		if (!entryAsString)
-			return entryAsString
-		let value = parse(entryAsString, {
+		if (entryAsString == undefined)
+			return
+		let value = typeof entryAsString == 'string' ? parse(entryAsString, {
 			shared: this.sharedStructure,
-		})
-		let type = typeof value
+		}) : entryAsString
 		let version = getLastVersion()
 		let entry = {
 			value,
@@ -1417,7 +1421,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		return this.db.getRange({
 			start: startKey,
 			values: false,
-		}).map(({ key, value }) => key)
+		})
 	}
 
 	static dataVersionBuffer: Buffer
@@ -1675,7 +1679,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static enqueue(id, event, previousEntry?) {
-		if (this.resumeFromKey && this.resumeFromKey < id) // during initialization, we ignore updates because we are going rebuild
+		if (this.resumeFromKey && compareKey(this.resumeFromKey, id) < 0) // during initialization, we ignore updates because we are going rebuild
 			return
 		const version = event.version
 		// queue up processing the event
@@ -1729,7 +1733,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				continue
 			}
 			this.lastVersion = version++ // we give each entry its own version so that downstream childStores have unique versions to go off of
-			this.whenWritten = committed = this.db.put(id, '', -version)
+			this.whenWritten = committed = this.db.put(id, 0, -version)
 			if (queued++ > 2000) {
 				await this.whenWritten
 				queued = 0
@@ -1796,7 +1800,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		} else {
 			//console.log('conditional header for invaliding entry ', id, this.name, conditionalVersion)
 			// if we have downstream indices, we mark this entry as "owned" by this process
-			written = db.put(id, ownEntry ? process.pid : ownEntry === false ? previousEntry.value : '', version, previousVersion)
+			written = db.put(id, ownEntry ? process.pid : ownEntry === false ? previousEntry.value : 0, version, previousVersion)
 		}
 		this.whenWritten = written
 		if (!event.whenWritten)
@@ -1892,8 +1896,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static updateDBVersion() {
-		if (this.indices)
-			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
+		if (this.indices) {
+			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = true)
+		}
 		super.updateDBVersion()
 	}
 
@@ -2060,3 +2065,10 @@ export class Invalidated {
 }
 const delay = ms => new Promise(resolve => ms >= 1 ? setTimeout(resolve, ms) : setImmediate(resolve))
 const primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199]
+
+function parse(value) {
+	return value
+}
+function serialize(value) {
+	return value
+}

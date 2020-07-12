@@ -1,5 +1,5 @@
 import { VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
-import { serialize, parse, parseLazy, createParser, asBlock } from 'dpack'
+import { createParser, asBlock } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
 import { ShareChangeError } from './util/errors'
 import when from './util/when'
@@ -20,7 +20,6 @@ const DEFAULT_INDEXING_DELAY = 60
 const INITIALIZATION_SOURCE = 'is-initializing'
 const INDEXING_STATE_SIZE = 3584 // good size for ensuring that it is an (and only one) overflow page in LMDB, and won't be moved
 const INITIALIZATION_SOURCE_SET = new Set([INITIALIZATION_SOURCE])
-const COMPRESSION_THRESHOLD = 1500
 const COMPRESSED_STATUS_24 = 254
 export interface IndexRequest {
 	previousEntry?: any
@@ -110,7 +109,7 @@ export const Index = ({ Source }) => {
 						previousEntries = this.normalizeEntries(previousEntries)
 						for (let entry of previousEntries) {
 							let previousValue = entry.value
-							previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, false, 0)
+							previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, false)
 							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 						}
 					} else if (previousEntries != null) {
@@ -167,19 +166,15 @@ export const Index = ({ Source }) => {
 					// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
 					let removedValue = toRemove.get(key)
 					// a value of '' is treated as a reference to the source object, so should always be treated as a change
-					let dpackStart = this._dpackStart
+					let dpackStart = 0
 					let value = entry.value == null ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), first, dpackStart)
 					first = false
 					if (removedValue != null)
 						toRemove.delete(key)
-					let isChanged = removedValue == null || !value.slice(dpackStart).equals(removedValue)
+					let isChanged = removedValue == null || !value.slice(dpackStart) === removedValue
 					if (isChanged || value.length === 0 || this.alwaysUpdate) {
 						if (isChanged) {
 							let fullKey = [ key, id ]
-							value = this.setupSizeTable(value, dpackStart, 0)
-							if (value.length > COMPRESSION_THRESHOLD) {
-								value = this.compressEntry(value, 0)
-							}
 							operations.push({
 								type: 'put',
 								key: fullKey,
@@ -233,21 +228,10 @@ export const Index = ({ Source }) => {
 			return entries
 		}
 
-		static serialize(value, firstValue, startOffset) {
-			try {
-				return serialize(value, {
-					startOffset,
-					shared: this.sharedStructure,
-					avoidShareUpdate: !firstValue
-				})
-			} catch (error) {
-				if (error instanceof ShareChangeError) {
-					this.warn('Reserializing after share change in another process', this.name)
-					return this.serialize(value, firstValue, startOffset)
-				}
-				else
-					throw error
-			}
+		static serialize(value, firstValue) {
+			return serialize(value, {
+				shared: this.sharedStructure,
+			})
 		}
 
 		static log(...args) {
@@ -323,11 +307,11 @@ export const Index = ({ Source }) => {
 				start: id, // the range of everything starting with id-
 				end: [id, Buffer.from([ 255 ])],
 				values: false,
-			}, true).map(({ key, value }) => key)
+			}, true)
 		}
 
 		static parseEntryValue(asString) {
-			return parseLazy(asString, { shared: this.sharedStructure })
+			return parse(asString, { shared: this.sharedStructure })
 		}
 		static getIndexedValues(range: IterableOptions) {
 			range = range || {}
@@ -422,7 +406,7 @@ export const Index = ({ Source }) => {
 		}
 		static updateDBVersion() {
 			if (!Source.wasReset) // only reindex if the source didn't do it for use
-				this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
+				this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = true)
 			super.updateDBVersion()
 		}
 
@@ -438,7 +422,7 @@ export const Index = ({ Source }) => {
 			let db = this.db
 			let i = 1
 			try {
-				for (let { key } of db.getRange({
+				for (let key of db.getRange({
 					start: Buffer.from([2]),
 					values: false,
 				})) {
@@ -483,7 +467,7 @@ export const Index = ({ Source }) => {
 			let lastKey
 			range.values = false
 			return when(whenReady, () =>
-				db.getRange(range).map(({ key }) => key[0]).filter(key => {
+				db.getRange(range).map(( key ) => key[0]).filter(key => {
 					if (key !== lastKey) { // skip multiple entries under one key
 						lastKey = key
 						return true
@@ -553,3 +537,10 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 	}
 }
 const delay = () => new Promise(resolve => setImmediate(resolve))
+
+function parse(value) {
+	return value
+}
+function serialize(value) {
+	return value
+}
