@@ -645,6 +645,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					// take over the initialization process
 //					console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
 					initializingProcess = process.pid
+					if (this.initializingProcess)
+						this.initializingProcess = null
 					db.putSync(INITIALIZING_PROCESS_KEY, Buffer.from(initializingProcess.toString()))
 					doInit = true
 					

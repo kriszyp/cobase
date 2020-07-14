@@ -23,7 +23,7 @@ export function media(connection, next) {
 				options[name] = value)
 		}
 		let parser = mediaTypes.get(mimeType)
-		if (!parser || !parser.parse) {
+		if (!parser || (!parser.parse && !parser.handleRequest)) {
 			if (headers['content-length'] == '0') {
 				parser = EMPTY_MEDIA_PARSER
 			} else {
@@ -32,9 +32,9 @@ export function media(connection, next) {
 				return
 			}
 		}
-		if (parser.handlesRequest) {
-			return when(parser.handle(connection), () =>
-				when(connection.call(app), (returnValue) => serializer(returnValue, connection)))
+		if (parser.handleRequest) {
+			return when(parser.handleRequest(connection), () =>
+				when(next(), (returnValue) => serializer(returnValue, connection)))
 		}
 		return bufferStream(connection.req).then(data => {
 			connection.request.data = parser.parse(data.toString(options.charset), connection)
