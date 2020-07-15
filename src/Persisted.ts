@@ -1012,7 +1012,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				let retries = indexRequest.retries = (indexRequest.retries || 0) + 1
 				this.state = 'retrying index in ' + retries * 1000 + 'ms'
 				if (retries < 4) {
+					this.isRetrying = true
 					await delay(retries * 1000)
+					this.isRetrying = false
 					console.info('Retrying index entry', this.name, id, error)
 					return this.tryForQueueEntry(id, action)
 				} else {
@@ -1069,6 +1071,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					indexed++
 					let desiredConcurrentRatio = actionsInProgress.size / Math.min(indexed, this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY)
 					delayMs = Math.min(Math.max(delayMs, 1) * (desiredConcurrentRatio + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1), (actionsInProgress.size + 4) * 100)
+					if (this.isRetrying) {
+						await delay(1000)
+						delayMs = (delayMs + 10) * 2
+					}
 					this.delayMs = delayMs
 					lastTime = now + delayMs
 					let completion = this.forQueueEntry(id)
