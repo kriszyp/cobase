@@ -10,15 +10,10 @@ import { DEFAULT_CONTEXT } from './RequestContext'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const DEFAULT_INDEXING_CONCURRENCY = 40
-const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
-const SEPARATOR_NEXT_BYTE = Buffer.from([31])
-const INDEXING_STATE = Buffer.from([1, 5])
 const INITIALIZING_LAST_KEY = Buffer.from([1, 7])
-const EMPTY_BUFFER = Buffer.from([])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 60
 const INITIALIZATION_SOURCE = 'is-initializing'
-const INDEXING_STATE_SIZE = 3584 // good size for ensuring that it is an (and only one) overflow page in LMDB, and won't be moved
 const INITIALIZATION_SOURCE_SET = new Set([INITIALIZATION_SOURCE])
 const COMPRESSED_STATUS_24 = 254
 export interface IndexRequest {
@@ -109,11 +104,11 @@ export const Index = ({ Source }) => {
 						previousEntries = this.normalizeEntries(previousEntries)
 						for (let entry of previousEntries) {
 							let previousValue = entry.value
-							previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, false)
+							previousValue = previousValue === undefined ? '' : this.serialize(previousValue, false)
 							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 						}
 					} else if (previousEntries != null) {
-						toRemove.set(previousEntries, EMPTY_BUFFER)
+						toRemove.set(previousEntries, '')
 					}
 				}
 			} catch(error) {
@@ -143,8 +138,6 @@ export const Index = ({ Source }) => {
 						data = undefined
 					}
 				}
-				if (Source.whenValueCommitted && Source.whenValueCommitted.then)
-					await Source.whenValueCommitted
 				if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 				// let the indexBy define how we get the set of values to index
 				try {
@@ -167,11 +160,11 @@ export const Index = ({ Source }) => {
 					let removedValue = toRemove.get(key)
 					// a value of '' is treated as a reference to the source object, so should always be treated as a change
 					let dpackStart = 0
-					let value = entry.value == null ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), first, dpackStart)
+					let value = entry.value == null ? '' : this.serialize(entry.value)
 					first = false
 					if (removedValue != null)
 						toRemove.delete(key)
-					let isChanged = removedValue == null || !value.slice(dpackStart) === removedValue
+					let isChanged = removedValue == null || !value === removedValue
 					if (isChanged || value.length === 0 || this.alwaysUpdate) {
 						if (isChanged) {
 							let fullKey = [ key, id ]
@@ -296,7 +289,7 @@ export const Index = ({ Source }) => {
 			return when(Source.whenUpdatedInContext(true), () => {
 				let iterable = this._getIndexedValues({
 					start: id, // the range of everything starting with id-
-					end: [id, Buffer.from([ 255 ])],
+					end: [id, '\u{ffff}'],
 				})
 				return this.returnsIterables ? iterable : iterable.asArray
 			})
@@ -305,7 +298,7 @@ export const Index = ({ Source }) => {
 		static getIndexedKeys(id) {
 			return this._getIndexedValues({
 				start: id, // the range of everything starting with id-
-				end: [id, Buffer.from([ 255 ])],
+				end: [id, '\u{ffff}'],
 				values: false,
 			}, true)
 		}
@@ -319,7 +312,7 @@ export const Index = ({ Source }) => {
 				return this.start().then(() => this.getIndexedValues(range))
 			}
 			if (range.start === undefined)
-				range.start = Buffer.from([2])
+				range.start = true
 			return when(!range.noWait && this.whenUpdatedInContext(), () =>
 				this._getIndexedValues(range, !range.onlyValues))
 		}
@@ -405,8 +398,10 @@ export const Index = ({ Source }) => {
 			return Source.getIdsFromKey(key)
 		}
 		static updateDBVersion() {
-			if (!Source.wasReset) // only reindex if the source didn't do it for use
-				this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = true)
+			if (!Source.wasReset) {// only reindex if the source didn't do it for use
+				this.resumeFromKey = true
+				this.db.putSync(INITIALIZING_LAST_KEY, 'true')
+			}
 			super.updateDBVersion()
 		}
 
@@ -423,7 +418,7 @@ export const Index = ({ Source }) => {
 			let i = 1
 			try {
 				for (let key of db.getRange({
-					start: Buffer.from([2]),
+					start: true,
 					values: false,
 				})) {
 					let [, sourceId] = key
@@ -459,7 +454,7 @@ export const Index = ({ Source }) => {
 			let db = this.db
 			range = range || {}
 			if (range.start === undefined)
-				range.start = Buffer.from([2])
+				range.start = true
 			let whenReady
 			if (range.waitForAllIds) {
 				whenReady = when(this.ready, () => when(this.resumePromise, () => this.whenProcessingComplete))
@@ -539,8 +534,8 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 const delay = () => new Promise(resolve => setImmediate(resolve))
 
 function parse(value) {
-	return value
+	return JSON.parse(value)
 }
 function serialize(value) {
-	return value
+	return JSON.stringify(value)
 }

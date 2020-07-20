@@ -33,7 +33,7 @@ const COMPRESSED_STATUS_24 = 254
 const COMPRESSED_STATUS_48 = 255
 const COMPRESSION_THRESHOLD = 2000
 const AS_SOURCE = {}
-const EXTENSION = '.mdpack'
+const EXTENSION = '.mdjson'
 const DB_FORMAT_VERSION = 0
 const allStores = new Map()
 
@@ -407,7 +407,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				start: Buffer.from([1, 3]),
 				end: INITIALIZING_PROCESS_KEY,
 			}).map(({key, value}) => (key[2] << 24) + (key[3] << 16) + (key[4] << 8) + key[5])).filter(pid => !isNaN(pid))
-			db.putSync(processKey, 1) // register process, in ready state
+			db.putSync(processKey, '1') // register process, in ready state
 			if ((!initializingProcess || !this.otherProcesses.includes(initializingProcess)) && this.doesInitialization !== false) {
 				initializingProcess = null
 				db.putSync(INITIALIZING_PROCESS_KEY, process.pid.toString())
@@ -447,6 +447,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	static openRootDatabase() {
 		const options = {
+			encoding: 'utf8'
 		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
@@ -737,7 +738,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				entryCache.delete(id)
 			}
 		}
-
 	}
 
 	static invalidateEntry(id, event) {
@@ -1142,14 +1142,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					break
 				}
 			}
-			this.rootDB.putSync(DB_VERSION_KEY, {
+			this.rootDB.putSync(DB_VERSION_KEY, serialize({
 				dbVersion: this.expectedDBVersion,
 				childStores: this.childStores && this.childStores.map(childStore => ({
 					name: childStore.name,
 					dbVersion: childStore.expectedDBVersion,
 					invalidationIdentifier: childStore.invalidationIdentifier
 				}))
-			})
+			}))
 
 		}
 		if (!store.invalidationIdentifier)
@@ -1171,7 +1171,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static async resumeQueue() {
-		this.resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
+		let resumeString = this.db.get(INITIALIZING_LAST_KEY)
+		this.resumeFromKey = resumeString && parse(resumeString)
 		if (!this.resumeFromKey) {
 			this.state = 'ready'
 			this.resumePromise = undefined
@@ -1183,7 +1184,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 		const beforeCommit = () => {
 			if (this.resumeFromKey)
-				db.put(INITIALIZING_LAST_KEY, this.resumeFromKey)
+				db.put(INITIALIZING_LAST_KEY, serialize(this.resumeFromKey), 1)
 		}
 		db.on('beforecommit', beforeCommit)
 		this.state = 'building'
@@ -1246,6 +1247,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 		event.triggers = [ DISCOVERED_SOURCE ]
 		event.source = { constructor: this, id }
+		event.version = getNextVersion()
 
 		this.updated(event, { id })
 		let transition = this.transitions.get(id)
@@ -1306,6 +1308,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					shared: this.sharedStructure,
 					lazy: true,
 				})
+				if (this.name == 'Statistics')
+					console.log('saving statistics version', version)
 				transition.committed = this.whenWritten = committed = this.db.put(id, serialized, version, conditionalVersion)
 				let entryCache = this._entryCache
 				if (entryCache && value && typeof value == 'object') {
@@ -1357,7 +1361,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			} else if (!onlyCommitted || transition.committed) {
 				return {
 					value: transition.result,
-					version: transition.fromVersion,
+					version: Math.abs(transition.fromVersion),
 				}
 			}
 		}
@@ -1396,7 +1400,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static getInstanceIds(range: IterableOptions) {
 		let db = this.db
 		range = range || {}
-		range.start = range.start || Buffer.from([4])
+		range.start = range.start || true
 		range.values = false
 		if (range.waitForAllIds && this.ready) {
 			delete range.waitForAllIds
@@ -1409,7 +1413,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static entries(range) {
 		let db = this.db
 		return when(when(this.resetProcess, () => this.whenWritten || Promise.resolve()), () => db.getRange({
-			start: Buffer.from([2])
+			start: true
 		}).map(entry => {
 			entry.version = getLastVersion() // TODO: This will only work if we are doing per-item iteration
 			entry.value = parse(entry.value, {
@@ -1452,7 +1456,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					if (childStore.queue && childStore.queue.size > 0)
 						invalidationState *= childStore.invalidationIdentifier
 				}
-				this.rootDB.put(this.processKey, invalidationState)
+				this.rootDB.put(this.processKey, invalidationState.toString())
 			}
 		})
 	}
@@ -1903,7 +1907,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static updateDBVersion() {
 		if (this.indices) {
-			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = true)
+			this.resumeFromKey = true
+			this.db.putSync(INITIALIZING_LAST_KEY, 'true')
 		}
 		super.updateDBVersion()
 	}
@@ -2072,9 +2077,9 @@ export class Invalidated {
 const delay = ms => new Promise(resolve => ms >= 1 ? setTimeout(resolve, ms) : setImmediate(resolve))
 const primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199]
 
-function parse(value) {
-	return value
+function parse(string) {
+	return JSON.parse(string)
 }
 function serialize(value) {
-	return value
+	return JSON.stringify(value)
 }
