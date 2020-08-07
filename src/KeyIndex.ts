@@ -178,6 +178,10 @@ export const Index = ({ Source }) => {
 					if (isChanged || value.length === 0 || this.alwaysUpdate) {
 						if (isChanged) {
 							let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
+							if (fullKey.length > 510) {
+								console.error('Too large of key indexing', this.name, key)
+								continue
+							}
 							value = this.setupSizeTable(value, dpackStart, 0)
 							if (value.length > COMPRESSION_THRESHOLD) {
 								value = this.compressEntry(value, 0)
@@ -195,9 +199,14 @@ export const Index = ({ Source }) => {
 				}
 			}
 			for (let [key] of toRemove) {
+				let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
+				if (fullKey.length > 510) {
+					console.error('Too large of key indexing', this.name, key)
+					continue
+				}
 				operations.push({
 					type: 'del',
-					key: Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
+					key: fullKey
 				})
 				if (!this.resumePromise)
 					eventUpdateSources.push({ key, sources, triggers })
