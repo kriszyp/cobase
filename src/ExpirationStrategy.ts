@@ -4,7 +4,7 @@
 // to expire slower)
 
 // number of entries in the cache. reduce this to reduce cache size (less memory)
-let CACHE_ENTRIES = 20000
+let CACHE_ENTRIES = 30000
 // this is the mid-point size in the cache (roughly half of cache entries will
 // be smaller, half larger). Reduce this to force large entries out faster (less memory)
 const NOMINAL_SIZE = 100
