@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { createSerializer, createSharedStructure, readSharedStructure, asBlock, isBlock, copy, reassignBuffers } from 'dpack'
+import { Serializer } from 'msgpackr'
 import { open, getLastVersion, compareKey } from 'lmdb-store'
 import when from './util/when'
 import { WeakValueMap } from './util/WeakValueMap'
@@ -33,7 +33,7 @@ const INVALIDATED_STATE = 1
 const ONLY_COMMITTED = 1
 const NO_CACHE = 2
 const AS_SOURCE = {}
-const EXTENSION = '.mdjson'
+const EXTENSION = '.mdb'
 const DB_FORMAT_VERSION = 0
 const allStores = new Map()
 
@@ -364,34 +364,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static set doesInitialization(flag) {
 		this._doesInitialization = flag
 	}
-	static generateSharedStructure() {
-		let sharedStructure = createSharedStructure()
-		let ids = this.getInstanceIds().asArray
-		for (let id of ids) {
-			let object = this.get(id)
-			serialize(object, {
-				shared: sharedStructure,
-			})
-		}
-	}
 	static initializeRootDB() {
 		const db = this.rootDB
 		this.rootStore = this
-
-		if (sharedStructureDirectory) {
-			let sharedFile = sharedStructureDirectory + '/' + this.name + '.dpack'
-			if (fs.existsSync(sharedFile)) {
-				let sharedStructureBuffer
-				this.sharedStructure = readSharedStructure(sharedStructureBuffer = fs.readFileSync(sharedFile))
-				let hmac = crypto.createHmac('sha256', 'cobase')
-				hmac.update(sharedStructureBuffer)
-				this.expectedDBVersion = this.expectedDBVersion ^ parseInt(hmac.digest('hex').slice(-6), 16)
-			}
-			if (sharedInstrumenting && !this.sharedStructure) {
-				this.sharedStructure = createSharedStructure()
-				this.expectedDBVersion = Math.round(Math.random() * 10000) // we have to completely restart every time in this case
-			}
-		}
 
 		// TODO: Might be better use Buffer.allocUnsafeSlow(6)
 		const processKey = this.processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
@@ -442,8 +417,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return aggregateVersion ^ (this.version || 0)
 	}
 	static openRootDatabase() {
+		let serializer = new Serializer()
 		const options = {
-			encoding: 'utf8'
+			encoding: 'binary',
+			serializer,
+			compression: true
 		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
@@ -457,8 +435,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			console.info('Completely clearing', this.name)
 			options.clearOnStart = true
 		}
-		options.compression = true
 		this.rootDB = open(this.dbFolder + '/' + this.name + EXTENSION, options)
+		this.setupSharedStructures(serializer, this.rootDB)
+
+		Object.assign(this, this.rootDB.get(DB_VERSION_KEY))
 		return this.prototype.db = this.db = this.rootDB.openDB(this.dbName || this.name, {
 			useVersions: true,
 		})
@@ -541,13 +521,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (isRoot)
 				this.initializeRootDB()
 			let initializingProcess = this.rootStore.initializingProcess
-			let stateDPack = this.db.get(DB_VERSION_KEY)
-			let didReset
-			let state = stateDPack && parse(stateDPack)
-			if (state) {
-				this.dbVersion = state.dbVersion
-				this.startVersion = state.startVersion
-			}
 
 			const db = this.db
 			registerClass(this)
@@ -589,16 +562,20 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let unfinishedIds = new Set()
 		let lastWrite
 		let i = 0;
-		for (let { key, value } of this.db.getRange({
-			start: Buffer.from([1, 255])
+		for (let { key, version } of this.db.getRange({
+			start: Buffer.from([1, 255]),
+			values: false,
+			versions: true
 		})) {
-			if (value[0] == INVALIDATED_STATE && value.length > 8/* && value.readUInt32BE(4) == pid*/) { // looking for owned invalidated entries
-				unfinishedIds.add(key)
-				if (this.queue)
-					this.queue.set(key, null)
-				this.clearEntryCache(id)
-				if (this.transitions) // TODO: Remove if once we aren't calling this on indices
-					this.transitions.delete(key)
+			if (version < 0) { // looking for owned invalidated entries, negative version indicates invalidated
+				if (this.db.get(key)) { // non-zero value indicates process ownership
+					unfinishedIds.add(key)
+					if (this.queue)
+						this.queue.set(key, null)
+					this.clearEntryCache(id)
+					if (this.transitions) // TODO: Remove if once we aren't calling this on indices
+						this.transitions.delete(key)
+				}
 			}
 			if (i++ % 1000 == 0)
 				await delay(0)
@@ -803,14 +780,18 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static updateDBVersion() {
 		let version = this.startVersion
-		this.db.putSync(DB_VERSION_KEY, serialize({
-			startVersion: version,
-			dbVersion: this.expectedDBVersion,
-			childStores: this.childStores && this.childStores.map(childStore => ({
-				name: childStore.name,
-				dbVersion: childStore.expectedDBVersion,
-			}))
-		}))
+		this.dbVersion = this.expectedDBVersion
+		if (this.rootStore == this) {
+			this.rootDB.putSync(DB_VERSION_KEY, {
+				dbVersion: this.expectedDBVersion,
+				childStores: this.childStores && this.childStores.map(childStore => ({
+					name: childStore.name,
+					dbVersion: childStore.dbVersion,
+					invalidationIdentifier: childStore.invalidationIdentifier
+				}))
+			})
+		} else
+			this.rootStore.updateDBVersion()
 		return version
 	}
 
@@ -920,32 +901,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.currentLock = null
 		}
 		return promisedResult
-	}
-
-	static _dpackStart = 8
-	static setupSizeTable(buffer, start, headerSize) {
-		let sizeTableBuffer = buffer.sizeTable
-		let startOfSizeTable = start - (sizeTableBuffer ? sizeTableBuffer.length : 0)
-		if (sizeTableBuffer) {
-			if (startOfSizeTable - headerSize < 0) {
-				this._dpackStart = sizeTableBuffer.length + headerSize
-				return Buffer.concat([Buffer.alloc(headerSize), sizeTableBuffer, buffer.slice(start)])
-			} else if (this._dpackStart > 20) {
-				this._dpackStart = this._dpackStart - (this._dpackStart >> 5) // gradually draw this down, don't want one large buffer to make this too big
-			}
-			sizeTableBuffer.copy(buffer, startOfSizeTable)
-		}
-		return buffer.slice(startOfSizeTable - headerSize)
-	}
-	static writeCommonStructure() {
-		let sharedFile = sharedStructureDirectory + '/' + this.name + '.dpack'
-		if (this.sharedStructure.serializeCommonStructure) {
-			let structureBuffer = this.sharedStructure.serializeCommonStructure()
-			if (structureBuffer.length > 0) {
-				fs.writeFileSync(sharedFile, structureBuffer)
-				return true
-			}
-		}
 	}
 
 	static tryForQueueEntry(id, action) {
@@ -1101,10 +1056,31 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this.whenProcessingThisComplete
 	}
 
+	static setupSharedStructures(serializer, db) {
+		serializer.saveStructures = function(structures, oldLength) {
+			return db.transaction(() => {
+				let oldStructures = db.get(SHARED_STRUCTURE_KEY)
+				let length = oldStructures ? oldStructures.length : 0
+				if (length != oldLength)
+					return false // it changed, we need to indicate that we couldn't update
+				db.put(SHARED_STRUCTURE_KEY, structures)
+			})
+		}
+		serializer.getStructures = function() {
+			return db.get(SHARED_STRUCTURE_KEY)
+		}
+		serializer.structures = serializer.getStructures() || []
+	}
+
 	static openChildDB(store, asIndex?) {
-		store.db = this.rootDB.openDB(store.name, {
+		let serializer = store.serializer = new Serializer()
+		let db = store.db = this.rootDB.openDB(store.name, {
+			encoding: 'binary',
+			serializer,
+			compression: true,
 			useVersions: !asIndex,
 		})
+		this.setupSharedStructures(serializer, db)
 		store.rootDB = this.rootDB
 		let rootStore = store.rootStore = this.rootStore || this
 		store.otherProcesses = rootStore.otherProcesses
@@ -1126,8 +1102,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			}
 		})
 		if (index > -1) {
-			Object.assign(store, rootStore.childStores[i])
-			rootStore.childStores[i] = store
+			store.dbVersion = rootStore.childStores[index].dbVersion
+			store.invalidationIdentifier = rootStore.childStores[index].invalidationIdentifier
+			rootStore.childStores[index] = store
 		}
 		else {
 			// TODO: Do in a transation
@@ -1138,15 +1115,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					break
 				}
 			}
-			this.rootDB.putSync(DB_VERSION_KEY, serialize({
-				dbVersion: this.expectedDBVersion,
+			this.rootDB.putSync(DB_VERSION_KEY, {
+				dbVersion: this.dbVersion,
 				childStores: this.childStores && this.childStores.map(childStore => ({
 					name: childStore.name,
-					dbVersion: childStore.expectedDBVersion,
+					dbVersion: childStore.dbVersion,
 					invalidationIdentifier: childStore.invalidationIdentifier
 				}))
-			}))
-
+			})
 		}
 		if (!store.invalidationIdentifier)
 			throw new Error('Store must have invalidationIdentifier')
@@ -1168,7 +1144,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static async resumeQueue() {
 		let resumeString = this.db.get(INITIALIZING_LAST_KEY)
-		this.resumeFromKey = resumeString && parse(resumeString)
+		this.resumeFromKey = resumeString
 		if (!this.resumeFromKey) {
 			this.state = 'ready'
 			this.resumePromise = undefined
@@ -1180,7 +1156,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 		const beforeCommit = () => {
 			if (this.resumeFromKey)
-				db.put(INITIALIZING_LAST_KEY, serialize(this.resumeFromKey), 1)
+				db.put(INITIALIZING_LAST_KEY, this.resumeFromKey, 1)
 		}
 		db.on('beforecommit', beforeCommit)
 		this.state = 'building'
@@ -1199,12 +1175,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static resetAll(): any {
-	}
-	static parse(string) {
-		return JSON.parse(string)
-	}
-	static serialize(value) {
-		return JSON.stringify(value)
 	}
 })
 
@@ -1237,7 +1207,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		}
 
 		if (typeof mode === 'object' && entry && entry.value) {
-			return copy(entry.value)
+			return entry.value
 		}
 		return entry && entry.value
 	}
@@ -1306,13 +1276,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					transition.committed = this.whenWritten = committed = this.db.remove(id, conditionalVersion)
 				}
 			} else {
-				let serialized = this.serialize(value, {
-					shared: this.sharedStructure,
-					lazy: true,
-				})
-				if (this.name == 'Statistics')
-					console.log('saving statistics version', version)
-				transition.committed = this.whenWritten = committed = this.db.put(id, serialized, version, conditionalVersion)
+				transition.committed = this.whenWritten = committed = this.db.put(id, value, version, conditionalVersion)
 				let entryCache = this._entryCache
 				if (entryCache && value && typeof value == 'object') {
 					let entry = {
@@ -1322,7 +1286,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					if (value)
 						value[ENTRY] = entry
 					entryCache.set(id, entry)
-					expirationStrategy.useEntry(entry, serialized.length)
+					expirationStrategy.useEntry(entry)
 				}
 			}
 			this.whenValueCommitted = committed
@@ -1384,27 +1348,19 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			this._entryCache = entryCache = new WeakValueMap()
 		}
 		let db = this.db
-		let entryAsString = db.get(id)
-		if (entryAsString == undefined)
+		let value = db.get(id)
+		if (value == undefined)
 			return
-		let value
-		try {
-			value = typeof entryAsString == 'string' ? this.parse(entryAsString, {
-				shared: this.sharedStructure,
-			}) : entryAsString
-		} catch(error) {
-			value = null
-		}
 		let version = getLastVersion()
 		let entry = {
 			value,
 			version,
-			size: entryAsString.length,
+			size: 100
 		}
 		if (value && typeof value == 'object' && !mode) {
 			entryCache.set(id, entry)
 			value[ENTRY] = entry
-			expirationStrategy.useEntry(entry, entryAsString.length)
+			expirationStrategy.useEntry(entry, 100)
 		}
 		return entry
 	}
@@ -1429,9 +1385,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				start: true
 			}, range)).map(entry => {
 				entry.version = getLastVersion() // TODO: This will only work if we are doing per-item iteration
-				entry.value = this.parse(entry.value, {
-					shared: this.sharedStructure,
-				})
 				return entry
 			})
 			return range && range.asIterable ? results : results.asArray
@@ -1637,7 +1590,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				let context = getCurrentContext()
 				let transformContext = context ? context.newContext() : new RequestContext(null, null)
 				transformContext.abortables = transition.abortables
-				return transformContext.executeWithin(() => this.prototype.transform.apply({ id }, inputData.map(copy)))
+				return transformContext.executeWithin(() => this.prototype.transform.apply({ id }, inputData))
 			}), result => {
 				if (transition.invalidating) {
 					if (transition.replaceWith) {
@@ -2010,26 +1963,6 @@ class ReloadEntryEvent extends ReplacedEvent {
 }
 ReloadEntryEvent.prototype.type = 'reload-entry'
 
-function convertToBlocks(value) {
-	// convert to partitioned blocks
-	if (value && typeof value === 'object' && !isBlock(value)) {
-		if (value.constructor === Object) {
-			var newValue = {}
-			for (var key in value) {
-				var subValue = value[key]
-				if (subValue && (subValue.constructor == Object || subValue.constructor == Array)) {
-					// don't use blocks for typed values, just objects and arrays
-					newValue[key] = asBlock(subValue)
-				} else {
-					newValue[key] = subValue
-				}
-			}
-			return asBlock(newValue)
-		}
-	}
-	return value
-
-}
 export function getCurrentStatus() {
 	function estimateSize(size, previousState) {
 		return (previousState ? JSON.stringify(previousState).length : 1) + size
@@ -2091,10 +2024,3 @@ export class Invalidated {
 }
 const delay = ms => new Promise(resolve => ms >= 1 ? setTimeout(resolve, ms) : setImmediate(resolve))
 const primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199]
-
-function parse(string) {
-	return JSON.parse(string)
-}
-function serialize(value) {
-	return JSON.stringify(value)
-}

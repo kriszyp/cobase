@@ -1,5 +1,4 @@
 import { VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
-import { createParser, asBlock } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
 import { ShareChangeError } from './util/errors'
 import when from './util/when'
@@ -104,7 +103,7 @@ export const Index = ({ Source }) => {
 						previousEntries = this.normalizeEntries(previousEntries)
 						for (let entry of previousEntries) {
 							let previousValue = entry.value
-							previousValue = previousValue === undefined ? '' : this.serialize(previousValue, false)
+							previousValue = this.serializer.serialize(previousValue)
 							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 						}
 					} else if (previousEntries != null) {
@@ -160,12 +159,12 @@ export const Index = ({ Source }) => {
 					let removedValue = toRemove.get(key)
 					// a value of '' is treated as a reference to the source object, so should always be treated as a change
 					let dpackStart = 0
-					let value = entry.value == null ? '' : this.serialize(entry.value)
+					let value = this.serializer.serialize(entry.value)
 					first = false
 					if (removedValue != null)
 						toRemove.delete(key)
-					let isChanged = removedValue == null || !value === removedValue
-					if (isChanged || value.length === 0 || this.alwaysUpdate) {
+					let isChanged = removedValue == null || !value.equals(removedValue)
+					if (isChanged || entry.value == null || this.alwaysUpdate) {
 						if (isChanged) {
 							let fullKey = [ key, id ]
 							operations.push({
@@ -219,12 +218,6 @@ export const Index = ({ Source }) => {
 				return [entries]
 			}
 			return entries
-		}
-
-		static serialize(value, firstValue) {
-			return serialize(value, {
-				shared: this.sharedStructure,
-			})
 		}
 
 		static log(...args) {
@@ -303,9 +296,6 @@ export const Index = ({ Source }) => {
 			}, true)
 		}
 
-		static parseEntryValue(asString) {
-			return parse(asString, { shared: this.sharedStructure })
-		}
 		static getIndexedValues(range: IterableOptions) {
 			range = range || {}
 			if (!this.initialized && range.waitForInitialization) {
@@ -327,7 +317,7 @@ export const Index = ({ Source }) => {
 				/*if (range.recordApproximateSize) {
 					let approximateSize = approximateSize += key.length + (value && value.length || 10)
 				}*/
-				let parsedValue = value !== undefined ? value.length > 0 ? this.parseEntryValue(value) : Source.get(sourceId) : value
+				let parsedValue = value === null ? Source.get(sourceId) : value
 				if (parsedValue && parsedValue.then) {
 					return parsedValue.then(parsedValue => returnFullKeyValue ? {
 						key: sourceId,
@@ -532,10 +522,3 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 	}
 }
 const delay = () => new Promise(resolve => setImmediate(resolve))
-
-function parse(value) {
-	return JSON.parse(value)
-}
-function serialize(value) {
-	return JSON.stringify(value)
-}
