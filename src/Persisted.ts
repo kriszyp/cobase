@@ -559,7 +559,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					if (invalidationState > 1) {
 						for (let store of [this, ...this.childStores]) {
 							let divided = invalidationState / store.invalidationIdentifier
-							if (divided >>> 0 == divided) {
+							if (divided >>> 0 == divided && store.indices) {
 								console.warn('Need to find invalidated entries in ', store.name)
 								await store.findOwnedInvalidations(pid)
 							}
