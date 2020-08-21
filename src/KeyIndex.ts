@@ -1,8 +1,6 @@
 import { VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
-import { serialize, parse, parseLazy, createParser, asBlock } from 'dpack'
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
 import { ShareChangeError } from './util/errors'
-import { toBufferKey, fromBufferKey } from 'ordered-binary'
 import when from './util/when'
 import ExpirationStrategy from './ExpirationStrategy'
 import { OperationsArray, IterableOptions, Database } from './storage/Database'
@@ -11,17 +9,11 @@ import { DEFAULT_CONTEXT } from './RequestContext'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
 const DEFAULT_INDEXING_CONCURRENCY = 40
-const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
-const SEPARATOR_NEXT_BYTE = Buffer.from([31])
-const INDEXING_STATE = Buffer.from([1, 5])
 const INITIALIZING_LAST_KEY = Buffer.from([1, 7])
-const EMPTY_BUFFER = Buffer.from([])
 const INDEXING_MODE = { indexing: true }
 const DEFAULT_INDEXING_DELAY = 60
 const INITIALIZATION_SOURCE = 'is-initializing'
-const INDEXING_STATE_SIZE = 3584 // good size for ensuring that it is an (and only one) overflow page in LMDB, and won't be moved
 const INITIALIZATION_SOURCE_SET = new Set([INITIALIZATION_SOURCE])
-const COMPRESSION_THRESHOLD = 1500
 const COMPRESSED_STATUS_24 = 254
 export interface IndexRequest {
 	previousEntry?: any
@@ -95,7 +87,6 @@ export const Index = ({ Source }) => {
 			let operations: OperationsArray = []
 			let previousVersion = previousEntry && previousEntry.version
 			let eventUpdateSources = []
-			let idAsBuffer = toBufferKey(id)
 
 			let toRemove = new Map()
 			// TODO: handle delta, for optimized index updaes
@@ -112,11 +103,11 @@ export const Index = ({ Source }) => {
 						previousEntries = this.normalizeEntries(previousEntries)
 						for (let entry of previousEntries) {
 							let previousValue = entry.value
-							previousValue = previousValue === undefined ? EMPTY_BUFFER : this.serialize(previousValue, false, 0)
+							previousValue = this.packr.pack(previousValue)
 							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 						}
 					} else if (previousEntries != null) {
-						toRemove.set(previousEntries, EMPTY_BUFFER)
+						toRemove.set(previousEntries, this.packr.pack(previousEntries))
 					}
 				}
 			} catch(error) {
@@ -146,8 +137,6 @@ export const Index = ({ Source }) => {
 						data = undefined
 					}
 				}
-				if (Source.whenValueCommitted && Source.whenValueCommitted.then)
-					await Source.whenValueCommitted
 				if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 				// let the indexBy define how we get the set of values to index
 				try {
@@ -169,23 +158,15 @@ export const Index = ({ Source }) => {
 					// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
 					let removedValue = toRemove.get(key)
 					// a value of '' is treated as a reference to the source object, so should always be treated as a change
-					let dpackStart = this._dpackStart
-					let value = entry.value == null ? EMPTY_BUFFER : this.serialize(asBlock(entry.value), first, dpackStart)
+					let dpackStart = 0
+					let value = this.packr.pack(entry.value)
 					first = false
 					if (removedValue != null)
 						toRemove.delete(key)
-					let isChanged = removedValue == null || !value.slice(dpackStart).equals(removedValue)
-					if (isChanged || value.length === 0 || this.alwaysUpdate) {
+					let isChanged = removedValue == null || !value.equals(removedValue)
+					if (isChanged || entry.value == null || this.alwaysUpdate) {
 						if (isChanged) {
-							let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
-							if (fullKey.length > 510) {
-								console.error('Too large of key indexing', this.name, key)
-								continue
-							}
-							value = this.setupSizeTable(value, dpackStart, 0)
-							if (value.length > COMPRESSION_THRESHOLD) {
-								value = this.compressEntry(value, 0)
-							}
+							let fullKey = [ key, id ]
 							operations.push({
 								type: 'put',
 								key: fullKey,
@@ -206,7 +187,7 @@ export const Index = ({ Source }) => {
 				}
 				operations.push({
 					type: 'del',
-					key: fullKey
+					key: [ key, id ]
 				})
 				if (!this.resumePromise)
 					eventUpdateSources.push({ key, sources, triggers })
@@ -242,23 +223,6 @@ export const Index = ({ Source }) => {
 				return [entries]
 			}
 			return entries
-		}
-
-		static serialize(value, firstValue, startOffset) {
-			try {
-				return serialize(value, {
-					startOffset,
-					shared: this.sharedStructure,
-					avoidShareUpdate: !firstValue
-				})
-			} catch (error) {
-				if (error instanceof ShareChangeError) {
-					this.warn('Reserializing after share change in another process', this.name)
-					return this.serialize(value, firstValue, startOffset)
-				}
-				else
-					throw error
-			}
 		}
 
 		static log(...args) {
@@ -321,42 +285,29 @@ export const Index = ({ Source }) => {
 		static get(id) {
 			// First: ensure that all the source instances are up-to-date
 			return when(Source.whenUpdatedInContext(true), () => {
-				let keyPrefix = toBufferKey(id)
 				let iterable = this._getIndexedValues({
-					start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
-					end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
+					start: id, // the range of everything starting with id-
+					end: [id, '\u{ffff}'],
 				})
 				return this.returnsIterables ? iterable : iterable.asArray
 			})
 		}
 
 		static getIndexedKeys(id) {
-			let keyPrefix = toBufferKey(id)
 			return this._getIndexedValues({
-				start: Buffer.concat([keyPrefix, SEPARATOR_BYTE]), // the range of everything starting with id-
-				end: Buffer.concat([keyPrefix, SEPARATOR_NEXT_BYTE]),
+				start: id, // the range of everything starting with id-
+				end: [id, '\u{ffff}'],
 				values: false,
-			}, true).map(({ key, value }) => key)
+			}, true)
 		}
 
-		static parseEntryValue(buffer) {
-/*			let statusByte = buffer[0]
-			if (statusByte >= COMPRESSED_STATUS_24) {
-				buffer = this.uncompressEntry(buffer, statusByte, 0)
-			}*/
-			return parseLazy(buffer, { shared: this.sharedStructure })
-		}
 		static getIndexedValues(range: IterableOptions) {
 			range = range || {}
 			if (!this.initialized && range.waitForInitialization) {
 				return this.start().then(() => this.getIndexedValues(range))
 			}
-			if (range.start !== undefined)
-				range.start = toBufferKey(range.start)
-			else
-				range.start = Buffer.from([2])
-			if (range.end !== undefined)
-				range.end = toBufferKey(range.end)
+			if (range.start === undefined)
+				range.start = true
 			return when(!range.noWait && this.whenUpdatedInContext(), () =>
 				this._getIndexedValues(range, !range.onlyValues))
 		}
@@ -366,19 +317,12 @@ export const Index = ({ Source }) => {
 			const db: Database = this.db
 			let approximateSize = 0
 			let promises = []
-			range.copy = (buffer) => {
-				let statusByte = buffer[0]
-				if (statusByte >= COMPRESSED_STATUS_24) {
-					return this.uncompressEntry(buffer, statusByte, 0)
-				} else
-					return Buffer.from(buffer)
-			}
 			return db.getRange(range).map(({ key, value }) => {
-				let [, sourceId] = fromBufferKey(key, true)
+				let [, sourceId] = key
 				/*if (range.recordApproximateSize) {
 					let approximateSize = approximateSize += key.length + (value && value.length || 10)
 				}*/
-				let parsedValue = value !== null ? value.length > 0 ? this.parseEntryValue(value) : Source.get(sourceId) : value
+				let parsedValue = value == null ? Source.get(sourceId) : value
 				if (parsedValue && parsedValue.then) {
 					return parsedValue.then(parsedValue => returnFullKeyValue ? {
 						key: sourceId,
@@ -449,8 +393,10 @@ export const Index = ({ Source }) => {
 			return Source.getIdsFromKey(key)
 		}
 		static updateDBVersion() {
-			if (!Source.wasReset) // only reindex if the source didn't do it for use
-				this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
+			if (!Source.wasReset) {// only reindex if the source didn't do it for use
+				this.resumeFromKey = true
+				this.db.putSync(INITIALIZING_LAST_KEY, 'true')
+			}
 			super.updateDBVersion()
 		}
 
@@ -466,11 +412,11 @@ export const Index = ({ Source }) => {
 			let db = this.db
 			let i = 1
 			try {
-				for (let { key } of db.getRange({
-					start: Buffer.from([2]),
+				for (let key of db.getRange({
+					start: true,
 					values: false,
 				})) {
-					let [, sourceId] = fromBufferKey(key, true)
+					let [, sourceId] = key
 					if (set.has(sourceId)) {
 						result = db.removeSync(key)
 					}
@@ -501,23 +447,17 @@ export const Index = ({ Source }) => {
 
 		static getInstanceIds(range?: IterableOptions) {
 			let db = this.db
-			let options: IterableOptions = {
-				start: Buffer.from([2]),
-				values: false
-			}
-			let whenReady = this.whenProcessingComplete
-			if (range) {
-				if (range.start != null)
-					options.start = toBufferKey(range.start)
-				if (range.end != null)
-					options.end = toBufferKey(range.end)
-				if (range.waitForAllIds) {
-					whenReady = when(this.ready, () => when(this.resumePromise, () => this.whenProcessingComplete))
-				}
+			range = range || {}
+			if (range.start === undefined)
+				range.start = true
+			let whenReady
+			if (range.waitForAllIds) {
+				whenReady = when(this.ready, () => when(this.resumePromise, () => this.whenProcessingComplete))
 			}
 			let lastKey
+			range.values = false
 			return when(whenReady, () =>
-				db.getRange(options).map(({ key }) => fromBufferKey(key, true)[0]).filter(key => {
+				db.getRange(range).map(( key ) => key[0]).filter(key => {
 					if (key !== lastKey) { // skip multiple entries under one key
 						lastKey = key
 						return true

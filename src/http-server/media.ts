@@ -1,7 +1,6 @@
 import when from '../util/when'
 import { bufferStream } from '../util/bufferStream'
 import { jsonMediaType } from './JSONStream'
-import { dpackMediaType } from './dpack'
 import { textMediaType } from './text'
 import { htmlMediaType, sendResourceEditor } from './html'
 
@@ -91,7 +90,6 @@ function serializer(returnValue, connection) {
 	}
 }
 
-mediaTypes.set('text/dpack', dpackMediaType)
 mediaTypes.set('application/json', jsonMediaType)
 mediaTypes.set('text/plain', textMediaType)
 mediaTypes.set('text/html', htmlMediaType)

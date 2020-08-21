@@ -2,7 +2,7 @@ import { fork } from 'child_process'
 import when from './when'
 import * as net from 'net'
 import * as path from 'path'
-import { createSerializeStream, createParseStream } from 'dpack'
+import { PackrStream, UnpackrStream } from 'msgpackr'
 import { spawn, UpdateEvent, currentContext } from 'alkali'
 import { CurrentRequestContext } from '../RequestContext'
 
@@ -24,14 +24,10 @@ function startPipeClient(processId, Class) {
 		whenConnected = new Promise((resolve, reject) => {
 			const tryToConnect = (retries) => {
 				const socket = net.createConnection(getPipePath(processId))
-				let parsedStream = socket.pipe(createParseStream({
-					//encoding: 'utf16le',
-				})).on('error', (error) => {
+				let parsedStream = socket.pipe(new UnpackrStream()).on('error', (error) => {
 					console.error('Error in pipe client socket', error)
 				})
-				let serializingStream = createSerializeStream({
-					//encoding: 'utf16le'
-				})
+				let serializingStream = new PackrStream()
 				serializingStream.pipe(socket)
 				serializingStream.pid = processId
 				let connected
@@ -79,14 +75,10 @@ function startPipeServer() {
 		return
 	pipeServerStarted = true
 	net.createServer((socket) => {
-		socket.pipe(createParseStream({
-			//encoding: 'utf16le',
-		})).on('data', (message) => {
+		socket.pipe(new UnpackrStream()).on('data', (message) => {
 			onMessage(message, serializingStream)
 		})
-		let serializingStream = createSerializeStream({
-			encoding: 'utf16le',
-		})
+		let serializingStream = new PackrStream()
 		socket.on('close', (event) => {
 			serializingStream.emit('close', event)
 		})
