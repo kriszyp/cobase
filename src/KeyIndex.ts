@@ -180,11 +180,10 @@ export const Index = ({ Source }) => {
 				}
 			}
 			for (let [key] of toRemove) {
-				let fullKey = Buffer.concat([toBufferKey(key), SEPARATOR_BYTE, idAsBuffer])
-				if (fullKey.length > 510) {
+				/*if (fullKey.length > 510) {
 					console.error('Too large of key indexing', this.name, key)
 					continue
-				}
+				}*/
 				operations.push({
 					type: 'del',
 					key: [ key, id ]

@@ -1,6 +1,4 @@
 import { Cached } from './Persisted'
-import { createSerializer, serialize, parse, parseLazy, createParser } from 'dpack'
-import { toBufferKey, fromBufferKey, Metadata } from 'ordered-binary'
 import when from './util/when'
 const INVALIDATED_VALUE = Buffer.from([])
 const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
