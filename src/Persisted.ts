@@ -334,6 +334,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static clearAllData() {
 		let db = this.db
 		let count = 0
+		this.packr.structures = [] // redo the structures too
 		db.transaction(() => {
 			db.clear()
 		})
@@ -1026,7 +1027,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		serializer.getStructures = function() {
 			return db.get(SHARED_STRUCTURE_KEY)
 		}
-		serializer.structures = serializer.getStructures() || []
+		serializer.structures = []
 	}
 
 	static openDB(store, asIndex?) {
