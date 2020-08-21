@@ -394,7 +394,7 @@ export const Index = ({ Source }) => {
 		static updateDBVersion() {
 			if (!Source.wasReset) {// only reindex if the source didn't do it for use
 				this.resumeFromKey = true
-				this.db.putSync(INITIALIZING_LAST_KEY, 'true')
+				this.db.putSync(INITIALIZING_LAST_KEY, true)
 			}
 			super.updateDBVersion()
 		}
