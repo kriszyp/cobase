@@ -1,4 +1,4 @@
-import { EncodeStream, decode } from 'msgpack-lite'
+import { EncodeStream, decode } from 'msgpackr'
 import { Readable } from 'stream'
 
 export const msgpackMediaType = {

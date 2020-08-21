@@ -103,11 +103,11 @@ export const Index = ({ Source }) => {
 						previousEntries = this.normalizeEntries(previousEntries)
 						for (let entry of previousEntries) {
 							let previousValue = entry.value
-							previousValue = this.serializer.serialize(previousValue)
+							previousValue = this.packr.pack(previousValue)
 							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 						}
 					} else if (previousEntries != null) {
-						toRemove.set(previousEntries, '')
+						toRemove.set(previousEntries, this.packr.pack(previousEntries))
 					}
 				}
 			} catch(error) {
@@ -159,7 +159,7 @@ export const Index = ({ Source }) => {
 					let removedValue = toRemove.get(key)
 					// a value of '' is treated as a reference to the source object, so should always be treated as a change
 					let dpackStart = 0
-					let value = this.serializer.serialize(entry.value)
+					let value = this.packr.pack(entry.value)
 					first = false
 					if (removedValue != null)
 						toRemove.delete(key)
@@ -317,7 +317,7 @@ export const Index = ({ Source }) => {
 				/*if (range.recordApproximateSize) {
 					let approximateSize = approximateSize += key.length + (value && value.length || 10)
 				}*/
-				let parsedValue = value === null ? Source.get(sourceId) : value
+				let parsedValue = value == null ? Source.get(sourceId) : value
 				if (parsedValue && parsedValue.then) {
 					return parsedValue.then(parsedValue => returnFullKeyValue ? {
 						key: sourceId,

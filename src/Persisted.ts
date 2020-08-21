@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { Serializer } from 'msgpackr'
+import { Packr } from 'msgpackr'
 import { open, getLastVersion, compareKey } from 'lmdb-store'
 import when from './util/when'
 import { WeakValueMap } from './util/WeakValueMap'
@@ -420,8 +420,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let serializer = new Serializer()
 		const options = {
 			encoding: 'binary',
-			serializer,
-			compression: true
+			deserialize(buffer, size) {
+				return serializer.unpack(buffer, size)
+			},
+			serialize(data) {
+				return serializer.pack(data)
+			},
 		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
@@ -439,55 +443,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.setupSharedStructures(serializer, this.rootDB)
 
 		Object.assign(this, this.rootDB.get(DB_VERSION_KEY))
-		return this.prototype.db = this.db = this.rootDB.openDB(this.dbName || this.name, {
-			useVersions: true,
-		})
+		return this.prototype.db = this.db = this.openDB(this)
 	}
-/*
-	static async needsDBUpgrade() {
-		let needsDBUpgrade
-		if (this.Sources) {
-			for (let Source of this.Sources) {
-				if (await Source.needsDBUpgrade()) {
-					needsDBUpgrade = true
-				}
-			}
-		} else {
-			this.rootDB
-		}
-		let structureVersion = this.getStructureVersion()
-
-	}
-
-	// promise to:
-	// true: aquired lock
-	// false: did not acquire
-	static async upgradeToVersionIfNeeded(version, doUpgrade): Promise<boolean> {
-		let state = stateDPack && parse(stateDPack)
-		this.dbVersion = state && state[name]
-		if (this.dbVersion == version)
-			return
-		if (this.rootStore.whenUpgradesFinished) {
-			let hasLock = await this.rootStore.whenUpgradesFinished
-			if (hasLock) {
-				this.rootStore.whenUpgradesFinished = Promise.resolve(doUpgrade())
-			} else {
-				this.rootDB.transaction(() => {
-					let state = stateDPack && parse(stateDPack)
-					this.dbVersion = state && state[name]
-					if (this.dbVersion == version)
-						return
-
-				}
-			}
-		}
-
-		this.rootDB.transaction(() => {
-
-		})
-
-
-	}*/
 
 	static openDatabase() {
 		this.Sources[0].openChildDB(this)
@@ -572,7 +529,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					unfinishedIds.add(key)
 					if (this.queue)
 						this.queue.set(key, null)
-					this.clearEntryCache(id)
+					this.clearEntryCache(key)
 					if (this.transitions) // TODO: Remove if once we aren't calling this on indices
 						this.transitions.delete(key)
 				}
@@ -1072,16 +1029,25 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		serializer.structures = serializer.getStructures() || []
 	}
 
-	static openChildDB(store, asIndex?) {
-		let serializer = store.serializer = new Serializer()
-		let db = store.db = this.rootDB.openDB(store.name, {
+	static openDB(store, asIndex?) {
+		let serializer = store.packr = new Serializer()
+		let db = store.db = this.rootDB.openDB(store.dbName || store.name, {
 			encoding: 'binary',
-			serializer,
+			deserialize(buffer, size) {
+				return serializer.unpack(buffer, size)
+			},
+			serialize(data) {
+				return serializer.pack(data)
+			},
 			compression: true,
 			useVersions: !asIndex,
 		})
 		this.setupSharedStructures(serializer, db)
 		store.rootDB = this.rootDB
+		return db
+	}
+	static openChildDB(store, asIndex?) {
+		let db = this.openDB(store, asIndex)
 		let rootStore = store.rootStore = this.rootStore || this
 		store.otherProcesses = rootStore.otherProcesses
 		let index
@@ -1143,8 +1109,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static async resumeQueue() {
-		let resumeString = this.db.get(INITIALIZING_LAST_KEY)
-		this.resumeFromKey = resumeString
+		this.resumeFromKey = this.db.get(INITIALIZING_LAST_KEY)
 		if (!this.resumeFromKey) {
 			this.state = 'ready'
 			this.resumePromise = undefined
@@ -1355,12 +1320,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let entry = {
 			value,
 			version,
-			size: 100
+			size: lastParsedSize
 		}
 		if (value && typeof value == 'object' && !mode) {
 			entryCache.set(id, entry)
 			value[ENTRY] = entry
-			expirationStrategy.useEntry(entry, 100)
+			expirationStrategy.useEntry(entry, lastParsedSize)
 		}
 		return entry
 	}
@@ -1780,6 +1745,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			// if we have downstream indices, we mark this entry as "owned" by this process
 			written = db.put(id, ownEntry ? process.pid : ownEntry === false ? previousEntry.value : 0, version, previousVersion)
 		}
+		if (ownEntry === null) {
+			previousEntry.value = undefined
+		}
 		this.whenWritten = written
 		if (!event.whenWritten)
 			event.whenWritten = written
@@ -1875,8 +1843,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static updateDBVersion() {
 		if (this.indices) {
+			console.debug('Setting up indexing for', this.name)
 			this.resumeFromKey = true
-			this.db.putSync(INITIALIZING_LAST_KEY, 'true')
+			this.db.putSync(INITIALIZING_LAST_KEY, true)
 		}
 		super.updateDBVersion()
 	}
@@ -1962,6 +1931,14 @@ class ReloadEntryEvent extends ReplacedEvent {
 	type
 }
 ReloadEntryEvent.prototype.type = 'reload-entry'
+
+let lastParsedSize
+class Serializer extends Packr {
+	unpack(buffer, size) {
+		lastParsedSize = size
+		return super.unpack(buffer, size)
+	}
+}
 
 export function getCurrentStatus() {
 	function estimateSize(size, previousState) {
