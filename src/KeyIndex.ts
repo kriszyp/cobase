@@ -103,11 +103,11 @@ export const Index = ({ Source }) => {
 						previousEntries = this.normalizeEntries(previousEntries)
 						for (let entry of previousEntries) {
 							let previousValue = entry.value
-							previousValue = this.packr.pack(previousValue)
+							previousValue = this.db.packr.pack(previousValue)
 							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 						}
 					} else if (previousEntries != null) {
-						toRemove.set(previousEntries, this.packr.pack(previousEntries))
+						toRemove.set(previousEntries, this.db.packr.pack(previousEntries))
 					}
 				}
 			} catch(error) {
@@ -159,7 +159,7 @@ export const Index = ({ Source }) => {
 					let removedValue = toRemove.get(key)
 					// a value of '' is treated as a reference to the source object, so should always be treated as a change
 					let dpackStart = 0
-					let value = this.packr.pack(entry.value)
+					let value = this.db.packr.pack(entry.value)
 					first = false
 					if (removedValue != null)
 						toRemove.delete(key)

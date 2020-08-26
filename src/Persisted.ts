@@ -1,6 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { Packr } from 'msgpackr'
-import { open, getLastVersion, compareKey } from 'lmdb-store'
+import { open, getLastVersion, getLastEntrySize, compareKey } from 'lmdb-store'
 import when from './util/when'
 import { WeakValueMap } from './util/WeakValueMap'
 import ExpirationStrategy from './ExpirationStrategy'
@@ -334,7 +333,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static clearAllData() {
 		let db = this.db
 		let count = 0
-		this.packr.structures = [] // redo the structures too
 		db.transaction(() => {
 			db.clear()
 		})
@@ -418,15 +416,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return aggregateVersion ^ (this.version || 0)
 	}
 	static openRootDatabase() {
-		let serializer = new Serializer()
 		const options = {
-			encoding: 'binary',
-			deserialize(buffer, size) {
-				return serializer.unpack(buffer, size)
-			},
-			serialize(data) {
-				return serializer.pack(data)
-			},
+			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
@@ -441,7 +432,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			options.clearOnStart = true
 		}
 		this.rootDB = open(this.dbFolder + '/' + this.name + EXTENSION, options)
-		this.setupSharedStructures(serializer, this.rootDB)
 
 		Object.assign(this, this.rootDB.get(DB_VERSION_KEY))
 		return this.prototype.db = this.db = this.openDB(this)
@@ -1014,36 +1004,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this.whenProcessingThisComplete
 	}
 
-	static setupSharedStructures(serializer, db) {
-		serializer.saveStructures = function(structures, oldLength) {
-			return db.transaction(() => {
-				let oldStructures = db.get(SHARED_STRUCTURE_KEY)
-				let length = oldStructures ? oldStructures.length : 0
-				if (length != oldLength)
-					return false // it changed, we need to indicate that we couldn't update
-				db.put(SHARED_STRUCTURE_KEY, structures)
-			})
-		}
-		serializer.getStructures = function() {
-			return db.get(SHARED_STRUCTURE_KEY)
-		}
-		serializer.structures = []
-	}
-
 	static openDB(store, asIndex?) {
-		let serializer = store.packr = new Serializer()
 		let db = store.db = this.rootDB.openDB(store.dbName || store.name, {
-			encoding: 'binary',
-			deserialize(buffer, size) {
-				return serializer.unpack(buffer, size)
-			},
-			serialize(data) {
-				return serializer.pack(data)
-			},
 			compression: true,
+			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 			useVersions: !asIndex,
 		})
-		this.setupSharedStructures(serializer, db)
 		store.rootDB = this.rootDB
 		return db
 	}
@@ -1321,12 +1287,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let entry = {
 			value,
 			version,
-			size: lastParsedSize
+			size: getLastEntrySize()
 		}
 		if (value && typeof value == 'object' && !mode) {
 			entryCache.set(id, entry)
 			value[ENTRY] = entry
-			expirationStrategy.useEntry(entry, lastParsedSize)
+			expirationStrategy.useEntry(entry, entry.size)
 		}
 		return entry
 	}
@@ -1760,7 +1726,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
 					db.get(id)
 					let newVersion = getLastVersion()
-					if (Math.abs(newVersion) > version) {
+					if (Math.abs(newVersion) > Math.abs(version)) {
 						// don't do anything further, other db process is ahead of us, and we should take no indexing action
 						return new Invalidated(-Math.abs(newVersion))
 					} else {
@@ -1786,6 +1752,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static async receiveRequest({ id, waitFor }) {
 		if (waitFor == 'get') {
 			console.log('waiting for entity to commit', this.name, id)
+			this.clearEntryCache(id)
 			await this.get(id)
 			let transition = this.transitions.get(id)
 			if (transition) {
@@ -1932,14 +1899,6 @@ class ReloadEntryEvent extends ReplacedEvent {
 	type
 }
 ReloadEntryEvent.prototype.type = 'reload-entry'
-
-let lastParsedSize
-class Serializer extends Packr {
-	unpack(buffer, size) {
-		lastParsedSize = size
-		return super.unpack(buffer, size)
-	}
-}
 
 export function getCurrentStatus() {
 	function estimateSize(size, previousState) {
