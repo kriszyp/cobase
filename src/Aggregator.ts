@@ -1,8 +1,8 @@
-import { Cached } from './Persisted'
+import { PersistedBase, Cached } from './Persisted'
 import when from './util/when'
 const INITIALIZING_LAST_KEY = Buffer.from([1, 7])
 
-export class Aggregator extends Cached {
+export class Aggregator extends PersistedBase {
 	static updateAggregate(previousEntry, entry) {
 	}
 	static forValue(id, value, indexRequest) {
@@ -20,11 +20,17 @@ export class Aggregator extends Cached {
 		//		}
 		})
 	}
-	static runTransform() {
-		return {}
+	static get(id, mode?) {
+		let entry = this.getEntryData(id, mode ? 2: 0)
+		// don't use versions
+		return entry && entry.value
 	}
+
 	static fetchAllIds() {
-		return [] // start with nothing
+		return []
+	}
+	static from(...Sources) {
+		return Cached.from.apply(this, Sources)
 	}
 	static openDatabase() {
 		return this.Sources[0].openChildDB(this, true)

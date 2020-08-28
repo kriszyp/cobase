@@ -1375,10 +1375,12 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 }
 
-export class Persisted extends KeyValued(MakePersisted(Variable), {
+export const PersistedBase = KeyValued(MakePersisted(Variable), {
 	valueProperty: 'value',
 	versionProperty: 'version'
-}) {
+})
+
+export class Persisted extends PersistedBase {
 	db: any
 	static dbFolder = 'db'
 

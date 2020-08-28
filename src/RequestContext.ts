@@ -18,7 +18,7 @@ export class RequestContext extends Context {
 }
 export let CurrentRequestContext = RequestContext
 export function setRequestContextClass(Context) {
-  CurrentRequestContext = Context
+	CurrentRequestContext = Context
 }
 
 export const DEFAULT_CONTEXT = {
