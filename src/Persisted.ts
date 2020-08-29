@@ -551,7 +551,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 							let divided = invalidationState / store.invalidationIdentifier
 							if (divided >>> 0 == divided && store.indices) {
 								console.warn('Need to find invalidated entries in ', store.name)
-								await store.findOwnedInvalidations(pid)
+								//await store.findOwnedInvalidations(pid)
 							}
 						}
 					}
@@ -1138,9 +1138,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			}
 		}
 
-		if (typeof mode === 'object' && entry && entry.value) {
-			return entry.value
-		}
 		return entry && entry.value
 	}
 
