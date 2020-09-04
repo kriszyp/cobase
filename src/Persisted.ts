@@ -417,6 +417,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 	static openRootDatabase() {
 		const options = {
+			noMemInit: true,
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 		}
 		if (this.mapSize) {
@@ -1155,7 +1156,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (transition) {
 			transition.invalidating = false
 			transition.result = value
-			transition.fromVersion = Math.abs(transition.newVersion || event.version)
+			transition.fromVersion = Math.abs(transition.version || event.version)
 		} else {
 			transition = {
 				fromVersion: event.version,
@@ -1174,51 +1175,47 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (!transition)
 			return
 		let version = Math.abs(transition.fromVersion)
-		let indexRequest = this.queue && this.queue.get(id) ||
-			{ 
-				version: version || 0,
-				previousEntry,
-			}
-		this.highestVersionToIndex = Math.max(this.highestVersionToIndex || 0, indexRequest.version || 0)
-		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, value, indexRequest)) : []
+		this.highestVersionToIndex = Math.max(this.highestVersionToIndex || 0, version)
+		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, value, transition)) : []
 		let promises = forValueResults.filter(promise => promise && promise.then)
 
 		const readyToCommit = (forValueResults) => {
 			if (transition.invalidating)
 				return
-
-			for (let result of forValueResults) {
-				if (result)
-					result.commit()
-			}
-			let committed
-			transition.fromVersion = version
-			//console.log('conditional header for writing transform ' + (value ? 'write' : 'delete'), id, this.name, conditionalVersion)
-			if (value === undefined) {
-				if (conditionalVersion === null) {
-					// already an undefined entry, nothing to do (but clear out the transition)
-					if (this.transitions.get(id) == transition && !transition.invalidating) {
-						this.transitions.delete(id)
-						return
+			let committed = this.whenValueCommitted = this.db.ifVersion(id, conditionalVersion, () => {
+				// the whole set of writes for this entry and downstream indices are committed one transaction, conditional on the previous version
+				for (let result of forValueResults) {
+					if (result)
+						result.commit()
+				}
+				let committed
+				transition.fromVersion = version
+				//console.log('conditional header for writing transform ' + (value ? 'write' : 'delete'), id, this.name, conditionalVersion)
+				if (value === undefined) {
+					if (conditionalVersion === null) {
+						// already an undefined entry, nothing to do (but clear out the transition)
+						if (this.transitions.get(id) == transition && !transition.invalidating) {
+							this.transitions.delete(id)
+							return
+						}
+					} else {
+						transition.committed = this.whenWritten = committed = this.db.remove(id)
 					}
 				} else {
-					transition.committed = this.whenWritten = committed = this.db.remove(id, conditionalVersion)
-				}
-			} else {
-				transition.committed = this.whenWritten = committed = this.db.put(id, value, version, conditionalVersion)
-				let entryCache = this._entryCache
-				if (entryCache && value && typeof value == 'object') {
-					let entry = {
-						version,
-						value
+					transition.committed = this.whenWritten = committed = this.db.put(id, value, version)
+					let entryCache = this._entryCache
+					if (entryCache && value && typeof value == 'object') {
+						let entry = {
+							version,
+							value
+						}
+						if (value)
+							value[ENTRY] = entry
+						entryCache.set(id, entry)
+						expirationStrategy.useEntry(entry)
 					}
-					if (value)
-						value[ENTRY] = entry
-					entryCache.set(id, entry)
-					expirationStrategy.useEntry(entry)
 				}
-			}
-			this.whenValueCommitted = committed
+			})
 
 			return committed.then((successfulWrite) => {
 				if (this.transitions.get(id) == transition && !transition.invalidating)
@@ -1227,16 +1224,14 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					console.log('unsuccessful write of transform, data changed, updating', id, this.name, version, conditionalVersion, this.db.get(id))
 					this.clearEntryCache(id)
 					let entry = this.getEntryData(id, NO_CACHE)
-					if (entry.version > 0) {
-						return
-					}
-					entry.value = value // use the new value since indices already committed there updates
-					entry.processId = process.pid
-					let event = new ReloadEntryEvent()
-					if (entry)
+					let event
+					if (entry && entry.version > version) {
+						event = new ReloadEntryEvent()
 						event.version = entry.version
-					if (this.queue)
-						this.enqueue(id, event, entry)
+					} else {
+						event = new UpdateEvent()
+						event.version = version
+					}
 					this.updated(event, { id })
 				}
 			})
@@ -1254,7 +1249,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let transition = this.transitions.get(id) // if we are transitioning, return the transition result
 		if (transition) {
 			if (transition.invalidating) {
-				return new Invalidated(transition.newVersion, transition.processId)
+				return transition
 			} else if (mode !== ONLY_COMMITTED || transition.committed) {
 				return {
 					value: transition.result,
@@ -1425,34 +1420,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let entry = this.getEntryData(id, mode ? NO_CACHE : 0)
 			if (entry) {
 				if (entry.version < 0) {
-					if (entry.value && entry.value != process.pid) {
-						// we don't own the invalidation, so wait for the owning process to fulfill this entry
-						try {
-							console.debug('sendRequestToProcess get', this.name, id, entry.value)
-							if (this.sendRequestToProcess) {
-								let response = this.sendRequestToProcess(entry.value, {
-									id,
-									waitFor: 'get',
-								})
-								if (response) {
-									return response.then(() => {
-										this.clearEntryCache(id)
-										this.transitions.delete(id)
-										return this.get(id, mode)
-									})
-								}
-							}
-						} catch(error) {
-							// if the process that invalidated this no longer is running, that's fine, we can take over.
-							console.log(error)
-						}
-						entry.value = null
-					}
 					let oldTransition = this.transitions.get(id)
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
 					let isNew
-					if (entry.value)
-						isNew = false
+					if (entry.value == null && entry.previousValue == null)
+						isNew = true
 					// else TODO: if there is an un-owned entry, we should actually do a conditional write to make sure it hasn't changed
 					let transition = this.runTransform(id, entry.version, isNew, mode)
 					if (oldTransition && oldTransition.abortables) {
@@ -1665,7 +1637,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		}
 		if (transition) {
 			if (transition.invalidating) {
-				previousVersion = transition.newVersion
+				previousVersion = transition.version
 			} else if (transition.committed) {
 				if (transition.result === undefined)
 					previousVersion = null
@@ -1674,34 +1646,37 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				previousVersion = transition.fromVersion
 			}// else the previousEntry should have correct version and status (or non at all if new)
 			transition.invalidating = true
-			transition.newVersion = version
+			transition.version = version
 		}
+		//console.log('invalidateEntry previous transition', id, this.name, 'from', previousVersion, 'to', version, ownEntry)
+		this.clearEntryCache(id)
 		if (event && event.sourceProcess) {
 			// if it came from another process we can count on it to have written the update
-			this.clearEntryCache(id)
 			return
 		}
-		// true = own, false = another process owns, null = public
-		let ownEntry = previousEntry && previousVersion < 0 ? previousEntry.value ? previousEntry.value == process.pid : null : true
-
-		//console.log('invalidateEntry previous transition', id, this.name, 'from', previousVersion, 'to', version, ownEntry)
 		if (!transition) {
 			this.transitions.set(id, transition = {
 				invalidating: true,
-				newVersion: version
+				version,
+				previousValue: previousEntry && previousEntry.value
 			})
-			if (ownEntry === true) {
-				transition.processId = process.pid
-			} else if (ownEntry === false) {
-				transition.processId = previousEntry.value
-			}
 		}
-		this.clearEntryCache(id)
 
 		let db = this.db
 		let written
 		let conditionalVersion // TODO: remove this
-		this.lastVersion = Math.max(this.lastVersion, version)
+		this.lastVersion = Math.max(this.lastVersion, Math.abs(version))
+		if (this.indices) {
+			if (event && event.type === 'deleted') {
+				// completely empty entry for deleted items
+				written = db.remove(id)
+			}
+			this.forQueueEntry(id)
+			this.whenWritten = written
+			if (!event.whenWritten)
+				event.whenWritten = written
+			return
+		}
 
 		if (event && event.type === 'deleted') {
 			// completely empty entry for deleted items
@@ -1709,39 +1684,14 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		} else {
 			//console.log('conditional header for invaliding entry ', id, this.name, conditionalVersion)
 			// if we have downstream indices, we mark this entry as "owned" by this process
-			written = db.put(id, ownEntry ? process.pid : ownEntry === false ? previousEntry.value : 0, version, previousVersion)
-		}
-		if (ownEntry === null) {
-			previousEntry.value = undefined
+			written = db.put(id, null, version, previousVersion)
 		}
 		this.whenWritten = written
 		if (!event.whenWritten)
 			event.whenWritten = written
-		if (ownEntry !== false && this.queue) {
-			this.enqueue(id, event, written.then((result) => {
-				if (result === false) {
-					console.log('Value had changed during invalidation', id, this.name, previousVersion, version, conditionalVersion)
-					if (this.transitions.get(id) == transition)
-						this.transitions.delete(id) // need to recreate the transition so when we re-read the value it isn't cached
-					db.get(id)
-					let newVersion = getLastVersion()
-					if (Math.abs(newVersion) > Math.abs(version)) {
-						// don't do anything further, other db process is ahead of us, and we should take no indexing action
-						return new Invalidated(-Math.abs(newVersion))
-					} else {
-						// it was no longer the same as what we read, re-run, as we have a more recent update
-						if (this.indices)
-							previousEntry = this.getEntryData(id, NO_CACHE)
-						this.invalidateEntry(id, event, by)
-						return previousEntry
-					}
-				}
-				return previousEntry
-			}))
-		}
 		const finished = (result) => {
 			//console.log('invalidateEntry finished with', id, this.name, result)
-			if (this.transitions.get(id) === transition && transition.newVersion === version) {
+			if (this.transitions.get(id) === transition && transition.version === version) {
 				this.transitions.delete(id)
 			}
 		}

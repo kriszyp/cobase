@@ -68,9 +68,9 @@ export const Index = ({ Source }) => {
 		static indexingProcess: Promise<any>
 		static eventLog = []
 
-		static forValue(id, value, indexRequest) {
-			indexRequest.value = value
-			return this.tryForQueueEntry(id, () => this.indexEntry(id, indexRequest))
+		static forValue(id, value, transition) {
+			transition.value = value
+			return this.tryForQueueEntry(id, () => this.indexEntry(id, transition))
 		}
 		static forQueueEntry(id) {
 			return this.tryForQueueEntry(id, () =>
@@ -81,11 +81,9 @@ export const Index = ({ Source }) => {
 				})
 			)
 		}
-		static async indexEntry(id, indexRequest?: IndexRequest) {
-			let { previousEntry, deleted, sources, triggers, version } = indexRequest || {}
-			previousEntry = previousEntry && previousEntry.then ? await previousEntry : previousEntry
+		static async indexEntry(id, transition) {
+			let { previousValue: previousData, deleted, sources, triggers, fromVersion: previousVersion } = transition || {}
 			let operations: OperationsArray = []
-			let previousVersion = previousEntry && previousEntry.version
 			let eventUpdateSources = []
 
 			let toRemove = new Map()
@@ -93,9 +91,8 @@ export const Index = ({ Source }) => {
 			// this is for recording changed entities and removing the values that previously had been indexed
 			let previousEntries
 			try {
-				if (previousEntry != null) { // if no data, then presumably no references to clear
+				if (previousData != null) { // if no data, then presumably no references to clear
 					// use the same mapping function to determine values to remove
-					let previousData = previousEntry.value
 					previousEntries = previousData === undefined ? previousData : this.indexBy(previousData, id)
 					if (previousEntries && previousEntries.then)
 						previousEntries = await previousEntries
@@ -113,16 +110,16 @@ export const Index = ({ Source }) => {
 			} catch(error) {
 				if (error.isTemporary)
 					throw error
-				if (indexRequest && indexRequest.version !== version) return // don't log errors from invalidated states
+				//if (transition && transition.version !== version) return // don't log errors from invalidated states
 				this.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
 			}
-			if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
+			//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 			let entries
 			if (!deleted) {
 				let attempts = 0
 				let data
 				try {
-					data = indexRequest ? indexRequest.value : Source.get(id, INDEXING_MODE)
+					data = transition ? transition.value : Source.get(id, INDEXING_MODE)
 					if (data && data.then)
 						data = await data
 				} catch(error) {
@@ -130,14 +127,14 @@ export const Index = ({ Source }) => {
 						throw error
 					try {
 						// try again
-						data = indexRequest ? indexRequest.value : await Source.get(id, INDEXING_MODE)
+						data = transition ? transition.value : await Source.get(id, INDEXING_MODE)
 					} catch(error) {
-						if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
+						//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 						this.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
 						data = undefined
 					}
 				}
-				if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
+				//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 				// let the indexBy define how we get the set of values to index
 				try {
 					entries = data === undefined ? data : this.indexBy(data, id)
@@ -146,7 +143,7 @@ export const Index = ({ Source }) => {
 				} catch(error) {
 					if (error.isTemporary)
 						throw error
-					if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
+					//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
 					this.warn('Error indexing value', error, 'for', this.name, id)
 					entries = undefined
 				}
