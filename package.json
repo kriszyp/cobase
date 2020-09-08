@@ -15,8 +15,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "dependencies": {
-    "msgpackr": "^0.2.2",
-    "lmdb-store": "^0.5.4"
+    "msgpackr": "^0.3.2",
+    "lmdb-store": "^0.6.2"
   },
   "peerDependencies": {
     "alkali": "^0.21.20"
