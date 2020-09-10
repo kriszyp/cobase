@@ -49,7 +49,7 @@ export interface IndexRequest {
 	sources?: Set<any>
 	version: number
 	triggers?: Set<any>
-	previousValues?: Map
+	fromValues?: Map
 	by?: any
 	resolveOnCompletion?: Function[]
 }
@@ -418,6 +418,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static openRootDatabase() {
 		const options = {
 			noMemInit: true,
+			useFloat32: 3, // DECIMAL_ROUND
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 		}
 		if (this.mapSize) {
@@ -428,6 +429,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		if (this.useWritemap)
 			options.useWritemap = this.useWritemap
+		if (this.useFloat32)
+			options.useFloat32 = this.useFloat32
 		if (clearOnStart) {
 			console.info('Completely clearing', this.name)
 			options.clearOnStart = true
@@ -1124,7 +1127,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 	static get(id, mode?) {
 		let context = getCurrentContext()
-		let entry = this.getEntryData(id, mode ? NO_CACHE : 0)
+		let entry = this.transitions.get(id) || this.getEntryData(id, mode ? NO_CACHE : 0)
 		if (entry) {
 			if (context) {
 				context.setVersion(entry.version)
@@ -1143,7 +1146,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	static is(id, value, event) {
-		let entry = this.getEntryData(id, NO_CACHE)
+		let entry = this.transitions.get(id) || this.getEntryData(id, NO_CACHE)
 		if (!event) {
 			event = entry ? new ReplacedEvent() : new AddedEvent()
 		}
@@ -1155,7 +1158,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let transition = this.transitions.get(id)
 		if (transition) {
 			transition.invalidating = false
-			transition.result = value
+			transition.value = value
 			transition.fromVersion = Math.abs(transition.version || event.version)
 		} else {
 			transition = {
@@ -1174,7 +1177,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let transition = this.transitions.get(id)
 		if (!transition)
 			return
-		let version = Math.abs(transition.fromVersion)
+		let version = transition.version
 		this.highestVersionToIndex = Math.max(this.highestVersionToIndex || 0, version)
 		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, value, transition)) : []
 		let promises = forValueResults.filter(promise => promise && promise.then)
@@ -1203,6 +1206,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					}
 				} else {
 					transition.committed = this.whenWritten = committed = this.db.put(id, value, version)
+					transition.pending = false
 					let entryCache = this._entryCache
 					if (entryCache && value && typeof value == 'object') {
 						let entry = {
@@ -1245,19 +1249,19 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static reads = 0
 	static cachedReads = 0
 	static getEntryData(id, mode) {
-		let context = getCurrentContext()
+		/*let context = getCurrentContext()
 		let transition = this.transitions.get(id) // if we are transitioning, return the transition result
 		if (transition) {
 			if (transition.invalidating) {
 				return transition
 			} else if (mode !== ONLY_COMMITTED || transition.committed) {
 				return {
-					value: transition.result,
+					value: transition.value,
 					version: Math.abs(transition.fromVersion),
 				}
 			}
 		}
-		this.reads++
+		this.reads++*/
 		let entryCache = this._entryCache
 		if (entryCache) {
 			// TODO: read from DB if context specifies to look for a newer version
@@ -1417,24 +1421,25 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static get(id, mode?) {
 		let context = getCurrentContext()
 		return when(this.whenUpdatedInContext(), () => {
-			let entry = this.getEntryData(id, mode ? NO_CACHE : 0)
+			let transition = this.transitions.get(id)
+			let entry = transition || this.getEntryData(id, mode ? NO_CACHE : 0)
 			if (entry) {
-				if (entry.version < 0) {
-					let oldTransition = this.transitions.get(id)
+				if (entry.value == null) { // or only undefined?
+					let oldTransition = transition
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
 					let isNew
-					if (entry.value == null && entry.previousValue == null)
+					if (entry.fromValue == null)
 						isNew = true
 					// else TODO: if there is an un-owned entry, we should actually do a conditional write to make sure it hasn't changed
-					let transition = this.runTransform(id, entry.version, isNew, mode)
+					transition = this.runTransform(id, entry.version, transition, mode)
 					if (oldTransition && oldTransition.abortables) {
 						// if it is still in progress, we can abort it and replace the result
-						oldTransition.replaceWith = transition.result
+						oldTransition.replaceWith = transition.value
 						for (let abortable of oldTransition.abortables) {
 							abortable()
 						}
 					}
-					return transition.result
+					return transition.value
 				}
 				if (context) {
 					context.setVersion(entry.version)
@@ -1447,8 +1452,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let version = getNextVersion()
 			if (context)
 				context.setVersion(version)
-			let transition = this.runTransform(id, version, true, mode)
-			when(transition.result, (result) => {
+			transition = this.runTransform(id, version, transition, mode)
+			when(transition.value, (result) => {
 				if (result !== undefined && !transition.invalidating) {
 					let event = new DiscoveredEvent()
 					event.triggers = [ DISCOVERED_SOURCE ]
@@ -1461,18 +1466,17 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					})
 				}
 			})
-			return transition.result
+			return transition.value
 		})
 	}
 	static whenValueCommitted: Promise<any>
-	static runTransform(id, fromVersion, isNew, mode) {
-		let transition = {
-			fromVersion,
-			abortables: []
+	static runTransform(id, version, transition, mode) {
+		if (!transition) {
+			this.transitions.set(id, transition = {
+				version
+			})
 		}
-		if (isNew)
-			transition.isNew = true
-		this.transitions.set(id, transition)
+		transition.abortables = []
 		const removeTransition = () => {
 			if (this.transitions.get(id) === transition && !transition.invalidating)
 				this.transitions.delete(id)
@@ -1487,7 +1491,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			return data
 		}) : []
 		try {
-			transition.result = when(when(hasPromises ? Promise.all(inputData) : inputData, inputData => {
+			transition.value = when(when(hasPromises ? Promise.all(inputData) : inputData, inputData => {
 				if (inputData.length > 0 && inputData[0] === undefined && !this.sourceOptional) // first input is undefined, we pass through
 					return
 				let context = getCurrentContext()
@@ -1501,9 +1505,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					}
 					return result
 				} // else normal transform path
-				transition.result = result
-				const conditionalVersion = isNew === undefined ? undefined : isNew ? null :
-					transition.fromVersion
+				transition.value = result
+				const conditionalVersion = transition.fromVersion
 
 				this.saveValue(id, result, null, conditionalVersion)
 				return result
@@ -1582,7 +1585,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				triggers: event.triggers instanceof Set ? event.triggers : new Set(event.triggers),
 			})
 			/*if (indexRequest.previousState == INVALIDATED_ENTRY) {
-				indexRequest.previousValues = event.previousValues // need to have a shared map to update
+				indexRequest.fromValues = event.fromValues // need to have a shared map to update
 				indexRequest.by = by
 			}*/
 			this.requestProcessing(DEFAULT_INDEXING_DELAY)
@@ -1625,27 +1628,19 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static invalidateEntry(id, event, by) {
-		let version = -event.version
+		let version = event.version
 		let transition = this.transitions.get(id)
-		let previousEntry
 		let previousVersion
-		if (this.indices && !(event && event.sourceProcess)) {
-			previousEntry = this.getEntryData(id, ONLY_COMMITTED)
-			if (previousEntry) {
-				previousVersion = previousEntry.version
-			}
-		}
 		if (transition) {
 			if (transition.invalidating) {
 				previousVersion = transition.version
 			} else if (transition.committed) {
-				if (transition.result === undefined)
+				if (transition.value === undefined)
 					previousVersion = null
 			} else if (!transition.isNew) {
 				// still resolving but this gives us the immediate version
 				previousVersion = transition.fromVersion
 			}// else the previousEntry should have correct version and status (or non at all if new)
-			transition.invalidating = true
 			transition.version = version
 		}
 		//console.log('invalidateEntry previous transition', id, this.name, 'from', previousVersion, 'to', version, ownEntry)
@@ -1656,9 +1651,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		}
 		if (!transition) {
 			this.transitions.set(id, transition = {
-				invalidating: true,
 				version,
-				previousValue: previousEntry && previousEntry.value
 			})
 		}
 
@@ -1667,6 +1660,15 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		let conditionalVersion // TODO: remove this
 		this.lastVersion = Math.max(this.lastVersion, Math.abs(version))
 		if (this.indices) {
+			if (!transition.fromValue) {
+				let previousEntry = this.getEntryData(id, ONLY_COMMITTED)
+				if (previousEntry) {
+					transition.fromValue = previousEntry.value
+					transition.fromVersion = previousEntry.version
+				}
+			}
+			transition.pending = true
+			
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
 				written = db.remove(id)
@@ -1677,6 +1679,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				event.whenWritten = written
 			return
 		}
+		transition.invalidating = true
 
 		if (event && event.type === 'deleted') {
 			// completely empty entry for deleted items
