@@ -726,20 +726,21 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return event
 	}
 
+	static saveDBVersions() {
+		this.rootDB.putSync(DB_VERSION_KEY, {
+			dbVersion: this.expectedDBVersion,
+			childStores: this.childStores && this.childStores.map(childStore => ({
+				name: childStore.name,
+				dbVersion: childStore.dbVersion,
+				invalidationIdentifier: childStore.invalidationIdentifier
+			}))
+		})
+	}
+
 	static updateDBVersion() {
 		let version = this.startVersion
 		this.dbVersion = this.expectedDBVersion
-		if (this.rootStore == this) {
-			this.rootDB.putSync(DB_VERSION_KEY, {
-				dbVersion: this.expectedDBVersion,
-				childStores: this.childStores && this.childStores.map(childStore => ({
-					name: childStore.name,
-					dbVersion: childStore.dbVersion,
-					invalidationIdentifier: childStore.invalidationIdentifier
-				}))
-			})
-		} else
-			this.rootStore.updateDBVersion()
+		this.rootStore.saveDBVersions()
 		return version
 	}
 
