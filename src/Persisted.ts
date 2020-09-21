@@ -1421,25 +1421,20 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static get(id, mode?) {
 		let context = getCurrentContext()
 		return when(this.whenUpdatedInContext(), () => {
-			let transition = this.transitions.get(id)
-			let entry = transition || this.getEntryData(id, mode ? NO_CACHE : 0)
+			let entry = this.db.getEntry(id, mode ? NO_CACHE : 0)
 			if (entry) {
 				if (entry.value == null) { // or only undefined?
-					let oldTransition = transition
+					let abortables = entry.abortables
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
-					let isNew
-					if (entry.fromValue == null)
-						isNew = true
-					// else TODO: if there is an un-owned entry, we should actually do a conditional write to make sure it hasn't changed
-					transition = this.runTransform(id, entry.version, transition, mode)
-					if (oldTransition && oldTransition.abortables) {
+					this.runTransform(id, entry, mode)
+					if (abortables) {
 						// if it is still in progress, we can abort it and replace the result
-						oldTransition.replaceWith = transition.value
-						for (let abortable of oldTransition.abortables) {
+						//oldTransition.replaceWith = transition.value
+						for (let abortable of abortables) {
 							abortable()
 						}
 					}
-					return transition.value
+					return entry.value
 				}
 				if (context) {
 					context.setVersion(entry.version)
@@ -1452,7 +1447,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let version = getNextVersion()
 			if (context)
 				context.setVersion(version)
-			transition = this.runTransform(id, version, transition, mode)
+			entry = this.runTransform(id, version, transition, mode)
 			when(transition.value, (result) => {
 				if (result !== undefined && !transition.invalidating) {
 					let event = new DiscoveredEvent()
@@ -1477,9 +1472,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			})
 		}
 		transition.abortables = []
+		let cache = this.db.cache
 		const removeTransition = () => {
-			if (this.transitions.get(id) === transition && !transition.invalidating)
-				this.transitions.delete(id)
+			if (cache.get(id) === entry && !transition.invalidating)
+				cache.delete(id)
 		}
 
 		let hasPromises
@@ -1628,6 +1624,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static invalidateEntry(id, event, by) {
+		this.db.get(id)
 		let version = event.version
 		let transition = this.transitions.get(id)
 		let previousVersion
