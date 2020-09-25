@@ -418,6 +418,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static openRootDatabase() {
 		const options = {
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
+			useFloat32: 4, // DECIMAL_FIT
 		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
