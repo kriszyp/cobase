@@ -211,6 +211,7 @@ export const jsonMediaType = {
 	q: 0.9, // prefer dpack
 	parse: (content) => content.length > 0 ? JSON.parse(content) : undefined, // tolerate empty requests
 	serialize(data, connection, parameters) {
+		return JSON.stringify(data)
 		connection.response.headers['Transfer-Encoding'] = 'chunked'
 		return new JSONStream({
 			value: data,
