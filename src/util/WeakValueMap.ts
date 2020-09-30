@@ -1,10 +1,12 @@
 // this provides a weak-valued map to ensure we only have a single instance of an object per id, but can still be GC-ed
 export let WeakValueMap
 try {
-	let NativeWeakValueMap = require('weakvaluemap')
+	const { WeakLRUCache } = require('weak-lru-cache')
 	let allInstances = []
 	WeakValueMap = function() {
-		let map = new NativeWeakValueMap()
+		let map = new WeakLRUCache([], {
+			expirer: false,
+		})
 		allInstances.push(map)
 		return map
 	}

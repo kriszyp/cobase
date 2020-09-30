@@ -142,10 +142,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.ready
 			instancesById = this.instancesById
 		}
-		let instance = instancesById.get(id)
+		let instance = instancesById.getValue(id)
 		if (!instance) {
 			instance = new this(id)
-			instancesById.set(id, instance)
+			instancesById.setValue(id, instance)
 		}
 		return instance
 	}
@@ -415,11 +415,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		return aggregateVersion ^ (this.version || 0)
 	}
-	static openRootDatabase() {
+	static openDatabase() {
 		const options = {
-			noMemInit: true,
+			compression: true,
 			useFloat32: 3, // DECIMAL_ROUND
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
+			cache: true,
+			noMemInit: true,
 		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
@@ -438,11 +440,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.rootDB = open(this.dbFolder + '/' + this.name + EXTENSION, options)
 
 		Object.assign(this, this.rootDB.get(DB_VERSION_KEY))
-		return this.prototype.db = this.db = this.openDB(this)
-	}
-
-	static openDatabase() {
-		this.Sources[0].openChildDB(this)
+		this.prototype.db = this.db = this.openDB(this)
+		return true
 	}
 
 	static initialize() {
@@ -460,13 +459,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				Source.start()
 			Source.notifies(this)
 		}
-		let isRoot
-		if (this.Sources && this.Sources.length > 0 && !this.useOwnDatabase) {
-			this.openDatabase()
-		} else {
-			this.openRootDatabase()
-			isRoot = true
-		}
+		let isRoot = this.openDatabase()
 		this.instancesById.name = this.name
 		return when(this.getStructureVersion(), structureVersion => {
 			this.expectedDBVersion = (structureVersion || 0) ^ (DB_FORMAT_VERSION << 12)
@@ -649,7 +642,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static instanceSetUpdated(event) {
-		let instanceIds = instanceIdsMap.get(this.name)
+		let instanceIds = instanceIdsMap.getValue(this.name)
 		if (instanceIds) {
 			instanceIds.updated(event)
 		}
@@ -710,7 +703,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		if (id) {
 			let instance
-			instance = this.instancesById.get(id)
+			instance = this.instancesById.getValue(id)
 			if (instance)
 				instance.updated(event, nextBy)
 		}
@@ -817,7 +810,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return whenReady
 	}
 	static get instanceIds() {
-		let instanceIds = instanceIdsMap.get(this.name)
+		let instanceIds = instanceIdsMap.getValue(this.name)
 		if (!instanceIds) {
 			instanceIdsMap.set(this.name, instanceIds = new InstanceIds())
 			instanceIds.Class = this
@@ -1011,6 +1004,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static openDB(store, asIndex?) {
 		let db = store.db = this.rootDB.openDB(store.dbName || store.name, {
 			compression: true,
+			useFloat32: 3, // DECIMAL_ROUND
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 			useVersions: !asIndex,
 		})
@@ -1167,23 +1161,19 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 			}
 			this.transitions.set(id, transition)
 		}
-		this.clearEntryCache(id)
-		return this.saveValue(id, value, entry)
+		return this.saveValue(id, entry)
 	}
 
 	_entryCache: Map<any, any>
 
-	static saveValue(id, value, previousEntry, conditionalVersion?) {
-		let transition = this.transitions.get(id)
-		if (!transition)
-			return
-		let version = transition.version
+	static saveValue(id, entry, conditionalVersion?) {
+		let version = entry.version
 		this.highestVersionToIndex = Math.max(this.highestVersionToIndex || 0, version)
-		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, value, transition)) : []
+		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, entry)) : []
 		let promises = forValueResults.filter(promise => promise && promise.then)
 
 		const readyToCommit = (forValueResults) => {
-			if (transition.invalidating)
+			if (entry.version !== version)
 				return
 			let committed = this.whenValueCommitted = this.db.ifVersion(id, conditionalVersion, () => {
 				// the whole set of writes for this entry and downstream indices are committed one transaction, conditional on the previous version
@@ -1192,38 +1182,26 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 						result.commit()
 				}
 				let committed
-				transition.fromVersion = version
+				let value = entry.value
 				//console.log('conditional header for writing transform ' + (value ? 'write' : 'delete'), id, this.name, conditionalVersion)
 				if (value === undefined) {
 					if (conditionalVersion === null) {
 						// already an undefined entry, nothing to do (but clear out the transition)
-						if (this.transitions.get(id) == transition && !transition.invalidating) {
-							this.transitions.delete(id)
+						if (this.db.cache.getEntry(id) == entry && entry.version === version) {
+							this.db.cache.delete(id)
 							return
 						}
 					} else {
-						transition.committed = this.whenWritten = committed = this.db.remove(id)
+						this.whenWritten = committed = this.db.remove(id)
 					}
 				} else {
-					transition.committed = this.whenWritten = committed = this.db.put(id, value, version)
-					transition.pending = false
-					let entryCache = this._entryCache
-					if (entryCache && value && typeof value == 'object') {
-						let entry = {
-							version,
-							value
-						}
-						if (value)
-							value[ENTRY] = entry
-						entryCache.set(id, entry)
-						expirationStrategy.useEntry(entry)
-					}
+					this.whenWritten = committed = this.db.put(id, value, version)
 				}
 			})
 
 			return committed.then((successfulWrite) => {
-				if (this.transitions.get(id) == transition && !transition.invalidating)
-					this.transitions.delete(id)
+				//if (this.transitions.get(id) == transition && !transition.invalidating)
+				//	this.transitions.delete(id)
 				if (!successfulWrite) {
 					console.log('unsuccessful write of transform, data changed, updating', id, this.name, version, conditionalVersion, this.db.get(id))
 					this.clearEntryCache(id)
@@ -1243,7 +1221,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		if (promises.length == 0)
 			return readyToCommit(forValueResults)
 		else
-			return (transition.whenIndexed = Promise.all(forValueResults)).then(readyToCommit)
+			return (entry.whenIndexed = Promise.all(forValueResults)).then(readyToCommit)
 	}
 
 	static reads = 0
@@ -1423,7 +1401,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return when(this.whenUpdatedInContext(), () => {
 			let entry = this.db.getEntry(id, mode ? NO_CACHE : 0)
 			if (entry) {
-				if (entry.value == null) { // or only undefined?
+				if (!entry.value) { // or only undefined?
 					let abortables = entry.abortables
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
 					this.runTransform(id, entry, mode)
@@ -1447,9 +1425,13 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let version = getNextVersion()
 			if (context)
 				context.setVersion(version)
-			entry = this.runTransform(id, version, transition, mode)
-			when(transition.value, (result) => {
-				if (result !== undefined && !transition.invalidating) {
+			entry = {
+				version
+			}
+			this.db.cache.setManually(id, entry) // enter in cache without LRFU tracking, keeping it in memory
+			this.runTransform(id, entry, mode)
+			when(entry.value, (result) => {
+				if (result !== undefined && !entry.invalidating) {
 					let event = new DiscoveredEvent()
 					event.triggers = [ DISCOVERED_SOURCE ]
 					event.source = { constructor: this, id }
@@ -1461,20 +1443,15 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					})
 				}
 			})
-			return transition.value
+			return entry.value
 		})
 	}
 	static whenValueCommitted: Promise<any>
-	static runTransform(id, version, transition, mode) {
-		if (!transition) {
-			this.transitions.set(id, transition = {
-				version
-			})
-		}
-		transition.abortables = []
+	static runTransform(id, entry, mode) {
+		entry.abortables = []
 		let cache = this.db.cache
 		const removeTransition = () => {
-			if (cache.get(id) === entry && !transition.invalidating)
+			if (cache.get(id) === entry && !entry.invalidating)
 				cache.delete(id)
 		}
 
@@ -1487,29 +1464,29 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			return data
 		}) : []
 		try {
-			transition.value = when(when(hasPromises ? Promise.all(inputData) : inputData, inputData => {
+			entry.value = when(when(hasPromises ? Promise.all(inputData) : inputData, inputData => {
 				if (inputData.length > 0 && inputData[0] === undefined && !this.sourceOptional) // first input is undefined, we pass through
 					return
 				let context = getCurrentContext()
 				let transformContext = context ? context.newContext() : new RequestContext(null, null)
-				transformContext.abortables = transition.abortables
+				transformContext.abortables = entry.abortables
 				return transformContext.executeWithin(() => this.prototype.transform.apply({ id }, inputData))
 			}), result => {
-				if (transition.invalidating) {
-					if (transition.replaceWith) {
-						return transition.replaceWith
+				if (entry.invalidating) {
+					if (entry.replaceWith) {
+						return entry.replaceWith
 					}
 					return result
 				} // else normal transform path
-				transition.value = result
-				const conditionalVersion = transition.fromVersion
+				entry.value = result
+				const conditionalVersion = entry.fromVersion
 
-				this.saveValue(id, result, null, conditionalVersion)
+				this.saveValue(id, entry, conditionalVersion)
 				return result
 			}, (error) => {
 				removeTransition()
 				if (error.__CANCEL__) {
-					return transition.replaceWith
+					return entry.replaceWith
 				}
 				throw error
 			})
@@ -1517,7 +1494,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			removeTransition()
 			throw error
 		}
-		return transition
+		return entry
 	}
 
 	getValue() {
@@ -1607,7 +1584,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		let idCount = 0
 		for (let id of allIds) {
 			idCount++
-			if (this.instancesById.get(id)) {
+			if (this.instancesById.getValue(id)) {
 				// instance already in memory
 				this.for(id).updated()
 				continue
@@ -1624,78 +1601,42 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static invalidateEntry(id, event, by) {
-		this.db.get(id)
-		let version = event.version
-		let transition = this.transitions.get(id)
-		let previousVersion
-		if (transition) {
-			if (transition.invalidating) {
-				previousVersion = transition.version
-			} else if (transition.committed) {
-				if (transition.value === undefined)
-					previousVersion = null
-			} else if (!transition.isNew) {
-				// still resolving but this gives us the immediate version
-				previousVersion = transition.fromVersion
-			}// else the previousEntry should have correct version and status (or non at all if new)
-			transition.version = version
-		}
-		//console.log('invalidateEntry previous transition', id, this.name, 'from', previousVersion, 'to', version, ownEntry)
-		this.clearEntryCache(id)
-		if (event && event.sourceProcess) {
-			// if it came from another process we can count on it to have written the update
-			return
-		}
-		if (!transition) {
-			this.transitions.set(id, transition = {
-				version,
-			})
-		}
-
 		let db = this.db
 		let written
-		let conditionalVersion // TODO: remove this
-		this.lastVersion = Math.max(this.lastVersion, Math.abs(version))
+		if (event && event.sourceProcess) {
+			// if it came from another process we can count on it to have written the update
+			db.cache.delete(id) // clear from cache
+			return
+		}
+		let version = event.version
 		if (this.indices) {
-			if (!transition.fromValue) {
-				let previousEntry = this.getEntryData(id, ONLY_COMMITTED)
-				if (previousEntry) {
-					transition.fromValue = previousEntry.value
-					transition.fromVersion = previousEntry.version
+			let entry = db.getEntry(id)
+			if (entry) {
+				db.cache.expirer.delete(entry) // don't track in LRFU, so it remains pinned in memory
+				entry.value = null // set as invalidated
+				if (!entry.fromVersion)
+					entry.fromVersion = entry.version
+				if (event && event.type === 'deleted') {
+					// completely empty entry for deleted items
+					written = db.remove(id)
 				}
+			} else {
+				entry = {}
+				db.cache.setManually(id, entry) // enter in cache without LRFU tracking, keeping it in memory
 			}
-			transition.pending = true
-			
+			entry.version = version // new version
+			this.forQueueEntry(id)
+		} else {
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
 				written = db.remove(id)
+			} else {
+				written = db.put(id, null, version)
 			}
-			this.forQueueEntry(id)
-			this.whenWritten = written
-			if (!event.whenWritten)
-				event.whenWritten = written
-			return
-		}
-		transition.invalidating = true
-
-		if (event && event.type === 'deleted') {
-			// completely empty entry for deleted items
-			written = db.remove(id)
-		} else {
-			//console.log('conditional header for invaliding entry ', id, this.name, conditionalVersion)
-			// if we have downstream indices, we mark this entry as "owned" by this process
-			written = db.put(id, null, version, previousVersion)
 		}
 		this.whenWritten = written
 		if (!event.whenWritten)
 			event.whenWritten = written
-		const finished = (result) => {
-			//console.log('invalidateEntry finished with', id, this.name, result)
-			if (this.transitions.get(id) === transition && transition.version === version) {
-				this.transitions.delete(id)
-			}
-		}
-		written.then(finished, finished)
 	}
 
 	static async receiveRequest({ id, waitFor }) {

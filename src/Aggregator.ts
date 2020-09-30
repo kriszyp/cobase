@@ -5,11 +5,9 @@ const INITIALIZING_LAST_KEY = Buffer.from([1, 7])
 export class Aggregator extends PersistedBase {
 	static updateAggregate(previousEntry, entry) {
 	}
-	static forValue(id, value, indexRequest) {
-		indexRequest.value = value
+	static forValue(id, entry) {
 		return this.tryForQueueEntry(id, () => {
-			return when(indexRequest && indexRequest.previousEntry, previousEntry => when(this.Sources[0].get(id), value =>
-				this.updateAggregate(previousEntry && previousEntry.value, value)))
+			this.updateAggregate(entry.previousValue, entry.value)
 		})
 	}
 	static forQueueEntry(id) {

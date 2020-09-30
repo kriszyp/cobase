@@ -68,8 +68,7 @@ export const Index = ({ Source }) => {
 		static indexingProcess: Promise<any>
 		static eventLog = []
 
-		static forValue(id, value, transition) {
-			transition.value = value
+		static forValue(id, transition) {
 			return this.tryForQueueEntry(id, () => this.indexEntry(id, transition))
 		}
 		static forQueueEntry(id) {
@@ -383,7 +382,8 @@ export const Index = ({ Source }) => {
 		}
 
 		static openDatabase() {
-			return Source.openChildDB(this, true)
+			Source.openChildDB(this, true)
+			return false // is not root
 		}
 		static getIdsFromKey(key) {
 			return Source.getIdsFromKey(key)
