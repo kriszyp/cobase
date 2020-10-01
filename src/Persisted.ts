@@ -1711,7 +1711,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		} else {
 			//console.log('conditional header for invaliding entry ', id, this.name, conditionalVersion)
 			// if we have downstream indices, we mark this entry as "owned" by this process
-			written = db.put(id, ownEntry ? process.pid : ownEntry === false ? previousEntry.value : 0, version, previousVersion)
+			written = db.put(id, 0, version, previousVersion)
 		}
 		if (ownEntry === null) {
 			previousEntry.value = undefined
@@ -1719,7 +1719,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		this.whenWritten = written
 		if (!event.whenWritten)
 			event.whenWritten = written
-		if (ownEntry !== false && this.queue) {
+		if (this.queue) {
 			this.enqueue(id, event, written.then((result) => {
 				if (result === false) {
 					console.log('Value had changed during invalidation', id, this.name, previousVersion, version, conditionalVersion)
