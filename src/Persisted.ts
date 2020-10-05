@@ -1229,14 +1229,18 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					console.log('unsuccessful write of transform, data changed, updating', id, this.name, version, conditionalVersion, this.db.get(id))
 					this.clearEntryCache(id)
 					let entry = this.getEntryData(id, NO_CACHE)
-					if (entry.version > 0) {
-						return
-					}
-					entry.value = value // use the new value since indices already committed there updates
-					entry.processId = process.pid
-					let event = new ReloadEntryEvent()
-					if (entry)
+					let event
+					if (!entry) {
+						event = new DeletedEvent()
+					} else {
+						if (entry.version > 0) {
+							return
+						}
+						entry.value = value // use the new value since indices already committed there updates
+						entry.processId = process.pid
+						event = new ReloadEntryEvent()
 						event.version = entry.version
+					}
 					if (this.queue)
 						this.enqueue(id, event, entry)
 					this.updated(event, { id })
