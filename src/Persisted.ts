@@ -503,35 +503,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.rootStore.whenUpgraded = this.rootStore.whenUpgraded.then(() => whenThisUpgraded)
 		return whenThisUpgraded
 	}
-	static async findOwnedInvalidations(pid) {
-		let unfinishedIds = new Set()
-		let lastWrite
-		let i = 0;
-		for (let { key, version } of this.db.getRange({
-			start: Buffer.from([1, 255]),
-			values: false,
-			versions: true
-		})) {
-			if (version < 0) { // looking for owned invalidated entries, negative version indicates invalidated
-				if (this.db.get(key)) { // non-zero value indicates process ownership
-					unfinishedIds.add(key)
-					if (this.queue)
-						this.queue.set(key, null)
-					this.clearEntryCache(key)
-					if (this.transitions) // TODO: Remove if once we aren't calling this on indices
-						this.transitions.delete(key)
-				}
-			}
-			if (i++ % 1000 == 0)
-				await delay(0)
-		}
-		if (unfinishedIds.size > 0) {
-			for (let index of this.indices) {
-				await index.clearEntries(unfinishedIds)
-			}
-			this.requestProcessing(30)
-		}
-	}
 	static cleanupDeadProcessReference(pid, initializingProcess) {
 		// error connecting to another process, which means it is dead/old and we need to clean up
 		// and possibly take over initialization
@@ -962,8 +933,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static forQueueEntry(id) {
 		return this.tryForQueueEntry(id, () =>
 			when(this.get(id, INDEXING_MODE), () => {
-				let transition = this.transitions.get(id)
-				return when(transition && transition.whenIndexed, () => {
+				let entry = this.db.getEntry(id)
+				return when(entry && entry.whenIndexed, () => {
 					if (this.queue)
 						this.queue.delete(id)
 				})
@@ -1116,12 +1087,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		lastUpdate: number
 	}[]
 
-	static get transitions() {
-		return this._transitions || (this._transitions = new Map())
-	}
 	static get(id, mode?) {
 		let context = getCurrentContext()
-		let entry = this.transitions.get(id) || this.getEntryData(id, mode ? NO_CACHE : 0)
+		let entry = this.db.getEntry(id, mode ? NO_CACHE : 0)
 		if (entry) {
 			if (context) {
 				context.setVersion(entry.version)
@@ -1140,7 +1108,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	}
 
 	static is(id, value, event) {
-		let entry = this.transitions.get(id) || this.getEntryData(id, NO_CACHE)
+		let entry = this.db.getEntry(id, NO_CACHE)
 		if (!event) {
 			event = entry ? new ReplacedEvent() : new AddedEvent()
 		}
@@ -1149,17 +1117,16 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		event.version = getNextVersion()
 
 		this.updated(event, { id })
-		let transition = this.transitions.get(id)
-		if (transition) {
-			transition.invalidating = false
-			transition.value = value
-			transition.fromVersion = Math.abs(transition.version || event.version)
+		if (entry) {
+			entry.invalidating = false
+			entry.value = value
+			entry.fromVersion = Math.abs(entry.version || event.version)
 		} else {
-			transition = {
+			entry = {
 				fromVersion: event.version,
 				result: value,
 			}
-			this.transitions.set(id, transition)
+//			this.d.set(id, entry)
 		}
 		return this.saveValue(id, entry)
 	}
@@ -1420,7 +1387,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						return NOT_MODIFIED
 					}
 				}
-				return entry.value
+				return deepFreeze(entry.value)
 			}
 			let version = getNextVersion()
 			if (context)
@@ -1432,6 +1399,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			this.runTransform(id, entry, mode)
 			when(entry.value, (result) => {
 				if (result !== undefined && !entry.invalidating) {
+					deepFreeze(result)
 					let event = new DiscoveredEvent()
 					event.triggers = [ DISCOVERED_SOURCE ]
 					event.source = { constructor: this, id }
@@ -1644,11 +1612,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			console.log('waiting for entity to commit', this.name, id)
 			this.clearEntryCache(id)
 			await this.get(id)
-			let transition = this.transitions.get(id)
-			if (transition) {
+			let entry = this.db.getEntry(id)
+			if (entry) {
 				// wait for get to truly finish and be committed
-				await transition.whenIndexed
-				await transition.committed
+				await entry.whenIndexed
+				await entry.committed
 			}
 			// return nothing, so we don't create any overhead between processes
 		}
@@ -1851,3 +1819,13 @@ export class Invalidated {
 }
 const delay = ms => new Promise(resolve => ms >= 1 ? setTimeout(resolve, ms) : setImmediate(resolve))
 const primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199]
+let deepFreeze = process.env.NODE_ENV == 'development'  ? (object) => {
+	if (object && typeof object == 'object') {
+		for (let key in object) {
+			let value = object[key]
+			if (typeof value == 'object')
+				deepFreeze(value)
+		}
+	}
+	return object
+} : (object) => object
