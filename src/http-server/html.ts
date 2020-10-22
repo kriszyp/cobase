@@ -1,12 +1,12 @@
 let resourceEditor
 const fs = require('fs')
-import { createSerializeStream } from 'dpack'
+import { PackrStream } from 'msgpackr'
 export const htmlMediaType = {
 	q: 0.2,
 	serialize(data, connection, parameters) {
 		// TODO: Cache this
 		connection.response.headers['transfer-encoding'] = 'chunked'
-		var stream = createSerializeStream()
+		var stream = new PackrStream()
 		stream.push(fs.readFileSync(require.resolve('../../client/resource-viewer.html')))
 		const push = stream.push
 		stream.push = function(chunk) {
