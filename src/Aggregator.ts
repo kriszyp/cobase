@@ -19,7 +19,7 @@ export class Aggregator extends PersistedBase {
 		})
 	}
 	static get(id, mode?) {
-		let entry = this.getEntryData(id, mode ? 2: 0)
+		let entry = this.db.getEntry(id, mode ? 2: 0)
 		// don't use versions
 		return entry && entry.value
 	}

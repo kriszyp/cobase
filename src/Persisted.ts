@@ -1172,8 +1172,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				//	this.transitions.delete(id)
 				if (!successfulWrite) {
 					console.log('unsuccessful write of transform, data changed, updating', id, this.name, version, conditionalVersion, this.db.get(id))
-					this.clearEntryCache(id)
-					let entry = this.getEntryData(id, NO_CACHE)
+					this.db.cache.delete(id)
+					let entry = this.db.getEntry(id)
 					let event
 					if (entry && entry.version > version) {
 						event = new ReloadEntryEvent()
@@ -1194,50 +1194,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	static reads = 0
 	static cachedReads = 0
-	static getEntryData(id, mode) {
-		/*let context = getCurrentContext()
-		let transition = this.transitions.get(id) // if we are transitioning, return the transition result
-		if (transition) {
-			if (transition.invalidating) {
-				return transition
-			} else if (mode !== ONLY_COMMITTED || transition.committed) {
-				return {
-					value: transition.value,
-					version: Math.abs(transition.fromVersion),
-				}
-			}
-		}
-		this.reads++*/
-		let entryCache = this._entryCache
-		if (entryCache) {
-			// TODO: read from DB if context specifies to look for a newer version
-			let entry = entryCache.get(id)
-			if (entry && entry.version) {
-				this.cachedReads++
-				if (!mode)
-					expirationStrategy.useEntry(entry)
-				return entry
-			}
-		} else {
-			this._entryCache = entryCache = new WeakValueMap()
-		}
-		let db = this.db
-		let value = db.get(id)
-		if (value == undefined)
-			return
-		let version = getLastVersion()
-		let entry = {
-			value,
-			version,
-			size: getLastEntrySize()
-		}
-		if (value && typeof value == 'object' && !mode) {
-			entryCache.set(id, entry)
-			value[ENTRY] = entry
-			expirationStrategy.useEntry(entry, entry.size)
-		}
-		return entry
-	}
 
 	static getInstanceIds(range: IterableOptions) {
 		let db = this.db
