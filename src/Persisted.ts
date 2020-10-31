@@ -1376,6 +1376,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static runTransform(id, entry, mode) {
 		entry.abortables = []
 		let cache = this.db.cache
+		cache.setManually(id, entry) // ensure it is in the cache map
 		const removeTransition = () => {
 			if (cache.get(id) === entry && !entry.invalidating)
 				cache.delete(id)
