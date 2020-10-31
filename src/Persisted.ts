@@ -35,6 +35,7 @@ const AS_SOURCE = {}
 const EXTENSION = '.mdb'
 const DB_FORMAT_VERSION = 0
 const allStores = new Map()
+const SAVED_WITH_IS = Symbol('saved-with-is')
 
 export const ENTRY = Symbol('entry')
 
@@ -550,7 +551,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static reset() {
-		this.Sources[0].wasReset = false
+		if (this.Sources && this.Sources[0])
+			this.Sources[0].wasReset = false
 		this.clearAllData()
 		this.updateDBVersion()
 		this.resumeQueue()
@@ -666,7 +668,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event.type === 'discovered' || event.type === 'added' || event.type === 'deleted') {
 			this.instanceSetUpdated(event)
 		}
-		if (event.type === 'reload-entry' || event.type === 'discovered' ) {
+		if (event.type === 'reload-entry' || event.type === 'discovered' || event[SAVED_WITH_IS]) {
 			// if we are being notified of ourself being created, ignore it
 			// do nothing
 		} else if (id) {
@@ -828,7 +830,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (error.isTemporary) {
 				let retries = indexRequest.retries = (indexRequest.retries || 0) + 1
 				this.state = 'retrying index in ' + retries * 1000 + 'ms'
-				if (retries < 4) {
+				if (retries < (this.maxRetries || 1000)) {
 					this.isRetrying = true
 					await delay(retries * 1000)
 					this.isRetrying = false
@@ -934,7 +936,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static forQueueEntry(id) {
 		return this.tryForQueueEntry(id, () =>
 			when(this.get(id, INDEXING_MODE), () => {
-				let entry = this.db.getEntry(id)
+				let entry = this.db.cache.get(id)
 				return when(entry && entry.whenIndexed, () => {
 					if (this.queue)
 						this.queue.delete(id)
@@ -979,6 +981,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			useFloat32: 3, // DECIMAL_ROUND
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 			useVersions: !asIndex,
+			cache: !asIndex,
 		})
 		store.rootDB = this.rootDB
 		return db
@@ -1116,26 +1119,21 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		event.triggers = [ DISCOVERED_SOURCE ]
 		event.source = { constructor: this, id }
 		event.version = getNextVersion()
+		event[SAVED_WITH_IS] = true
 
 		this.updated(event, { id })
 		if (entry) {
-			entry.invalidating = false
 			entry.value = value
-			entry.fromVersion = Math.abs(entry.version || event.version)
 		} else {
 			entry = {
-				fromVersion: event.version,
-				result: value,
+				value,
 			}
-//			this.d.set(id, entry)
 		}
-		return this.saveValue(id, entry)
+		entry.version = event.version
+		return this.saveValue(id, entry, event.version)
 	}
 
-	_entryCache: Map<any, any>
-
-	static saveValue(id, entry, conditionalVersion?) {
-		let version = entry.version
+	static saveValue(id, entry, version?) {
 		this.highestVersionToIndex = Math.max(this.highestVersionToIndex || 0, version)
 		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, entry)) : []
 		let promises = forValueResults.filter(promise => promise && promise.then)
@@ -1143,6 +1141,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		const readyToCommit = (forValueResults) => {
 			if (entry.version !== version)
 				return
+			entry.abortables = null // indicate that this is no longer in process
+			let conditionalVersion = entry.fromVersion
 			let committed = this.whenValueCommitted = this.db.ifVersion(id, conditionalVersion, () => {
 				// the whole set of writes for this entry and downstream indices are committed one transaction, conditional on the previous version
 				for (let result of forValueResults) {
@@ -1175,7 +1175,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 					this.db.cache.delete(id)
 					let entry = this.db.getEntry(id)
 					let event
-					if (entry && entry.version > version) {
+					if (entry && entry.version >= version) {
 						event = new ReloadEntryEvent()
 						event.version = entry.version
 					} else {
@@ -1344,7 +1344,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 						return NOT_MODIFIED
 					}
 				}
-				return deepFreeze(entry.value)
+				when(entry.value, (result) => deepFreeze)
+				return entry.value
 			}
 			let version = getNextVersion()
 			if (context)
@@ -1352,11 +1353,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			entry = {
 				version
 			}
-			this.db.cache.setManually(id, entry) // enter in cache without LRFU tracking, keeping it in memory
+			this.db.cache.setManually(id, entry) // enter in cache without LRFU tracking, keeping it in memory, this should be entered into LRFU once it is committed by the lmdb-store caching store logic
 			this.runTransform(id, entry, mode)
 			when(entry.value, (result) => {
 				if (result !== undefined && !entry.invalidating) {
-					deepFreeze(result)
+					deepFreeze(result, 0)
 					let event = new DiscoveredEvent()
 					event.triggers = [ DISCOVERED_SOURCE ]
 					event.source = { constructor: this, id }
@@ -1379,7 +1380,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			if (cache.get(id) === entry && !entry.invalidating)
 				cache.delete(id)
 		}
-
+		let version = entry.version
 		let hasPromises
 		let inputData = this.Sources ? this.Sources.map(source => {
 			let data = source.get(id, AS_SOURCE)
@@ -1397,16 +1398,14 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				transformContext.abortables = entry.abortables
 				return transformContext.executeWithin(() => this.prototype.transform.apply({ id }, inputData))
 			}), result => {
-				if (entry.invalidating) {
+				if (entry.version != version) {
 					if (entry.replaceWith) {
 						return entry.replaceWith
 					}
 					return result
 				} // else normal transform path
 				entry.value = result
-				const conditionalVersion = entry.fromVersion
-
-				this.saveValue(id, entry, conditionalVersion)
+				this.saveValue(id, entry, version)
 				return result
 			}, (error) => {
 				removeTransition()
@@ -1446,7 +1445,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		event = super.updated(event, by)
 		if (this.queue) {
 			if (by && by.constructor === this || // our own instances can notify us of events, ignore them
-				this.otherProcesses && event.sourceProcess && 
+				this.otherProcesses && event.sourceProcess &&
 				!(id && this.queue.has(id)) && // if it is in our queue, we need to update the version number in our queue
 				(this.otherProcesses.includes(event.sourceProcess) || // another process should be able to handle this
 					this.otherProcesses.some(otherProcessId => otherProcessId < process.pid))) { // otherwise, defer to the lowest number process to handle it
@@ -1539,7 +1538,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			if (entry) {
 				db.cache.expirer.delete(entry) // don't track in LRFU, so it remains pinned in memory
 				entry.value = null // set as invalidated
-				if (!entry.fromVersion)
+				if (!entry.abortables) // if this entry is in a transform and not committed, don't update fromVersion
 					entry.fromVersion = entry.version
 				if (event && event.type === 'deleted') {
 					// completely empty entry for deleted items
@@ -1776,12 +1775,14 @@ export class Invalidated {
 }
 const delay = ms => new Promise(resolve => ms >= 1 ? setTimeout(resolve, ms) : setImmediate(resolve))
 const primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199]
-let deepFreeze = process.env.NODE_ENV == 'development'  ? (object) => {
+let deepFreeze = process.env.NODE_ENV == 'development'  ? (object, depth) => {
+	if (depth > 100)
+		throw new Error('Max object depth exceeded or circular reference in data')
 	if (object && typeof object == 'object') {
 		for (let key in object) {
 			let value = object[key]
 			if (typeof value == 'object')
-				deepFreeze(value)
+				deepFreeze(value, (depth || 0) + 1)
 		}
 	}
 	return object
