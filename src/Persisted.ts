@@ -786,7 +786,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static get instanceIds() {
 		let instanceIds = instanceIdsMap.getValue(this.name)
 		if (!instanceIds) {
-			instanceIdsMap.set(this.name, instanceIds = new InstanceIds())
+			instanceIdsMap.setValue(this.name, instanceIds = new InstanceIds())
 			instanceIds.Class = this
 		}
 		return instanceIds
@@ -1353,7 +1353,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			entry = {
 				version
 			}
-			this.db.cache.setManually(id, entry) // enter in cache without LRFU tracking, keeping it in memory, this should be entered into LRFU once it is committed by the lmdb-store caching store logic
 			this.runTransform(id, entry, mode)
 			when(entry.value, (result) => {
 				if (result !== undefined && !entry.invalidating) {
@@ -1376,7 +1375,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static runTransform(id, entry, mode) {
 		entry.abortables = []
 		let cache = this.db.cache
-		cache.setManually(id, entry) // ensure it is in the cache map
+		// TODO: MIght not need to do this with set
+		cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory, this should be entered into LRFU once it is committed by the lmdb-store caching store logic
 		const removeTransition = () => {
 			if (cache.get(id) === entry && !entry.invalidating)
 				cache.delete(id)
@@ -1547,7 +1547,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				}
 			} else {
 				entry = {}
-				db.cache.setManually(id, entry) // enter in cache without LRFU tracking, keeping it in memory
+				db.cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory
 			}
 			entry.version = version // new version
 			this.forQueueEntry(id)
