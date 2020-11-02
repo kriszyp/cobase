@@ -35,7 +35,6 @@ const AS_SOURCE = {}
 const EXTENSION = '.mdb'
 const DB_FORMAT_VERSION = 0
 const allStores = new Map()
-const SAVED_WITH_IS = Symbol('saved-with-is')
 
 export const ENTRY = Symbol('entry')
 
@@ -668,8 +667,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event.type === 'discovered' || event.type === 'added' || event.type === 'deleted') {
 			this.instanceSetUpdated(event)
 		}
-		if (event.type === 'reload-entry' || event.type === 'discovered' || event[SAVED_WITH_IS]) {
-			// if we are being notified of ourself being created, ignore it
+		if (event.type === 'reload-entry' || event.type === 'discovered' || (by && by.invalidate === false)) {
+			// if we are being notified of ourself being created or directly set, ignore it
 			// do nothing
 		} else if (id) {
 			this.invalidateEntry(id, event, nextBy)
@@ -1119,9 +1118,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		event.triggers = [ DISCOVERED_SOURCE ]
 		event.source = { constructor: this, id }
 		event.version = getNextVersion()
-		event[SAVED_WITH_IS] = true
 
-		this.updated(event, { id })
+		this.updated(event, { id, invalidate: false })
 		if (entry) {
 			entry.value = value
 		} else {
