@@ -773,12 +773,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (waitForIndexing) {
 			let currentContext = getCurrentContext()
 			let updateContext = (currentContext && currentContext.expectedVersions) ? currentContext : DEFAULT_CONTEXT
-			return when(whenReady, () => {
+			return when(whenReady, () => this.whenIndexedAndCommitted)/*{
 				if (updateContext.expectedVersions && updateContext.expectedVersions[this.name] > this.lastIndexedVersion && this.queue && this.queue.size > 0) {
 					// if the expected version is behind, wait for processing to finish
 					return this.requestProcessing(1) // up the priority
 				}
-			})
+			})*/
 		}
 		return whenReady
 	}
@@ -1184,10 +1184,13 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				}
 			})
 		}
+		let whenIndexedAndCommitted
 		if (promises.length == 0)
-			return readyToCommit(forValueResults)
+			whenIndexedAndCommitted = readyToCommit(forValueResults)
 		else
-			return (entry.whenIndexed = Promise.all(forValueResults)).then(readyToCommit)
+			whenIndexedAndCommitted = (entry.whenIndexed = Promise.all(forValueResults)).then(readyToCommit)
+		entry.committed = whenIndexedAndCommitted
+		return whenIndexedAndCommitted
 	}
 
 	static reads = 0
@@ -1348,10 +1351,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let version = getNextVersion()
 			if (context)
 				context.setVersion(version)
-			entry = {
-				version
-			}
-			this.runTransform(id, entry, mode)
+			entry = { version }
+			this.db.cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory
+			entry = this.runTransform(id, entry, mode)
 			when(entry.value, (result) => {
 				if (result !== undefined && !entry.invalidating) {
 					deepFreeze(result, 0)
@@ -1371,15 +1373,22 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 	static whenValueCommitted: Promise<any>
 	static runTransform(id, entry, mode) {
+		let version = entry.version
 		entry.abortables = []
+		/*entry = {
+			version,
+			previousValue: entry.previousValue,
+			abortables: []
+		}
 		let cache = this.db.cache
 		// TODO: MIght not need to do this with set
 		cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory, this should be entered into LRFU once it is committed by the lmdb-store caching store logic
+		*/
 		const removeTransition = () => {
+			let cache = this.db.cache
 			if (cache.get(id) === entry && !entry.invalidating)
 				cache.delete(id)
 		}
-		let version = entry.version
 		let hasPromises
 		let inputData = this.Sources ? this.Sources.map(source => {
 			let data = source.get(id, AS_SOURCE)
@@ -1536,19 +1545,23 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			let entry = db.getEntry(id)
 			if (entry) {
 				db.cache.expirer.delete(entry) // don't track in LRFU, so it remains pinned in memory
-				entry.value = null // set as invalidated
-				if (!entry.abortables) // if this entry is in a transform and not committed, don't update fromVersion
+				if (!entry.abortables) { // if this entry is in a transform and not committed, don't update fromVersion
+					entry.previousValue = entry.value
 					entry.fromVersion = entry.version
-				if (event && event.type === 'deleted') {
-					// completely empty entry for deleted items
-					written = db.remove(id)
 				}
+				entry.value = null // set as invalidated
+				entry.version = version // new version
+				// for deleted events, let the transform do the removal
 			} else {
-				entry = {}
+				entry = { version }
 				db.cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory
 			}
-			entry.version = version // new version
-			this.forQueueEntry(id)
+			written = this.forQueueEntry(id).then(() => entry.committed)
+			let lastCompletion = this.whenIndexedAndCommitted = this.whenIndexedAndCommitted ?
+				Promise.all([this.whenIndexedAndCommitted, written]).then(() => {
+					if (this.whenIndexedAndCommitted == lastCompletion)
+						this.whenIndexedAndCommitted = null
+				}) : written
 		} else {
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
