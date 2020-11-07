@@ -1374,7 +1374,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	static whenValueCommitted: Promise<any>
 	static runTransform(id, entry, mode) {
 		let version = entry.version
-		entry.abortables = []
+		if (!entry.abortables)
+			entry.abortables = []
 		/*entry = {
 			version,
 			previousValue: entry.previousValue,
@@ -1548,20 +1549,24 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				if (!entry.abortables) { // if this entry is in a transform and not committed, don't update fromVersion
 					entry.previousValue = entry.value
 					entry.fromVersion = entry.version
+					entry.abortables = []
 				}
 				entry.value = null // set as invalidated
 				entry.version = version // new version
 				// for deleted events, let the transform do the removal
 			} else {
-				entry = { version }
+				entry = {
+					version,
+					abortables: [],
+				}
 				db.cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory
 			}
 			written = this.forQueueEntry(id).then(() => entry.committed)
-			let lastCompletion = this.whenIndexedAndCommitted = this.whenIndexedAndCommitted ?
-				Promise.all([this.whenIndexedAndCommitted, written]).then(() => {
+			let lastCompletion = this.whenIndexedAndCommitted = (this.whenIndexedAndCommitted ?
+				Promise.all([this.whenIndexedAndCommitted, written]) : written).then(() => {
 					if (this.whenIndexedAndCommitted == lastCompletion)
 						this.whenIndexedAndCommitted = null
-				}) : written
+				})
 		} else {
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
