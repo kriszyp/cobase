@@ -1545,7 +1545,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		if (this.indices) {
 			let entry = db.getEntry(id)
 			if (entry) {
-				db.cache.expirer.delete(entry) // don't track in LRFU, so it remains pinned in memory
+				db.cache.expirer.used(entry, -1) // key it pinned in memory
 				if (!entry.abortables) { // if this entry is in a transform and not committed, don't update fromVersion
 					entry.previousValue = entry.value
 					entry.fromVersion = entry.version
