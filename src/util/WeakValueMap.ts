@@ -4,7 +4,7 @@ try {
 	const { WeakLRUCache } = require('weak-lru-cache')
 	let allInstances = []
 	WeakValueMap = function() {
-		let map = new WeakLRUCache([], {
+		let map = new WeakLRUCache({
 			expirer: false,
 		})
 		allInstances.push(map)
