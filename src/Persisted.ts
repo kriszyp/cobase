@@ -1352,7 +1352,6 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			if (context)
 				context.setVersion(version)
 			entry = { version }
-			this.db.cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory
 			entry = this.runTransform(id, entry, mode)
 			when(entry.value, (result) => {
 				if (result !== undefined && !entry.invalidating) {
@@ -1380,13 +1379,10 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			version,
 			previousValue: entry.previousValue,
 			abortables: []
-		}
+		}*/
 		let cache = this.db.cache
-		// TODO: MIght not need to do this with set
 		cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory, this should be entered into LRFU once it is committed by the lmdb-store caching store logic
-		*/
 		const removeTransition = () => {
-			let cache = this.db.cache
 			if (cache.get(id) === entry && !entry.invalidating)
 				cache.delete(id)
 		}
