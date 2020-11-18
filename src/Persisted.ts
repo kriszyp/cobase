@@ -514,15 +514,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let invalidationState = db.get(deadProcessKey)
 			if (this.doesInitialization !== false) {
 				db.transaction(async () => {
-					if (invalidationState > 1) {
-						for (let store of [this, ...this.childStores]) {
-							let divided = invalidationState / store.invalidationIdentifier
-							if (divided >>> 0 == divided && store.indices) {
-								console.warn('Need to find invalidated entries in ', store.name)
-								//await store.findOwnedInvalidations(pid)
-							}
-						}
-					}
 					db.removeSync(deadProcessKey)
 				})
 			}
@@ -701,7 +692,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			childStores: this.childStores && this.childStores.map(childStore => ({
 				name: childStore.name,
 				dbVersion: childStore.dbVersion,
-				invalidationIdentifier: childStore.invalidationIdentifier
 			}))
 		})
 	}
@@ -1008,29 +998,19 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		})
 		if (index > -1) {
 			store.dbVersion = rootStore.childStores[index].dbVersion
-			store.invalidationIdentifier = rootStore.childStores[index].invalidationIdentifier
 			rootStore.childStores[index] = store
 		}
 		else {
 			// TODO: Do in a transation
 			rootStore.childStores.push(store)
-			for (let prime of primes) {
-				if (!rootStore.childStores.some(store => store.invalidationIdentifier == prime) && rootStore.invalidationIdentifier != prime) {
-					store.invalidationIdentifier = prime
-					break
-				}
-			}
 			this.rootDB.putSync(DB_VERSION_KEY, {
 				dbVersion: this.dbVersion,
 				childStores: this.childStores && this.childStores.map(childStore => ({
 					name: childStore.name,
 					dbVersion: childStore.dbVersion,
-					invalidationIdentifier: childStore.invalidationIdentifier
 				}))
 			})
 		}
-		if (!store.invalidationIdentifier)
-			throw new Error('Store must have invalidationIdentifier')
 		return store.db
 	}
 
@@ -1238,26 +1218,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static lastIndexedVersion: int
 	static initializeRootDB() {
 		let initializingProcess = super.initializeRootDB()
-		this.invalidationIdentifier = 2
-		this.rootDB.on('beforecommit', () => {
-			// before each commit, save the last version as well (if it has changed)
-			/*if (this.lastVersionCommitted === this.lastVersion)
-				return
-			let versionBuffer = Buffer.alloc(8)
-			writeUInt(versionBuffer, this.lastVersion)
-			this.db.put(LAST_VERSION_IN_DB_KEY, versionBuffer)
-			this.lastVersionCommitted = this.lastVersion*/
-
-			if (this.childStores) {
-				let indexCount = this.childStores.length
-				let invalidationState = 1
-				for (let childStore of [this, ...this.childStores]) {
-					if (childStore.queue && childStore.queue.size > 0)
-						invalidationState *= childStore.invalidationIdentifier
-				}
-				this.rootDB.put(this.processKey, invalidationState.toString())
-			}
-		})
 	}
 
 	static remove(id, event?) {

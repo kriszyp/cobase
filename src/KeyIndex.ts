@@ -15,6 +15,7 @@ const DEFAULT_INDEXING_DELAY = 60
 const INITIALIZATION_SOURCE = 'is-initializing'
 const INITIALIZATION_SOURCE_SET = new Set([INITIALIZATION_SOURCE])
 const COMPRESSED_STATUS_24 = 254
+const QUEUED_UPDATES = Symbol.for('qu')
 export interface IndexRequest {
 	previousEntry?: any
 	pendingProcesses?: number[]
@@ -55,6 +56,7 @@ export const Index = ({ Source }) => {
 	const processingSourceVersions = new Map<String, number>()
 	let pendingProcesses = false
 	let stateOffset = 0
+	let allQueuedUpdates = new Set()
 	// this is shared memory buffer between processes where we define what each process is currently indexing, so processes can determine if there are potentially conflicts
 	// in what is being processed
 	let indexingState: Buffer
@@ -67,6 +69,7 @@ export const Index = ({ Source }) => {
 		static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
 		static indexingProcess: Promise<any>
 		static eventLog = []
+		static queuedUpdateArrays = []
 
 		static forValue(id, transition) {
 			return this.tryForQueueEntry(id, () => this.indexEntry(id, transition))
@@ -198,7 +201,7 @@ export const Index = ({ Source }) => {
 					}
 					if (eventUpdateSources.length > 0) {
 						return (batchFinished || Promise.resolve()).then(() =>
-							this.sendUpdates(eventUpdateSources))
+							this.queueUpdates(eventUpdateSources))
 					}
 				}
 			}
@@ -233,6 +236,67 @@ export const Index = ({ Source }) => {
 			// don't do anything, we don't want these events to propagate through here, and we do indexing based on upstream queue
 		}
 
+		static queueUpdates(eventSources) {
+			if (!this.unsavedUpdates) {
+				this.unsavedUpdates = []
+				this.unsavedUpdates.id = this.unsavedQueuedId = (this.unsavedQueuedId || 0) + 1
+				if (this.queuedUpdateArrays.length == 0)
+					setTimeout(() =>
+						this.processQueuedUpdates())
+				this.queuedUpdateArrays.push(this.unsavedUpdates)
+			}
+			for ( const { key, triggers, sources } of eventSources) {
+				if (!allQueuedUpdates.has(key)) {
+					allQueuedUpdates.add(key)
+					this.unsavedUpdates.push(key)
+				}
+			}
+		}
+		static async processQueuedUpdates() {
+			let inProgress = []
+			while (this.queuedUpdateArrays.length) {
+				let updateArray = this.queuedUpdateArrays[0]
+				let l = updateArray.length
+				for (let i = updateArray.sent || 0; i < l; i++) {
+					let key = updateArray[i]
+					try {
+						let event = new ReplacedEvent()
+						allQueuedUpdates.delete(key)
+						super.updated(event, { // send downstream
+							id: key,
+							constructor: this
+						})
+						let whenWritten = event.whenWritten
+						if (whenWritten) {
+							inProgress.push(event.whenWritten)
+							if (inProgress.length > 100) {
+								await Promise.all(inProgress)
+								inProgress = []
+							}
+						}
+					} catch (error) {
+						this.warn('Error sending index updates', error)
+					}
+				}
+				if (updateArray.written) {
+					Promise.all(inProgress).then(() =>
+						this.db.remove([QUEUED_UPDATES, updateArray.id]))
+					this.queuedUpdateArrays.shift()
+				}
+				else {
+					if (l == updateArray.length) {
+						await Promise.all(inProgress)
+						inProgress = []
+					}
+					if (l == updateArray.length && this.unsavedUpdates == updateArray) {
+						this.unsavedUpdates = null // we sent all the entries before it was written, restart a new array
+						this.queuedUpdateArrays.shift()
+					}
+					else
+						updateArray.sent = l
+				}
+			}
+		}
 		static sendUpdates(eventSources) {
 			let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
 			// aggregate them by key so as to minimize the number of events we send
@@ -382,8 +446,33 @@ export const Index = ({ Source }) => {
 		}
 
 		static openDatabase() {
-			Source.openChildDB(this, true)
+			let db = Source.openChildDB(this, true)
+			db.on('beforecommit', () => {
+				if (this.unsavedUpdates && this.unsavedUpdates.length > 0) {
+					this.unsavedUpdates.written = true
+					db.put([QUEUED_UPDATES, this.unsavedQueuedId], this.unsavedUpdates)
+					this.unsavedUpdates = null
+				}
+			})
 			return false // is not root
+		}
+		static async initializeData() {
+			await super.initializeData()
+			let hadQueuedUpdates = this.queuedUpdateArrays.length > 0
+			for (let { key, value } of this.db.getRange({
+				start: [QUEUED_UPDATES, 0],
+				end: [QUEUED_UPDATES, 1e30],
+
+			})) {
+				value.id = key[1]
+				this.unsavedQueuedId = Math.max(this.unsavedQueuedId || 0, value.id)
+				this.queuedUpdateArrays.push(value)
+				for (let updateId of value) {
+					allQueuedUpdates.add(updateId)
+				}
+			}
+			if (this.queuedUpdateArrays.length > 0 && !hadQueuedUpdates)
+				this.processQueuedUpdates()
 		}
 		static getIdsFromKey(key) {
 			return Source.getIdsFromKey(key)
