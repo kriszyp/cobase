@@ -688,7 +688,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static saveDBVersions() {
 		this.rootDB.putSync(DB_VERSION_KEY, {
-			dbVersion: this.expectedDBVersion,
+			dbVersion: this.dbVersion,
 			childStores: this.childStores && this.childStores.map(childStore => ({
 				name: childStore.name,
 				dbVersion: childStore.dbVersion,
@@ -699,6 +699,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static updateDBVersion() {
 		let version = this.startVersion
 		this.dbVersion = this.expectedDBVersion
+		console.debug('saving db version', this.name, this.dbVersion)
 		this.rootStore.saveDBVersions()
 		return version
 	}
@@ -999,17 +1000,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (index > -1) {
 			store.dbVersion = rootStore.childStores[index].dbVersion
 			rootStore.childStores[index] = store
-		}
-		else {
-			// TODO: Do in a transation
-			rootStore.childStores.push(store)
-			this.rootDB.putSync(DB_VERSION_KEY, {
-				dbVersion: this.dbVersion,
-				childStores: this.childStores && this.childStores.map(childStore => ({
-					name: childStore.name,
-					dbVersion: childStore.dbVersion,
-				}))
-			})
 		}
 		return store.db
 	}

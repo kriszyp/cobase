@@ -39,7 +39,7 @@ export class Aggregator extends PersistedBase {
 	}
 	static updateDBVersion() {
 		if (!this.Sources[0].wasReset) // only reindex if the source didn't do it for us
-			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = Buffer.from([1, 255]))
+			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = true)
 		super.updateDBVersion()
 	}
 

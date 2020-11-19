@@ -173,7 +173,7 @@ export const Index = ({ Source }) => {
 							})
 							operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
 						}
-						if (!this.resumePromise)
+						if (!this.resumePromise && this.listeners && this.listeners.length > 0)
 							eventUpdateSources.push({ key, sources, triggers })
 					}
 				}
@@ -187,7 +187,7 @@ export const Index = ({ Source }) => {
 					type: 'del',
 					key: [ key, id ]
 				})
-				if (!this.resumePromise)
+				if (!this.resumePromise && this.listeners && this.listeners.length > 0)
 					eventUpdateSources.push({ key, sources, triggers })
 			}
 			if (Index.onIndexEntry) {
