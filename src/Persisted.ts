@@ -999,6 +999,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (index > -1) {
 			store.dbVersion = rootStore.childStores[index].dbVersion
 			rootStore.childStores[index] = store
+		} else {
+			rootStore.childStores.push(store)
 		}
 		return store.db
 	}
