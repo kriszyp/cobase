@@ -465,6 +465,7 @@ export const Index = ({ Source }) => {
 
 			})) {
 				value.id = key[1]
+				value.written = true
 				this.unsavedQueuedId = Math.max(this.unsavedQueuedId || 0, value.id)
 				this.queuedUpdateArrays.push(value)
 				for (let updateId of value) {

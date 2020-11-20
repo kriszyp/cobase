@@ -466,7 +466,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (isRoot)
 				this.initializeRootDB()
 			let initializingProcess = this.rootStore.initializingProcess
-
 			const db = this.db
 			registerClass(this)
 
