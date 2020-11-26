@@ -823,7 +823,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					this.isRetrying = true
 					await delay(retries * 1000)
 					this.isRetrying = false
-					console.info('Retrying index entry', this.name, id, error)
+					//console.info('Retrying index entry', this.name, id, error)
 					return this.tryForQueueEntry(id, action)
 				} else {
 					console.info('Too many retries', this.name, id, retries)
