@@ -102,11 +102,11 @@ export const Index = ({ Source }) => {
 						previousEntries = this.normalizeEntries(previousEntries)
 						for (let entry of previousEntries) {
 							let previousValue = entry.value
-							previousValue = this.db.packr.pack(previousValue)
+							previousValue = this.db.encoder.encode(previousValue)
 							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
 						}
 					} else if (previousEntries != null) {
-						toRemove.set(previousEntries, this.db.packr.pack(previousEntries))
+						toRemove.set(previousEntries, this.db.encoder.encode(previousEntries))
 					}
 				}
 			} catch(error) {
@@ -157,8 +157,7 @@ export const Index = ({ Source }) => {
 					// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
 					let removedValue = toRemove.get(key)
 					// a value of '' is treated as a reference to the source object, so should always be treated as a change
-					let dpackStart = 0
-					let value = this.db.packr.pack(entry.value)
+					let value = this.db.encoder.encode(entry.value)
 					first = false
 					if (removedValue != null)
 						toRemove.delete(key)
