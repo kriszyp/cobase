@@ -1743,10 +1743,18 @@ let deepFreeze = process.env.NODE_ENV == 'development'  ? (object, depth) => {
 	if (depth > 100)
 		throw new Error('Max object depth exceeded or circular reference in data')
 	if (object && typeof object == 'object') {
-		for (let key in object) {
-			let value = object[key]
-			if (typeof value == 'object')
-				deepFreeze(value, (depth || 0) + 1)
+		if (object.constructor == Object) {
+			for (let key in object) {
+				let value = object[key]
+				if (typeof value == 'object')
+					deepFreeze(value, (depth || 0) + 1)
+			}
+		} else if (object.constructor == Array) {
+			for (let i = 0, l = object.length; i < l; i++) {
+				let value = object[i]
+				if (typeof value == 'object')
+					deepFreeze(value, (depth || 0) + 1)
+			}
 		}
 	}
 	return object
