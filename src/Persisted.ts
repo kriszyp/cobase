@@ -440,7 +440,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.rootDB = open(this.dbFolder + '/' + this.name + EXTENSION, options)
 
 		Object.assign(this, this.rootDB.get(DB_VERSION_KEY))
-		this.prototype.db = this.db = this.openDB(this)
+		this.prototype.db = this.db = this.openDB(this, { useVersions: true, cache: true })
 		return true
 	}
 
@@ -964,31 +964,27 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this.whenProcessingThisComplete
 	}
 
-	static openDB(store, asIndex?) {
-		let db = store.db = this.rootDB.openDB(store.dbName || store.name, {
+	static openDB(store, options?) {
+		let db = store.db = this.rootDB.openDB(store.dbName || store.name, Object.assign({
 			compression: true,
 			useFloat32: 3, // DECIMAL_ROUND
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
-			useVersions: !asIndex,
-			cache: !asIndex,
-		})
+		}, options))
 		store.rootDB = this.rootDB
 		return db
 	}
-	static openChildDB(store, asIndex?) {
-		let db = this.openDB(store, asIndex)
+	static openChildDB(store, options?) {
+		let db = this.openDB(store, options)
 		let rootStore = store.rootStore = this.rootStore || this
 		store.otherProcesses = rootStore.otherProcesses
 		let index
 		if (!rootStore.childStores) {
 			rootStore.childStores = []
 		}
-		if (asIndex) {
-			if (!this.indices) {
-				this.indices = []
-			}
-			this.indices.push(store)
+		if (!this.indices) {
+			this.indices = []
 		}
+		this.indices.push(store)
 		rootStore.childStores.find((entry, i) => {
 			if (entry.name == store.name) {
 				index = i
@@ -1387,11 +1383,11 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return this
 	}
 
-	static openChildDB(store, asIndex) {
+	static openChildDB(store, options) {
 		if (!this.queue) {
 			this.queue = new Map()
 		}
-		return super.openChildDB(store, asIndex)
+		return super.openChildDB(store, options)
 	}
 
 

@@ -31,7 +31,7 @@ export class Aggregator extends PersistedBase {
 		return Cached.from.apply(this, Sources)
 	}
 	static openDatabase() {
-		this.Sources[0].openChildDB(this, true)
+		this.Sources[0].openChildDB(this, { cache: true })
 		return false // is not root
 	}
 	static getIdsFromKey(key) {

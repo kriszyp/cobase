@@ -445,7 +445,7 @@ export const Index = ({ Source }) => {
 		}
 
 		static openDatabase() {
-			let db = Source.openChildDB(this, true)
+			let db = Source.openChildDB(this)
 			db.on('beforecommit', () => {
 				if (this.unsavedUpdates && this.unsavedUpdates.length > 0) {
 					this.unsavedUpdates.written = true
