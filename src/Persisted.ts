@@ -657,11 +657,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event.type === 'discovered' || event.type === 'added' || event.type === 'deleted') {
 			this.instanceSetUpdated(event)
 		}
-		if (event.type === 'reload-entry' || event.type === 'discovered' || (by && by.invalidate === false)) {
+		if (event.type === 'reload-entry' || event.type === 'discovered') {
 			// if we are being notified of ourself being created or directly set, ignore it
 			// do nothing
 		} else if (id) {
-			this.invalidateEntry(id, event, nextBy)
+			this.invalidateEntry(id, event, by)
 		}
 		if (id) {
 			let instance
@@ -1277,13 +1277,13 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 					let abortables = entry.abortables
 					//console.log('Running transform on invalidated', id, this.name, this.createHeader(entry[VERSION]), oldTransition)
 					this.runTransform(id, entry, mode)
-					if (abortables) {
+					/*if (abortables) {
 						// if it is still in progress, we can abort it and replace the result
 						//oldTransition.replaceWith = transition.value
 						for (let abortable of abortables) {
 							abortable()
 						}
-					}
+					}*/
 					return entry.value
 				}
 				if (context) {
@@ -1504,17 +1504,19 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				}
 				db.cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory
 			}
-			written = this.forQueueEntry(id).then(() => entry.committed)
-			let lastCompletion = this.whenIndexedAndCommitted = (this.whenIndexedAndCommitted ?
-				Promise.all([this.whenIndexedAndCommitted, written]) : written).then(() => {
-					if (this.whenIndexedAndCommitted == lastCompletion)
-						this.whenIndexedAndCommitted = null
-				})
+			if (!by || by.invalidate !== false) {
+				written = this.forQueueEntry(id).then(() => entry.committed)
+				let lastCompletion = this.whenIndexedAndCommitted = (this.whenIndexedAndCommitted ?
+					Promise.all([this.whenIndexedAndCommitted, written]) : written).then(() => {
+						if (this.whenIndexedAndCommitted == lastCompletion)
+							this.whenIndexedAndCommitted = null
+					})
+			}
 		} else {
 			if (event && event.type === 'deleted') {
 				// completely empty entry for deleted items
 				written = db.remove(id)
-			} else {
+			} else if (!by || by.invalidate !== false) {
 				written = db.put(id, null, version)
 			}
 		}
