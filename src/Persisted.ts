@@ -422,6 +422,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 			cache: true,
 			noMemInit: true,
+			useWritemap: true,
 		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
