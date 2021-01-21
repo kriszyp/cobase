@@ -253,6 +253,7 @@ export const Index = ({ Source }) => {
 		}
 		static async processQueuedUpdates() {
 			let inProgress = []
+			let delayMs = 0
 			while (this.queuedUpdateArrays.length) {
 				let updateArray = this.queuedUpdateArrays[0]
 				let l = updateArray.length
@@ -261,6 +262,7 @@ export const Index = ({ Source }) => {
 					try {
 						let event = new ReplacedEvent()
 						allQueuedUpdates.delete(key)
+						let start = process.hrtime.bigint()
 						super.updated(event, { // send downstream
 							id: key,
 							constructor: this
@@ -273,6 +275,7 @@ export const Index = ({ Source }) => {
 								inProgress = []
 							}
 						}
+						await delay(Number(process.hrtime.bigint() - start) / 1000000) // delay about the same amount of time the update took
 					} catch (error) {
 						this.warn('Error sending index updates', error)
 					}
@@ -611,4 +614,4 @@ class IteratorThenMap<K, V> implements Map<K, V> {
 		return this.deferredMap.delete(id)
 	}
 }
-const delay = () => new Promise(resolve => setImmediate(resolve))
+const delay = (ms?) => new Promise(resolve => ms >= 1 ? setTimeout(resolve, ms) : setImmediate(resolve))
