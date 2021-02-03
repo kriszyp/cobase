@@ -422,7 +422,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 			cache: true,
 			noMemInit: true,
-			useWritemap: true,
+			useWritemap: false,
 		}
 		if (this.mapSize) {
 			options.mapSize = this.mapSize
@@ -564,8 +564,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		}
 		let readyPromises = []
 		for (let Source of this.Sources || []) {
-			// TODO: We need to check if the upstream source is an index that failed to send all of its events
-			// and we have to rebuild
 			readyPromises.push(Source.ready)
 		}
 		await Promise.all(readyPromises)
@@ -689,7 +687,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static saveDBVersions() {
 		this.rootDB.putSync(DB_VERSION_KEY, {
 			dbVersion: this.dbVersion,
-			childStores: this.childStores && this.childStores.map(childStore => ({
+			childStores: this.childStores && this.childStores.map && this.childStores.map(childStore => ({
 				name: childStore.name,
 				dbVersion: childStore.dbVersion,
 			}))
