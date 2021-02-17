@@ -656,7 +656,10 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (event.type === 'discovered' || event.type === 'added' || event.type === 'deleted') {
 			this.instanceSetUpdated(event)
 		}
-		if (event.type === 'reload-entry' || event.type === 'discovered') {
+		if (event.type === 'reload-entry') {
+			if (event.doUpdate && by.constructor == this)
+				this.invalidateEntry(id, event, by)
+		} else if (event.type === 'discovered') {
 			// if we are being notified of ourself being created or directly set, ignore it
 			// do nothing
 		} else if (id) {
@@ -1135,18 +1138,17 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 				//if (this.transitions.get(id) == transition && !transition.invalidating)
 				//	this.transitions.delete(id)
 				if (!successfulWrite) {
-					console.log('unsuccessful write of transform, data changed, updating', id, this.name, version, conditionalVersion, this.db.get(id))
 					this.db.cache.delete(id)
 					let entry = this.db.getEntry(id)
-					let event
+					console.debug('unsuccessful write of transform, data changed, updating', id, this.name, version, conditionalVersion, entry && entry.version)
+					let event = new ReloadEntryEvent()
 					if (entry && entry.version >= version) {
-						event = new ReloadEntryEvent()
 						event.version = entry.version
 					} else {
-						event = new UpdateEvent()
+						event.doUpdate = true
 						event.version = version
 					}
-					this.updated(event, { id })
+					this.updated(event, { id, constructor: this })
 				}
 			})
 		}

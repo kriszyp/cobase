@@ -133,7 +133,7 @@ function attachClass(stream, Class, processId) {
 					delete eventToSerialize.target
 					delete eventToSerialize.oldValue
 					delete eventToSerialize.whenWritten
-					when(event.whenWritten && event.whenWritten.committed, () =>
+					when(event.whenWritten, () =>
 						stream.write(eventToSerialize))
 				} catch(error) {
 					// TODO: Not sure how we get in this state
