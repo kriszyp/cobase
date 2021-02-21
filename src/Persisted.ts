@@ -1197,6 +1197,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		//console.log('getInstanceIdsAndVersionsSince', this.name, sinceVersion)
 		return this.db.getRange({
 			start: startKey,
+			snapshot: false,
 			values: false,
 		})
 	}
