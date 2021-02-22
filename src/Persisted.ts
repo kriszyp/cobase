@@ -540,10 +540,11 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	}
 
-	static reset() {
+	static async reset() {
 		if (this.Sources && this.Sources[0])
 			this.Sources[0].wasReset = false
 		this.clearAllData()
+		await this.resetAll()
 		this.updateDBVersion()
 		this.resumeQueue()
 	}
