@@ -210,9 +210,9 @@ export const Index = ({ Source }) => {
 		static normalizeEntries(entries) {
 			if (typeof entries != 'object') {
 				// allow single primitive key
-				return entries == null ? [] : [entries]
+				return entries == null ? [] : [ entries ]
 			} else if (entries instanceof Map) {
-				return Array.from(entries).map(([ key, value]) => ({ key, value }))
+				return Array.from(entries).map(([ key, value ]) => ({ key, value }))
 			} else if (!(entries instanceof Array)) {
 				// single object
 				if (entries === null)

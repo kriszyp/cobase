@@ -178,7 +178,7 @@ export class JSONStream extends Readable {
 				} else {
 					if (nextString.then) {
 						this.flush()
-						return nextString.then((resolved) => {
+						return Promise.resolve(nextString).then((resolved) => {
 							if (resolved && typeof resolved.return === 'function') {
 								iterator.childIterator = resolved
 								return this.readIterator(iterator)
