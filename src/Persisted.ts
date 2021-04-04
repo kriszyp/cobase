@@ -289,7 +289,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static cacheWith(properties) {
-		const CachedWith = Cached.from(this).assign(properties)
+		const CachedWith = CachedBase.from(this).assign(properties)
 		Object.defineProperty(CachedWith, 'name', {
 			value: this.name + '-with-' + Object.keys(properties).filter(key => properties[key] && properties[key].defineAs).join('-')
 		})
@@ -1206,9 +1206,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static dataVersionBuffer: Buffer
 	static processKey: Buffer
 	static lastIndexedVersion: int
-	static initializeRootDB() {
-		let initializingProcess = super.initializeRootDB()
-	}
 
 	static remove(id, event?) {
 		if (id > 0 && typeof id === 'string' || !id) {
@@ -1263,7 +1260,7 @@ interface PersistedType extends Function {
 	listeners: Function[]
 }
 
-export class Cached extends KeyValued(MakePersisted(Transform), {
+class CachedBase extends KeyValued(MakePersisted(Transform), {
 	valueProperty: 'cachedValue',
 	versionProperty: 'cachedVersion'
 }) {
@@ -1560,7 +1557,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		if (!Sources[0]) {
 			throw new Error('No source provided')
 		}
-		class CachedFrom extends this {
+		class Cached extends this {
 			constructor(id) {
 				super(id)
 				for (let i = 0; i < Sources.length; i++) {
@@ -1576,8 +1573,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				this.returnsAsyncIterables
 			}
 		}
-		CachedFrom.Sources = Sources
-		return CachedFrom
+		Cached.Sources = Sources
+		return Cached
 	}
 
 	static getInstanceIds(range) {
@@ -1601,6 +1598,23 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return this.Sources && Promise.all(this.Sources.map(Source => Source.whenProcessingComplete))
 	}
 }
+export function Cached(transform, properties) {
+	let Class = properties.from instanceof Array ? CachedBase.from.apply(Cached, properties.from) : CachedBase.from(properties.from)
+	Class.prototype.transform = transform
+	if (properties.name)
+		Object.defineProperty(Class, 'name', properties.name)
+	else
+		throw new Error('Must provide a name for cached entity')
+	for (let key in properties) {
+		if (key == 'name')
+			Object.defineProperty(Class, 'name', properties.name)
+		else if (key != 'from')
+			Class[key] = properties[key]
+	}
+	Cached.start()
+	return Cached
+}
+Object.setPrototypeOf(Cached, CachedBase)
 
 type PermissionCheck = (source: any, session: any, action: string, args: Array<any>) => boolean | string
 
@@ -1704,7 +1718,7 @@ let verboseLogging
 let storesObject = global
 export function configure(options) {
 	Persisted.dbFolder = options.dbFolder
-	Cached.dbFolder = options.cacheDbFolder || options.dbFolder
+	CachedBase.dbFolder = options.cacheDbFolder || options.dbFolder
 	Persistable.dbFolder = options.cacheDbFolder || options.dbFolder
 	globalDoesInitialization = options.doesInitialization
 	verboseLogging = options.verboseLogging
