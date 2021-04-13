@@ -53,6 +53,9 @@ export const Index = ({ Source }) => {
 	const Index = class extends KeyIndex {}
 	Source.updateWithPrevious = true
 	Index.sources = [ Index.source = Source ]
+	Index.eventLog = []
+	Index.queuedUpdateArrays = []
+	Index.allQueuedUpdates = new Set()
 	return Index
 }
 
