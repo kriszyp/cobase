@@ -14,6 +14,20 @@ export class Reduced extends Cached {
 		return null
 	}
 
+	static derivedFrom(...sources: Array<Persisted | Function | {}>) {
+		for (let source of sources) {
+			if (source.notifies) {
+				if (!this.sources)
+					this.sources = []
+				this.sources.push(source)
+			} else if (typeof source === 'function') {
+				this.reduceBy = source
+			} else {
+				Object.assign(this, source)
+			}
+		}
+		this.start()
+	}
 	// rewrite the source to be the computed reduced value
 	// this allows transform to still execute using the result
 	get source() {

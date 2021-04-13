@@ -1,5 +1,5 @@
 export { Persisted, Cached, Persistable, secureAccess, writeCommonStructures, getCurrentStatus } from './Persisted'
-export { Index } from './KeyIndex'
+export { Index, KeyIndex } from './KeyIndex'
 export { RequestContext } from './RequestContext'
 export { Reduced } from './Reduced'
 export { AccessError, UnauthenticatedError } from './util/errors'

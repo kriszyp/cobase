@@ -1,4 +1,4 @@
-import { PersistedBase, Cached } from './Persisted'
+import { PersistedBase, Persisted, Cached } from './Persisted'
 import when from './util/when'
 const INITIALIZING_LAST_KEY = Buffer.from([1, 7])
 
@@ -29,6 +29,20 @@ export class Aggregator extends PersistedBase {
 	}
 	static from(...sources) {
 		return Cached.from.apply(this, sources)
+	}
+	static derivedFrom(...sources: Array<Persisted | Function | {}>) {
+		for (let source of sources) {
+			if (source.notifies) {
+				if (!this.sources)
+					this.sources = []
+				this.sources.push(source)
+			} else if (typeof source === 'function') {
+				this.updateAggregate = source
+			} else {
+				Object.assign(this, source)
+			}
+		}
+		this.start()
 	}
 	static openDatabase() {
 		this.sources[0].openChildDB(this, { cache: true })

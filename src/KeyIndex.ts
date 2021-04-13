@@ -50,508 +50,522 @@ const versionToDate = (version) =>
 	new Date(version / 256 + 1500000000000).toLocaleString()
 
 export const Index = ({ Source }) => {
+	const Index = class extends KeyIndex {}
 	Source.updateWithPrevious = true
-	let lastIndexedVersion = 0
-	const sourceVersions = {}
-	const processingSourceVersions = new Map<String, number>()
-	let pendingProcesses = false
-	let stateOffset = 0
-	let allQueuedUpdates = new Set()
-	// this is shared memory buffer between processes where we define what each process is currently indexing, so processes can determine if there are potentially conflicts
-	// in what is being processed
-	let indexingState: Buffer
+	Index.sources = [ Index.source = Source ]
+	return Index
+}
 
-	return class extends Persistable.as(VArray) {
-		version: number
-		averageConcurrencyLevel: number
-		static sources = [Source]
-		static whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index
-		static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
-		static indexingProcess: Promise<any>
-		static eventLog = []
-		static queuedUpdateArrays = []
-
-		static forValue(id, transition) {
-			return this.tryForQueueEntry(id, () => this.indexEntry(id, transition))
+export class KeyIndex extends Persistable.as(VArray) {
+	version: number
+	averageConcurrencyLevel: number
+	static whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index
+	static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
+	static indexingProcess: Promise<any>
+	static eventLog = []
+	static queuedUpdateArrays = []
+	static derivedFrom(...sources: Array<Persisted | Function | {}>) {
+		for (let source of sources) {
+			if (source.notifies) {
+				if (!this.sources)
+					this.sources = []
+				this.sources.push(this.source = source)
+				source.updateWithPrevious = true
+			} else if (typeof source === 'function') {
+				this.indexBy = source
+			} else {
+				Object.assign(this, source)
+			}
 		}
-		static forQueueEntry(id) {
-			return this.tryForQueueEntry(id, () =>
-				this.indexEntry(id).then(complete => {
-					if (complete) {
-						complete.commit()
-					}
-				})
-			)
-		}
-		static async indexEntry(id, transition) {
-			let { previousValue: previousData, deleted, sources, triggers, fromVersion: previousVersion } = transition || {}
-			let operations: OperationsArray = []
-			let eventUpdateSources = []
+/*		static whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index,
+		whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk),
+		indexingProcess: Promise<any>*/
+		this.eventLog = []
+		this.queuedUpdateArrays = []
+		this.allQueuedUpdates = new Set()
+		this.start()
+	}
 
-			let toRemove = new Map()
-			// TODO: handle delta, for optimized index updaes
-			// this is for recording changed entities and removing the values that previously had been indexed
-			let previousEntries
-			try {
-				if (previousData != null) { // if no data, then presumably no references to clear
-					// use the same mapping function to determine values to remove
-					previousEntries = previousData === undefined ? previousData : this.indexBy(previousData, id)
-					if (previousEntries && previousEntries.then)
-						previousEntries = await previousEntries
-					if (typeof previousEntries == 'object' && previousEntries) {
-						previousEntries = this.normalizeEntries(previousEntries)
-						for (let entry of previousEntries) {
-							let previousValue = entry.value
-							previousValue = this.db.encoder.encode(previousValue)
-							toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
-						}
-					} else if (previousEntries != null) {
-						toRemove.set(previousEntries, this.db.encoder.encode(previousEntries))
-					}
+	static forValue(id, transition) {
+		return this.tryForQueueEntry(id, () => this.indexEntry(id, transition))
+	}
+	static forQueueEntry(id) {
+		return this.tryForQueueEntry(id, () =>
+			this.indexEntry(id).then(complete => {
+				if (complete) {
+					complete.commit()
 				}
+			})
+		)
+	}
+	static async indexEntry(id, transition) {
+		let { previousValue: previousData, deleted, sources, triggers, fromVersion: previousVersion } = transition || {}
+		let operations: OperationsArray = []
+		let eventUpdateSources = []
+
+		let toRemove = new Map()
+		// TODO: handle delta, for optimized index updaes
+		// this is for recording changed entities and removing the values that previously had been indexed
+		let previousEntries
+		try {
+			if (previousData != null) { // if no data, then presumably no references to clear
+				// use the same mapping function to determine values to remove
+				previousEntries = previousData === undefined ? previousData : this.indexBy(previousData, id)
+				if (previousEntries && previousEntries.then)
+					previousEntries = await previousEntries
+				if (typeof previousEntries == 'object' && previousEntries) {
+					previousEntries = this.normalizeEntries(previousEntries)
+					for (let entry of previousEntries) {
+						let previousValue = entry.value
+						previousValue = this.db.encoder.encode(previousValue)
+						toRemove.set(typeof entry === 'object' ? entry.key : entry, previousValue)
+					}
+				} else if (previousEntries != null) {
+					toRemove.set(previousEntries, this.db.encoder.encode(previousEntries))
+				}
+			}
+		} catch(error) {
+			if (error.isTemporary)
+				throw error
+			//if (transition && transition.version !== version) return // don't log errors from invalidated states
+			this.warn('Error indexing previous value', this.source.name, 'for', this.name, id, error)
+		}
+		//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
+		let entries
+		if (!deleted) {
+			let attempts = 0
+			let data
+			try {
+				data = transition ? transition.value : this.source.get(id, INDEXING_MODE)
+				if (data && data.then)
+					data = await data
 			} catch(error) {
 				if (error.isTemporary)
 					throw error
-				//if (transition && transition.version !== version) return // don't log errors from invalidated states
-				this.warn('Error indexing previous value', Source.name, 'for', this.name, id, error)
+				try {
+					// try again
+					data = transition ? transition.value : await this.source.get(id, INDEXING_MODE)
+				} catch(error) {
+					//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
+					this.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
+					data = undefined
+				}
 			}
 			//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
-			let entries
-			if (!deleted) {
-				let attempts = 0
-				let data
-				try {
-					data = transition ? transition.value : Source.get(id, INDEXING_MODE)
-					if (data && data.then)
-						data = await data
-				} catch(error) {
-					if (error.isTemporary)
-						throw error
-					try {
-						// try again
-						data = transition ? transition.value : await Source.get(id, INDEXING_MODE)
-					} catch(error) {
-						//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
-						this.warn('Error retrieving value needing to be indexed', error, 'for', this.name, id)
-						data = undefined
-					}
-				}
+			// let the indexBy define how we get the set of values to index
+			try {
+				entries = data === undefined ? data : this.indexBy(data, id)
+				if (entries && entries.then)
+					entries = await entries
+			} catch(error) {
+				if (error.isTemporary)
+					throw error
 				//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
-				// let the indexBy define how we get the set of values to index
-				try {
-					entries = data === undefined ? data : this.indexBy(data, id)
-					if (entries && entries.then)
-						entries = await entries
-				} catch(error) {
-					if (error.isTemporary)
-						throw error
-					//if (indexRequest && indexRequest.version !== version) return // if at any point it is invalidated, break out
-					this.warn('Error indexing value', error, 'for', this.name, id)
-					entries = undefined
-				}
-				entries = this.normalizeEntries(entries)
-				let first = true
-				for (let entry of entries) {
-					// we use the composite key, so we can quickly traverse all the entries under a certain key
-					let key = typeof entry === 'object' ? entry.key : entry // TODO: Maybe at some point we support dates as keys
-					// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
-					let removedValue = toRemove.get(key)
-					// a value of '' is treated as a reference to the source object, so should always be treated as a change
-					let value = this.db.encoder.encode(entry.value)
-					first = false
-					if (removedValue != null)
-						toRemove.delete(key)
-					let isChanged = removedValue == null || !value.equals(removedValue)
-					if (isChanged || entry.value == null || this.alwaysUpdate) {
-						if (isChanged) {
-							let fullKey = [ key, id ]
-							operations.push({
-								type: 'put',
-								key: fullKey,
-								value: value
-							})
-							operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
-						}
-						if (!this.resumePromise && this.listeners && this.listeners.length > 0)
-							eventUpdateSources.push({ key, sources, triggers })
-					}
-				}
+				this.warn('Error indexing value', error, 'for', this.name, id)
+				entries = undefined
 			}
-			for (let [key] of toRemove) {
-				/*if (fullKey.length > 510) {
-					console.error('Too large of key indexing', this.name, key)
-					continue
-				}*/
-				operations.push({
-					type: 'del',
-					key: [ key, id ]
-				})
-				if (!this.resumePromise && this.listeners && this.listeners.length > 0)
-					eventUpdateSources.push({ key, sources, triggers })
-			}
-			if (Index.onIndexEntry) {
-				Index.onIndexEntry(this.name, id, version, previousEntries, entries)
-			}
-			return {
-				commit: () => {
-					let batchFinished
-					if (operations.length > 0) {
-						batchFinished = this.db.batch(operations)
-					}
-					if (eventUpdateSources.length > 0) {
-						return (batchFinished || Promise.resolve()).then(() =>
-							this.queueUpdates(eventUpdateSources))
-					}
-				}
-			}
-		}
-		static pendingEvents = new Map()
-
-		static normalizeEntries(entries) {
-			if (typeof entries != 'object') {
-				// allow single primitive key
-				return entries == null ? [] : [ entries ]
-			} else if (entries instanceof Map) {
-				return Array.from(entries).map(([ key, value ]) => ({ key, value }))
-			} else if (!(entries instanceof Array)) {
-				// single object
-				if (entries === null)
-					return []
-				return [entries]
-			}
-			return entries
-		}
-
-		static log(...args) {
-			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
-			console.log(...args)
-		}
-		static warn(...args) {
-			this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
-			console.warn(...args)
-		}
-
-		static updated(event, by) {
-			// don't do anything, we don't want these events to propagate through here, and we do indexing based on upstream queue
-		}
-
-		static queueUpdates(eventSources) {
-			if (!this.unsavedUpdates) {
-				this.unsavedUpdates = []
-				this.unsavedUpdates.id = this.unsavedQueuedId = (this.unsavedQueuedId || 0) + 1
-				if (this.queuedUpdateArrays.length == 0)
-					setTimeout(() =>
-						this.processQueuedUpdates())
-				this.queuedUpdateArrays.push(this.unsavedUpdates)
-			}
-			for ( const { key, triggers, sources } of eventSources) {
-				if (!allQueuedUpdates.has(key)) {
-					allQueuedUpdates.add(key)
-					this.unsavedUpdates.push(key)
-				}
-			}
-		}
-		static async processQueuedUpdates() {
-			let inProgress = []
-			let delayMs = 0
-			while (this.queuedUpdateArrays.length) {
-				let updateArray = this.queuedUpdateArrays[0]
-				let l = updateArray.length
-				for (let i = updateArray.sent || 0; i < l; i++) {
-					let key = updateArray[i]
-					try {
-						let event = new ReplacedEvent()
-						allQueuedUpdates.delete(key)
-						let start = process.hrtime.bigint()
-						super.updated(event, { // send downstream
-							id: key,
-							constructor: this
+			entries = this.normalizeEntries(entries)
+			let first = true
+			for (let entry of entries) {
+				// we use the composite key, so we can quickly traverse all the entries under a certain key
+				let key = typeof entry === 'object' ? entry.key : entry // TODO: Maybe at some point we support dates as keys
+				// TODO: If toRemove has the key, that means the key exists, and we don't need to do anything, as long as the value matches (if there is no value might be a reasonable check)
+				let removedValue = toRemove.get(key)
+				// a value of '' is treated as a reference to the source object, so should always be treated as a change
+				let value = this.db.encoder.encode(entry.value)
+				first = false
+				if (removedValue != null)
+					toRemove.delete(key)
+				let isChanged = removedValue == null || !value.equals(removedValue)
+				if (isChanged || entry.value == null || this.alwaysUpdate) {
+					if (isChanged) {
+						let fullKey = [ key, id ]
+						operations.push({
+							type: 'put',
+							key: fullKey,
+							value: value
 						})
-						let whenWritten = event.whenWritten
-						if (whenWritten) {
-							inProgress.push(event.whenWritten)
-							if (inProgress.length > 100) {
-								await Promise.all(inProgress)
-								inProgress = []
-							}
-						}
-						await delay(Number(process.hrtime.bigint() - start) / 1000000) // delay about the same amount of time the update took
-					} catch (error) {
-						this.warn('Error sending index updates', error)
+						operations.byteCount = (operations.byteCount || 0) + value.length + fullKey.length
 					}
-				}
-				if (updateArray.written) {
-					Promise.all(inProgress).then(() =>
-						this.db.remove([QUEUED_UPDATES, updateArray.id]))
-					this.queuedUpdateArrays.shift()
-				}
-				else {
-					if (l == updateArray.length) {
-						await Promise.all(inProgress)
-						inProgress = []
-					}
-					if (l == updateArray.length && this.unsavedUpdates == updateArray) {
-						this.unsavedUpdates = null // we sent all the entries before it was written, restart a new array
-						this.queuedUpdateArrays.shift()
-					}
-					else
-						updateArray.sent = l
+					if (!this.resumePromise && this.listeners && this.listeners.length > 0)
+						eventUpdateSources.push({ key, sources, triggers })
 				}
 			}
 		}
-		static sendUpdates(eventSources) {
-			let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
-			// aggregate them by key so as to minimize the number of events we send
-			nextEvent: for ( const { key, triggers, sources } of eventSources) {
-				let entry = updatedIndexEntries.get(key)
-				if (!entry) {
-					updatedIndexEntries.set(key, entry = {
-						sources: new Set(),
-						triggers: new Set(),
-					})
+		for (let [key] of toRemove) {
+			/*if (fullKey.length > 510) {
+				console.error('Too large of key indexing', this.name, key)
+				continue
+			}*/
+			operations.push({
+				type: 'del',
+				key: [ key, id ]
+			})
+			if (!this.resumePromise && this.listeners && this.listeners.length > 0)
+				eventUpdateSources.push({ key, sources, triggers })
+		}
+		if (Index.onIndexEntry) {
+			Index.onIndexEntry(this.name, id, version, previousEntries, entries)
+		}
+		return {
+			commit: () => {
+				let batchFinished
+				if (operations.length > 0) {
+					batchFinished = this.db.batch(operations)
 				}
-				if (triggers) {
-					for (let trigger of triggers) {
-						entry.triggers.add(trigger)
-						if (trigger === INITIALIZATION_SOURCE) {
-							continue nextEvent // don't record sources for initialization
-						}
-					}
+				if (eventUpdateSources.length > 0) {
+					return (batchFinished || Promise.resolve()).then(() =>
+						this.queueUpdates(eventUpdateSources))
 				}
-				if (sources)
-					for (let source of sources)
-						entry.sources.add(source)
 			}
+		}
+	}
+	static pendingEvents = new Map()
 
-			let updatedIndexEntriesArray = Array.from(updatedIndexEntries).reverse()
-			updatedIndexEntries = new Map()
-			let indexedEntry
-			while ((indexedEntry = updatedIndexEntriesArray.pop())) {
+	static normalizeEntries(entries) {
+		if (typeof entries != 'object') {
+			// allow single primitive key
+			return entries == null ? [] : [ entries ]
+		} else if (entries instanceof Map) {
+			return Array.from(entries).map(([ key, value ]) => ({ key, value }))
+		} else if (!(entries instanceof Array)) {
+			// single object
+			if (entries === null)
+				return []
+			return [entries]
+		}
+		return entries
+	}
+
+	static log(...args) {
+		this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
+		console.log(...args)
+	}
+	static warn(...args) {
+		this.eventLog.push(args.join(' ') + ' ' + new Date().toLocaleString())
+		console.warn(...args)
+	}
+
+	static updated(event, by) {
+		// don't do anything, we don't want these events to propagate through here, and we do indexing based on upstream queue
+	}
+
+	static queueUpdates(eventSources) {
+		if (!this.unsavedUpdates) {
+			this.unsavedUpdates = []
+			this.unsavedUpdates.id = this.unsavedQueuedId = (this.unsavedQueuedId || 0) + 1
+			if (this.queuedUpdateArrays.length == 0)
+				setTimeout(() =>
+					this.processQueuedUpdates())
+			this.queuedUpdateArrays.push(this.unsavedUpdates)
+		}
+		for ( const { key, triggers, sources } of eventSources) {
+			if (!this.allQueuedUpdates.has(key)) {
+				this.allQueuedUpdates.add(key)
+				this.unsavedUpdates.push(key)
+			}
+		}
+	}
+	static async processQueuedUpdates() {
+		let inProgress = []
+		let delayMs = 0
+		while (this.queuedUpdateArrays.length) {
+			let updateArray = this.queuedUpdateArrays[0]
+			let l = updateArray.length
+			for (let i = updateArray.sent || 0; i < l; i++) {
+				let key = updateArray[i]
 				try {
 					let event = new ReplacedEvent()
-					let indexEntryUpdate: IndexEntryUpdate = indexedEntry[1]
-					event.sources = indexEntryUpdate.sources
-					event.triggers = Array.from(indexEntryUpdate.triggers)
+					this.allQueuedUpdates.delete(key)
+					let start = process.hrtime.bigint()
 					super.updated(event, { // send downstream
-						id: indexedEntry[0],
+						id: key,
 						constructor: this
 					})
+					let whenWritten = event.whenWritten
+					if (whenWritten) {
+						inProgress.push(event.whenWritten)
+						if (inProgress.length > 100) {
+							await Promise.all(inProgress)
+							inProgress = []
+						}
+					}
+					await delay(Number(process.hrtime.bigint() - start) / 1000000) // delay about the same amount of time the update took
 				} catch (error) {
 					this.warn('Error sending index updates', error)
 				}
 			}
-			this.instanceIds.updated()
+			if (updateArray.written) {
+				Promise.all(inProgress).then(() =>
+					this.db.remove([QUEUED_UPDATES, updateArray.id]))
+				this.queuedUpdateArrays.shift()
+			}
+			else {
+				if (l == updateArray.length) {
+					await Promise.all(inProgress)
+					inProgress = []
+				}
+				if (l == updateArray.length && this.unsavedUpdates == updateArray) {
+					this.unsavedUpdates = null // we sent all the entries before it was written, restart a new array
+					this.queuedUpdateArrays.shift()
+				}
+				else
+					updateArray.sent = l
+			}
 		}
-
-		static get(id) {
-			// First: ensure that all the source instances are up-to-date
-			return when(Source.whenUpdatedInContext(true), () => {
-				let iterable = this._getIndexedValues({
-					start: id, // the range of everything starting with id-
-					end: [id, '\u{ffff}'],
+	}
+	static sendUpdates(eventSources) {
+		let updatedIndexEntries = new Map<any, IndexEntryUpdate>()
+		// aggregate them by key so as to minimize the number of events we send
+		nextEvent: for ( const { key, triggers, sources } of eventSources) {
+			let entry = updatedIndexEntries.get(key)
+			if (!entry) {
+				updatedIndexEntries.set(key, entry = {
+					sources: new Set(),
+					triggers: new Set(),
 				})
-				return this.returnsIterables ? iterable : iterable.asArray
-			})
+			}
+			if (triggers) {
+				for (let trigger of triggers) {
+					entry.triggers.add(trigger)
+					if (trigger === INITIALIZATION_SOURCE) {
+						continue nextEvent // don't record sources for initialization
+					}
+				}
+			}
+			if (sources)
+				for (let source of sources)
+					entry.sources.add(source)
 		}
 
-		static getIndexedKeys(id) {
-			return this._getIndexedValues({
+		let updatedIndexEntriesArray = Array.from(updatedIndexEntries).reverse()
+		updatedIndexEntries = new Map()
+		let indexedEntry
+		while ((indexedEntry = updatedIndexEntriesArray.pop())) {
+			try {
+				let event = new ReplacedEvent()
+				let indexEntryUpdate: IndexEntryUpdate = indexedEntry[1]
+				event.sources = indexEntryUpdate.sources
+				event.triggers = Array.from(indexEntryUpdate.triggers)
+				super.updated(event, { // send downstream
+					id: indexedEntry[0],
+					constructor: this
+				})
+			} catch (error) {
+				this.warn('Error sending index updates', error)
+			}
+		}
+		this.instanceIds.updated()
+	}
+
+	static get(id) {
+		// First: ensure that all the source instances are up-to-date
+		return when(this.source.whenUpdatedInContext(true), () => {
+			let iterable = this._getIndexedValues({
 				start: id, // the range of everything starting with id-
 				end: [id, '\u{ffff}'],
-				values: false,
-			}, true)
-		}
+			})
+			return this.returnsIterables ? iterable : iterable.asArray
+		})
+	}
 
-		static getIndexedValues(range: IterableOptions) {
-			range = range || {}
-			if (!this.initialized && range.waitForInitialization) {
-				return this.start().then(() => this.getIndexedValues(range))
-			}
-			if (range.start === undefined)
-				range.start = true
-			return when(!range.noWait && this.whenUpdatedInContext(), () =>
-				this._getIndexedValues(range, !range.onlyValues))
-		}
+	static getIndexedKeys(id) {
+		return this._getIndexedValues({
+			start: id, // the range of everything starting with id-
+			end: [id, '\u{ffff}'],
+			values: false,
+		}, true)
+	}
 
-		// Get a range of indexed entries for this id (used by Reduced)
-		static _getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
-			const db: Database = this.db
-			let approximateSize = 0
-			let promises = []
-			return db.getRange(range).map(({ key, value }) => {
-				let [, sourceId] = key
-				/*if (range.recordApproximateSize) {
-					let approximateSize = approximateSize += key.length + (value && value.length || 10)
-				}*/
-				let parsedValue = value == null ? Source.get(sourceId) : value
-				if (parsedValue && parsedValue.then) {
-					return parsedValue.then(parsedValue => returnFullKeyValue ? {
-						key: sourceId,
-						value: parsedValue,
-					} : parsedValue)
-				}
-				return returnFullKeyValue ? {
+	static getIndexedValues(range: IterableOptions) {
+		range = range || {}
+		if (!this.initialized && range.waitForInitialization) {
+			return this.start().then(() => this.getIndexedValues(range))
+		}
+		if (range.start === undefined)
+			range.start = true
+		return when(!range.noWait && this.whenUpdatedInContext(), () =>
+			this._getIndexedValues(range, !range.onlyValues))
+	}
+
+	// Get a range of indexed entries for this id (used by Reduced)
+	static _getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
+		const db: Database = this.db
+		let approximateSize = 0
+		let promises = []
+		return db.getRange(range).map(({ key, value }) => {
+			let [, sourceId] = key
+			/*if (range.recordApproximateSize) {
+				let approximateSize = approximateSize += key.length + (value && value.length || 10)
+			}*/
+			let parsedValue = value == null ? this.source.get(sourceId) : value
+			if (parsedValue && parsedValue.then) {
+				return parsedValue.then(parsedValue => returnFullKeyValue ? {
 					key: sourceId,
 					value: parsedValue,
-				} : parsedValue
-			})
-		}
-		/**
-		* Indexing function, that defines the keys and values used in the indexed table.
-		* This should be implemented by Index subclasses, and should be safe/functional
-		* method with referential integrity (always returns the same results with same inputs),
-		* as it is used to determine key/values on both addition and removal of entities.
-		* @param data The object to be indexed
-		* @return The return value can be an array of objects, where each object has a `key` and a `value`. It can only be an array of simple strings or numbers, if it is merely keys that need to be indexed, or even be a just a string (or number), if only a single key should be indexed
-		**/
-		static indexBy(data: {}, sourceKey: string | number | boolean): Array<{ key: string | number, value: any} | string | number> | IterableIterator<any> | string | number	{
-			return null
-		}
+				} : parsedValue)
+			}
+			return returnFullKeyValue ? {
+				key: sourceId,
+				value: parsedValue,
+			} : parsedValue
+		})
+	}
+	/**
+	* Indexing function, that defines the keys and values used in the indexed table.
+	* This should be implemented by Index subclasses, and should be safe/functional
+	* method with referential integrity (always returns the same results with same inputs),
+	* as it is used to determine key/values on both addition and removal of entities.
+	* @param data The object to be indexed
+	* @return The return value can be an array of objects, where each object has a `key` and a `value`. It can only be an array of simple strings or numbers, if it is merely keys that need to be indexed, or even be a just a string (or number), if only a single key should be indexed
+	**/
+	static indexBy(data: {}, sourceKey: string | number | boolean): Array<{ key: string | number, value: any} | string | number> | IterableIterator<any> | string | number	{
+		return null
+	}
 
-		static whenUpdatedInContext(context?) {
-			return Source.whenUpdatedInContext(true)
+	static whenUpdatedInContext(context?) {
+		return this.source.whenUpdatedInContext(true)
+	}
+
+	// static returnsIterables = true // maybe at some point default this to on
+
+	static getInstanceIdsAndVersionsSince(version) {
+		// There is no version tracking with indices.
+		// however, indices always do send updates, and as long as we wait until we are ready and finished with initial indexing
+		// downstream tables should have received all the updates they need to proceed
+		//console.log('getInstanceIdsAndVersionsSince from KeyIndex', this.name, version)
+		return this.ready.then(() => {
+			//this.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
+			if (version == 0) { // if we are starting from scratch, we can return everything
+				return when(this.getInstanceIds(), idsAndVersions => {
+					idsAndVersions = idsAndVersions.map(id => ({
+						id,
+						version: getNextVersion(),
+					}))
+					idsAndVersions.isFullReset = true
+					return idsAndVersions
+				})
+			}
+			return []
+		})
+	}
+
+	clearCache() {
+		this.cachedValue = undefined
+		this.cachedVersion = -1
+	}
+
+	valueOf() {
+		return when(super.valueOf(true), (value) => {
+			expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
+			return value
+		})
+	}
+
+	static openDatabase() {
+		let db = this.source.openChildDB(this)
+		db.on('beforecommit', () => {
+			if (this.unsavedUpdates && this.unsavedUpdates.length > 0) {
+				this.unsavedUpdates.written = true
+				db.put([QUEUED_UPDATES, this.unsavedQueuedId], this.unsavedUpdates)
+				this.unsavedUpdates = null
+			}
+		})
+		return false // is not root
+	}
+	static async initializeData() {
+		await super.initializeData()
+		let hadQueuedUpdates = this.queuedUpdateArrays.length > 0
+		for (let { key, value } of this.db.getRange({
+			start: [QUEUED_UPDATES, 0],
+			end: [QUEUED_UPDATES, 1e30],
+
+		})) {
+			value.id = key[1]
+			value.written = true
+			this.unsavedQueuedId = Math.max(this.unsavedQueuedId || 0, value.id)
+			this.queuedUpdateArrays.push(value)
+			for (let updateId of value) {
+				this.allQueuedUpdates.add(updateId)
+			}
 		}
-
-		// static returnsIterables = true // maybe at some point default this to on
-
-		static getInstanceIdsAndVersionsSince(version) {
-			// There is no version tracking with indices.
-			// however, indices always do send updates, and as long as we wait until we are ready and finished with initial indexing
-			// downstream tables should have received all the updates they need to proceed
-			//console.log('getInstanceIdsAndVersionsSince from KeyIndex', this.name, version)
-			return this.ready.then(() => {
-				//this.log('getInstanceIdsAndVersionsSince ready from KeyIndex', this.name, version)
-				if (version == 0) { // if we are starting from scratch, we can return everything
-					return when(this.getInstanceIds(), idsAndVersions => {
-						idsAndVersions = idsAndVersions.map(id => ({
-							id,
-							version: getNextVersion(),
-						}))
-						idsAndVersions.isFullReset = true
-						return idsAndVersions
-					})
-				}
-				return []
-			})
+		if (this.queuedUpdateArrays.length > 0 && !hadQueuedUpdates)
+			this.processQueuedUpdates()
+	}
+	static getIdsFromKey(key) {
+		return this.source.getIdsFromKey(key)
+	}
+	static updateDBVersion() {
+		if (!this.source.wasReset) {// only reindex if the source didn't do it for use
+			this.resumeFromKey = true
+			this.db.putSync(INITIALIZING_LAST_KEY, true)
 		}
+		super.updateDBVersion()
+	}
 
-		clearCache() {
-			this.cachedValue = undefined
-			this.cachedVersion = -1
-		}
+	static resumeQueue() {
+		this.state = 'waiting for upstream source to build'
+		// explicitly wait for source to finish resuming before our own resuming
+		return when(this.source.resumePromise, () =>
+			super.resumeQueue())
+	}
 
-		valueOf() {
-			return when(super.valueOf(true), (value) => {
-				expirationStrategy.useEntry(this, (this.approximateSize || 100) * 10) // multiply by 10 because generally we want to expire index values pretty quickly
-				return value
-			})
-		}
-
-		static openDatabase() {
-			let db = Source.openChildDB(this)
-			db.on('beforecommit', () => {
-				if (this.unsavedUpdates && this.unsavedUpdates.length > 0) {
-					this.unsavedUpdates.written = true
-					db.put([QUEUED_UPDATES, this.unsavedQueuedId], this.unsavedUpdates)
-					this.unsavedUpdates = null
-				}
-			})
-			return false // is not root
-		}
-		static async initializeData() {
-			await super.initializeData()
-			let hadQueuedUpdates = this.queuedUpdateArrays.length > 0
-			for (let { key, value } of this.db.getRange({
-				start: [QUEUED_UPDATES, 0],
-				end: [QUEUED_UPDATES, 1e30],
-
+	static async clearEntries(set) {
+		let result
+		let db = this.db
+		let i = 1
+		try {
+			for (let key of db.getRange({
+				start: true,
+				values: false,
 			})) {
-				value.id = key[1]
-				value.written = true
-				this.unsavedQueuedId = Math.max(this.unsavedQueuedId || 0, value.id)
-				this.queuedUpdateArrays.push(value)
-				for (let updateId of value) {
-					allQueuedUpdates.add(updateId)
+				let [, sourceId] = key
+				if (set.has(sourceId)) {
+					result = db.removeSync(key)
 				}
+				if (i++ % 100000 == 0)
+					await delay()
 			}
-			if (this.queuedUpdateArrays.length > 0 && !hadQueuedUpdates)
-				this.processQueuedUpdates()
+		} catch(error) {
+			console.error(error)
 		}
-		static getIdsFromKey(key) {
-			return Source.getIdsFromKey(key)
-		}
-		static updateDBVersion() {
-			if (!Source.wasReset) {// only reindex if the source didn't do it for use
-				this.resumeFromKey = true
-				this.db.putSync(INITIALIZING_LAST_KEY, true)
-			}
-			super.updateDBVersion()
-		}
+		return result // just need to wait for last one to finish (guarantees all others are finished)
+	}
 
-		static resumeQueue() {
-			this.state = 'waiting for upstream source to build'
-			// explicitly wait for source to finish resuming before our own resuming
-			return when(Source.resumePromise, () =>
-				super.resumeQueue())
-		}
+	static myEarliestPendingVersion = 0 // have we registered our process, and at what version
+	static whenAllConcurrentlyIndexing?: Promise<any> // promise if we are waiting for the initial indexing process to join the concurrent indexing mode
+	static loadVersions() {
+		// don't load versions
+	}
+	resetCache() {
+		// don't reset any in the db, we are incrementally updating
+		this.cachedValue = undefined
+		this.updateVersion()
+	}
 
-		static async clearEntries(set) {
-			let result
-			let db = this.db
-			let i = 1
-			try {
-				for (let key of db.getRange({
-					start: true,
-					values: false,
-				})) {
-					let [, sourceId] = key
-					if (set.has(sourceId)) {
-						result = db.removeSync(key)
-					}
-					if (i++ % 100000 == 0)
-						await delay()
+	static get instances() {
+		// don't load from disk
+		return this._instances || (this._instances = [])
+	}
+
+	static getInstanceIds(range?: IterableOptions) {
+		let db = this.db
+		range = range || {}
+		if (range.start === undefined)
+			range.start = true
+		let whenReady
+		if (range.waitForAllIds) {
+			whenReady = when(this.ready, () => when(this.resumePromise, () => this.whenProcessingComplete))
+		}
+		let lastKey
+		range.values = false
+		return when(whenReady, () =>
+			db.getRange(range).map(( key ) => key[0]).filter(key => {
+				if (key !== lastKey) { // skip multiple entries under one key
+					lastKey = key
+					return true
 				}
-			} catch(error) {
-				console.error(error)
-			}
-			return result // just need to wait for last one to finish (guarantees all others are finished)
-		}
-
-		static myEarliestPendingVersion = 0 // have we registered our process, and at what version
-		static whenAllConcurrentlyIndexing?: Promise<any> // promise if we are waiting for the initial indexing process to join the concurrent indexing mode
-		static loadVersions() {
-			// don't load versions
-		}
-		resetCache() {
-			// don't reset any in the db, we are incrementally updating
-			this.cachedValue = undefined
-			this.updateVersion()
-		}
-
-		static get instances() {
-			// don't load from disk
-			return this._instances || (this._instances = [])
-		}
-
-		static getInstanceIds(range?: IterableOptions) {
-			let db = this.db
-			range = range || {}
-			if (range.start === undefined)
-				range.start = true
-			let whenReady
-			if (range.waitForAllIds) {
-				whenReady = when(this.ready, () => when(this.resumePromise, () => this.whenProcessingComplete))
-			}
-			let lastKey
-			range.values = false
-			return when(whenReady, () =>
-				db.getRange(range).map(( key ) => key[0]).filter(key => {
-					if (key !== lastKey) { // skip multiple entries under one key
-						lastKey = key
-						return true
-					}
-				}))
-		}
+			}))
 	}
 }
 Index.from = (Source) => Index({ Source })

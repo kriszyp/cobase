@@ -5,7 +5,6 @@ import { WeakValueMap } from './util/WeakValueMap'
 import ExpirationStrategy from './ExpirationStrategy'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
-import Index from './KeyIndex'
 import { AccessError, ConcurrentModificationError, ShareChangeError } from './util/errors'
 import { Database, IterableOptions, OperationsArray } from './storage/Database'
 //import { mergeProgress } from './UpdateProgress'
@@ -1564,7 +1563,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		if (!sources[0]) {
 			throw new Error('No source provided')
 		}
-		class Cached extends this {
+		let Cached = class extends this {
 			get checkSourceVersions() {
 				return false
 			}
@@ -1578,15 +1577,15 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		return Cached
 	}
 	static derivedFrom(...sources: Array<Persisted | Function | {}>) {
-		for (let arg of arguments) {
-			if (arg.notifies) {
+		for (let source of sources) {
+			if (source.notifies) {
 				if (!this.sources)
 					this.sources = []
-				this.sources.push(arg)
-			} else if (typeof arg === 'function') {
-				this.prototype.transform = arg
+				this.sources.push(source)
+			} else if (typeof source === 'function') {
+				this.prototype.transform = source
 			} else {
-				Object.assign(this, arg)
+				Object.assign(this, source)
 			}
 		}
 		this.start()
@@ -1771,3 +1770,4 @@ let deepFreeze = process.env.NODE_ENV == 'development'  ? (object, depth) => {
 	}
 	return object
 } : (object) => object
+import Index from './KeyIndex'
