@@ -12,7 +12,7 @@ export class Aggregator extends PersistedBase {
 	}
 	static forQueueEntry(id) {
 		return this.tryForQueueEntry(id, () => {
-			return when(this.Sources[0].get(id), value => this.updateAggregate(null, value))
+			return when(this.sources[0].get(id), value => this.updateAggregate(null, value))
 //				if (complete) {
 	//				complete.commit()
 		//		}
@@ -27,18 +27,18 @@ export class Aggregator extends PersistedBase {
 	static fetchAllIds() {
 		return []
 	}
-	static from(...Sources) {
-		return Cached.from.apply(this, Sources)
+	static from(...sources) {
+		return Cached.from.apply(this, sources)
 	}
 	static openDatabase() {
-		this.Sources[0].openChildDB(this, { cache: true })
+		this.sources[0].openChildDB(this, { cache: true })
 		return false // is not root
 	}
 	static getIdsFromKey(key) {
-		return this.Sources[0].getIdsFromKey(key)
+		return this.sources[0].getIdsFromKey(key)
 	}
 	static updateDBVersion() {
-		if (!this.Sources[0].wasReset) // only reindex if the source didn't do it for us
+		if (!this.sources[0].wasReset) // only reindex if the source didn't do it for us
 			this.db.putSync(INITIALIZING_LAST_KEY, this.resumeFromKey = true)
 		super.updateDBVersion()
 	}
@@ -49,7 +49,7 @@ export class Aggregator extends PersistedBase {
 	static resumeQueue() {
 		this.state = 'waiting for upstream source to build'
 		// explicitly wait for source to finish resuming before our own resuming
-		return when(this.Sources[0].resumePromise, () =>
+		return when(this.sources[0].resumePromise, () =>
 			super.resumeQueue())
 	}
 

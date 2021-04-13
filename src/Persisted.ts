@@ -123,6 +123,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (this.checkSourceVersions)
 			this.readyState = 'invalidated' // start in this state for items that might not be updated so freshly loaded entities don't bypass version checks
 		this.id = id
+		let sources = this.constructor.sources
+		if (sources) {
+			for (let i = 0; i < sources.length; i++) {
+				this['source' + (i ? i : '')] = sources[i].for(id)
+			}
+		}
 	}
 
 	get staysUpdated() {
@@ -213,7 +219,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 /*	static with(properties) {
 		let DerivedClass = super.with(properties)
-		DerivedClass.Sources = [this]
+		DerivedClass.sources = [this]
 		let hasRelatedProperties
 		for (let key of properties) {
 			let property = properties[key]
@@ -226,7 +232,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (hasRelatedProperties) {
 			DerivedClass.prototype.transform = function(data, ...propertySources) {
 				for (let propertySource of propertySources) {
-					data[DerivedClass.Sources[i].key] = propertySource
+					data[DerivedClass.sources[i].key] = propertySource
 				}
 				return data
 			}
@@ -239,7 +245,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		function relatesBy() {}
 		relatesBy.defineAs = function(propertyName, Parent) {
 			let RelatedIndex = TargetClass.index(foreignKey)
-			let sourceIndex = Parent.Sources.push(RelatedIndex) - 1
+			let sourceIndex = Parent.sources.push(RelatedIndex) - 1
 			let existingTransform = Parent.prototype.transform
 			Parent.prototype.transform = function(primaryData) {
 				if (existingTransform) {
@@ -259,7 +265,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let TargetClass = this
 		function relatedBy() {}
 		relatedBy.defineAs = function(propertyName, Parent) {
-			let ParentSource = Parent.Sources[0]
+			let ParentSource = Parent.sources[0]
 			let RelatedIndex = ParentSource.index(foreignKey)
 			let existingTransform = Parent.prototype.transform
 			Parent.prototype.transform = function(primaryData) {
@@ -409,7 +415,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// default version handling is just to get the static version and hash with source versions, but this can be overriden with something
 		// that gets this asynchronously or uses other logic
 		let aggregateVersion = 0
-		for (let Source of this.Sources || []) {
+		for (let Source of this.sources || []) {
 			let version = Source.getStructureVersion && Source.getStructureVersion() || 0
 			aggregateVersion = (aggregateVersion ^ version) * 1049011 + (aggregateVersion / 5555555 >>> 0)
 		}
@@ -455,7 +461,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		if (!storesObject[this.name])
 			storesObject[this.name] = this
 		allStores.set(this.name, this)
-		for (let Source of this.Sources || []) {
+		for (let Source of this.sources || []) {
 			if (Source.start)
 				Source.start()
 			Source.notifies(this)
@@ -541,8 +547,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	static async reset() {
-		if (this.Sources && this.Sources[0])
-			this.Sources[0].wasReset = false
+		if (this.sources && this.sources[0])
+			this.sources[0].wasReset = false
 		this.clearAllData()
 		await this.resetAll()
 		this.updateDBVersion()
@@ -564,7 +570,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.updateDBVersion()
 		}
 		let readyPromises = []
-		for (let Source of this.Sources || []) {
+		for (let Source of this.sources || []) {
 			readyPromises.push(Source.ready)
 		}
 		await Promise.all(readyPromises)
@@ -751,7 +757,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static whenUpdatedInContext(waitForIndexing) {
 		// transitively wait on all sources that need to update to this version
 		let promises = []
-		for (let Source of this.Sources || []) {
+		for (let Source of this.sources || []) {
 			let whenUpdated = Source.whenUpdatedInContext && Source.whenUpdatedInContext()
 			if (whenUpdated && whenUpdated.then) {
 				promises.push(whenUpdated)
@@ -948,7 +954,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.nice = nice
 			let whenUpdatesReadable
 			this.state = 'pending'
-			this.whenProcessingThisComplete = Promise.all((this.Sources || []).map(Source =>
+			this.whenProcessingThisComplete = Promise.all((this.sources || []).map(Source =>
 				Source.whenProcessingComplete)).then(() =>
 				this.processQueue(queue)).then(() => {
 					this.state = 'ready'
@@ -1206,9 +1212,6 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static dataVersionBuffer: Buffer
 	static processKey: Buffer
 	static lastIndexedVersion: int
-	static initializeRootDB() {
-		let initializingProcess = super.initializeRootDB()
-	}
 
 	static remove(id, event?) {
 		if (id > 0 && typeof id === 'string' || !id) {
@@ -1268,7 +1271,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	versionProperty: 'cachedVersion'
 }) {
 	allowDirectJSON: boolean
-	static Sources: any[]
+	static sources: any[]
 	static fetchAllIds: () => {}[]
 
 	static get(id, mode?) {
@@ -1337,7 +1340,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				cache.delete(id)
 		}
 		let hasPromises
-		let inputData = this.Sources ? this.Sources.map(source => {
+		let inputData = this.sources ? this.sources.map(source => {
 			let data = source.get(id, AS_SOURCE)
 			if (data && data.then) {
 				hasPromises = true
@@ -1351,7 +1354,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				let context = getCurrentContext()
 				let transformContext = context ? context.newContext() : new RequestContext(null, null)
 				transformContext.abortables = entry.abortables
-				return transformContext.executeWithin(() => this.prototype.transform.apply({ id }, inputData))
+				inputData.push(id)
+				return this.prototype.transform ? transformContext.executeWithin(() => this.prototype.transform.apply({ id }, inputData)) : inputData
 			}), result => {
 				if (entry.version != version) {
 					if (entry.replaceWith) {
@@ -1453,8 +1457,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		console.debug('reseting', this.name)
 		let version = this.startVersion = 1
 		let allIds = this.fetchAllIds ? await this.fetchAllIds() :
-			(this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) ?
-				await this.Sources[0].getInstanceIds({
+			(this.sources && this.sources[0] && this.sources[0].getInstanceIds) ?
+				await this.sources[0].getInstanceIds({
 					waitForAllIds: true,
 				}) : []
 		let committed
@@ -1545,8 +1549,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 
 	static _version: number
 	static get version() {
-		if (this.Sources) {
-			return this.Sources.reduce((sum, Source) => sum += (Source.version || 0), this._version)
+		if (this.sources) {
+			return this.sources.reduce((sum, Source) => sum += (Source.version || 0), this._version)
 		} else {
 			return this._version || 1
 		}
@@ -1556,34 +1560,42 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 	static returnsAsyncIterables: boolean
 
-	static from(...Sources: Array<Function & {notifies: () => any, for: (id: any) => any, returnsAsyncIterables: boolean}>) {
-		if (!Sources[0]) {
+	static from(...sources: Array<Function & {notifies: () => any, for: (id: any) => any, returnsAsyncIterables: boolean}>) {
+		if (!sources[0]) {
 			throw new Error('No source provided')
 		}
-		class CachedFrom extends this {
-			constructor(id) {
-				super(id)
-				for (let i = 0; i < Sources.length; i++) {
-					this['source' + (i ? i : '')] = Sources[i].for(id)
-				}
-			}
+		class Cached extends this {
 			get checkSourceVersions() {
 				return false
 			}
 		}
-		for (let Source of Sources) {
+		for (let Source of sources) {
 			if (Source.returnsAsyncIterables) {
 				this.returnsAsyncIterables
 			}
 		}
-		CachedFrom.Sources = Sources
-		return CachedFrom
+		Cached.sources = sources
+		return Cached
+	}
+	static derivedFrom(...sources: Array<Persisted | Function | {}>) {
+		for (let arg of arguments) {
+			if (arg.notifies) {
+				if (!this.sources)
+					this.sources = []
+				this.sources.push(arg)
+			} else if (typeof arg === 'function') {
+				this.prototype.transform = arg
+			} else {
+				Object.assign(this, arg)
+			}
+		}
+		this.start()
 	}
 
 	static getInstanceIds(range) {
-		if (!this.fetchAllIds && this.Sources && this.Sources[0] && this.Sources[0].getInstanceIds) {
+		if (!this.fetchAllIds && this.sources && this.sources[0] && this.sources[0].getInstanceIds) {
 			// if we don't know if we have all our ids, our source is a more reliable source of instance ids
-			return this.Sources[0].getInstanceIds(range)
+			return this.sources[0].getInstanceIds(range)
 		}
 		return super.getInstanceIds(range)
 	}
@@ -1598,10 +1610,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static get whenProcessingComplete() {
-		return this.Sources && Promise.all(this.Sources.map(Source => Source.whenProcessingComplete))
+		return this.sources && Promise.all(this.sources.map(Source => Source.whenProcessingComplete))
 	}
 }
-
 type PermissionCheck = (source: any, session: any, action: string, args: Array<any>) => boolean | string
 
 type Secured = {

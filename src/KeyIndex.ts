@@ -64,7 +64,7 @@ export const Index = ({ Source }) => {
 	return class extends Persistable.as(VArray) {
 		version: number
 		averageConcurrencyLevel: number
-		static Sources = [Source]
+		static sources = [Source]
 		static whenProcessingComplete: Promise<any> // promise for the completion of processing in current indexing task for this index
 		static whenCommitted: Promise<any> // promise for when an update received by this index has been fully committed (to disk)
 		static indexingProcess: Promise<any>
