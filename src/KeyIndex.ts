@@ -388,11 +388,11 @@ export class KeyIndex extends Persistable.as(VArray) {
 		if (range.start === undefined)
 			range.start = true
 		return when(!range.noWait && this.whenUpdatedInContext(), () =>
-			this._getIndexedValues(range, !range.onlyValues))
+			this._getIndexedValues(range, !range.onlyValues, range.useFullKey))
 	}
 
 	// Get a range of indexed entries for this id (used by Reduced)
-	static _getIndexedValues(range: IterableOptions, returnFullKeyValue?: boolean) {
+	static _getIndexedValues(range: IterableOptions, returnKeys?: boolean, useFullKey?: boolean) {
 		const db: Database = this.db
 		let approximateSize = 0
 		let promises = []
@@ -403,13 +403,13 @@ export class KeyIndex extends Persistable.as(VArray) {
 			}*/
 			let parsedValue = value == null ? this.source.get(sourceId) : value
 			if (parsedValue && parsedValue.then) {
-				return parsedValue.then(parsedValue => returnFullKeyValue ? {
-					key: sourceId,
+				return parsedValue.then(parsedValue => returnKeys ? {
+					key: useFullKey ? key : sourceId,
 					value: parsedValue,
 				} : parsedValue)
 			}
-			return returnFullKeyValue ? {
-				key: sourceId,
+			return returnKeys ? {
+				key: useFullKey ? key : sourceId,
 				value: parsedValue,
 			} : parsedValue
 		})

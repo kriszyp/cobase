@@ -338,7 +338,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static clearAllData() {
 		let db = this.db
 		let count = 0
-		db.transaction(() => {
+		db.transactionSync(() => {
 			db.clear()
 		})
 		console.debug('Cleared the database', this.name, ', rebuilding')
@@ -375,7 +375,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// TODO: Might be better use Buffer.allocUnsafeSlow(6)
 		const processKey = this.processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
 		let initializingProcess
-		db.transaction(() => {
+		db.transactionSync(() => {
 			initializingProcess = db.get(INITIALIZING_PROCESS_KEY)
 			initializingProcess = initializingProcess && +initializingProcess.toString()
 			this.otherProcesses = Array.from(db.getRange({
@@ -518,14 +518,14 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let deadProcessKey = Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff])
 			let invalidationState = db.get(deadProcessKey)
 			if (this.doesInitialization !== false) {
-				db.transaction(async () => {
+				db.transactionSync(async () => {
 					db.removeSync(deadProcessKey)
 				})
 			}
 		}
 		if (initializingProcess == pid && this.doesInitialization !== false) {
 			let doInit
-			db.transaction(() => {
+			db.transactionSync(() => {
 				// make sure it is still the initializing process
 				initializingProcess = db.get(Buffer.from([1, 4]))
 				initializingProcess = initializingProcess && +initializingProcess.toString()
