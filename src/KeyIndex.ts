@@ -184,7 +184,6 @@ export class KeyIndex extends Persistable.as(VArray) {
 					if (isChanged) {
 						let fullKey = [ key, id ]
 						operations.push({
-							type: 'put',
 							key: fullKey,
 							value: value
 						})
@@ -201,7 +200,6 @@ export class KeyIndex extends Persistable.as(VArray) {
 				continue
 			}*/
 			operations.push({
-				type: 'del',
 				key: [ key, id ]
 			})
 			if (!this.resumePromise && this.listeners && this.listeners.length > 0)
@@ -213,8 +211,18 @@ export class KeyIndex extends Persistable.as(VArray) {
 		return {
 			commit: () => {
 				let batchFinished
-				if (operations.length > 0) {
-					batchFinished = this.db.batch(operations)
+				let encoder = this.db.encoder
+				this.db.encoder = null
+				try {
+					for (let operation of operations) {
+						if (operation.value)
+							batchFinished = this.db.put(operation.key, operation.value)
+						else
+							batchFinished = this.db.remove(operation.key)
+					}
+				}
+				finally {
+					this.db.encoder = encoder
 				}
 				if (eventUpdateSources.length > 0) {
 					return (batchFinished || Promise.resolve()).then(() =>
