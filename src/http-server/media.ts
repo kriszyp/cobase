@@ -48,7 +48,7 @@ function serializer(returnValue, connection) {
 	if (returnValue === undefined)
 		return // nothing to serialize
 	let requestHeaders = connection.request.headers
-	let acceptHeader = requestHeaders.accept || '*/*'
+	let acceptHeader = connection.query?.accept || requestHeaders.accept || '*/*'
 	let responseHeaders = connection.response.headers
 	responseHeaders.vary = (responseHeaders.vary ? responseHeaders.vary + ',' : '') + 'Accept'
 	let bestSerializer = jsonMediaType // default for now, TODO: return a 415

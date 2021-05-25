@@ -1187,11 +1187,9 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		let db = this.db
 		return when(when(this.resetProcess, () => this.whenWritten || Promise.resolve()), () => {
 			let results = db.getRange(Object.assign({
-				start: true
-			}, range)).map(entry => {
-				entry.version = getLastVersion() // TODO: This will only work if we are doing per-item iteration
-				return entry
-			})
+				start: true,
+				versions: true,
+			}, range))
 			return range && range.asIterable ? results : results.asArray
 		})
 	}
