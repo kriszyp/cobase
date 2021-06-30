@@ -16,7 +16,7 @@
   "types": "./dist/index.d.ts",
   "dependencies": {
     "msgpackr": "^1.3.2",
-    "lmdb-store": "^1.5.1"
+    "lmdb-store": "1.6.0-beta.1"
   },
   "peerDependencies": {
     "alkali": "^1.1.2"
