@@ -1,5 +1,5 @@
 import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { open, getLastVersion, getLastEntrySize, compareKey } from 'lmdb-store'
+import { open, getLastVersion, getLastEntrySize, compareKey } from 'lmdb'
 import when from './util/when'
 import { WeakValueMap } from './util/WeakValueMap'
 import ExpirationStrategy from './ExpirationStrategy'
@@ -429,12 +429,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			noMemInit: true,
 			useWritemap: false,
 		}
-		if (this.mapSize) {
-			options.mapSize = this.mapSize
-		}
-		if (this.maxDbs) {
+		if (this.maxSharedStructures)
+			options.maxSharedStructures = this.maxSharedStructures
+		if (this.shouldShareStructure)
+			options.shouldShareStructure = this.shouldShareStructure
+		if (this.maxDbs)
 			options.maxDbs = this.maxDbs
-		}
 		if (this.useWritemap)
 			options.useWritemap = this.useWritemap
 		if (this.useFloat32)
@@ -1011,7 +1011,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static removeUnusedDBs() {
 		let unusedDBs = new Set()
-		for (let { key } of this.rootDB.getRange({
+		for (let key of this.rootDB.getKeys({
 			start: Buffer.from([2])
 		})) {
 			unusedDBs.add(key.toString())
