@@ -1,6 +1,5 @@
-import { configure as configureProcess } from './util/process'
-import { configure as configurePersisted } from './Persisted'
-import { setRequestContextClass } from './RequestContext'
+import { configure as configurePersisted } from './Persisted.js'
+import { setRequestContextClass } from './RequestContext.js'
 export function configure(options) {
 	if (options.dbFolder || options.cacheDbFolder || options.doesInitialization !== undefined) {
 		configurePersisted(options)

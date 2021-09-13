@@ -1,15 +1,16 @@
-import { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } from 'alkali'
-import { open, getLastVersion, getLastEntrySize, compareKey } from 'lmdb'
-import when from './util/when'
-import { WeakValueMap } from './util/WeakValueMap'
-import ExpirationStrategy from './ExpirationStrategy'
+import * as alkali from 'alkali';
+const { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } = alkali.Variable ? alkali : alkali.default
+import { open, getLastVersion, getLastEntrySize, compareKeys } from 'lmdb'
+import when from './util/when.js'
+import { WeakValueMap } from './util/WeakValueMap.js'
+import ExpirationStrategy from './ExpirationStrategy.js'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
-import { AccessError, ConcurrentModificationError, ShareChangeError } from './util/errors'
-import { Database, IterableOptions, OperationsArray } from './storage/Database'
+import { AccessError, ConcurrentModificationError, ShareChangeError } from './util/errors.js'
+import { Database, IterableOptions, OperationsArray } from './storage/Database.js'
 //import { mergeProgress } from './UpdateProgress'
-import { registerClass, addProcess } from './util/process'
-import { DEFAULT_CONTEXT, RequestContext } from './RequestContext'
+import { registerClass, addProcess } from './util/process.js'
+import { DEFAULT_CONTEXT, RequestContext } from './RequestContext.js'
 
 let getCurrentContext = () => currentContext
 
@@ -200,20 +201,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		Object.defineProperty(index, 'name', { value: this.name + '-index-' + propertyName })
 		index.start()
 		return index
-	}
-
-	static reduce(name: string, reduceFunction: (accumulator, nextValue) => any) {
-		let reduced = this['reduced-' + name]
-		if (reduced) {
-			return reduced
-		}
-		reduced = this['reduced-' + name] = class extends Reduced.from(this) {
-			static reduceBy(a, b) {
-				return reduceFunction.call(this, a, b)
-			}
-		}
-		Object.defineProperty(reduced, 'name', { value: this.name + '-reduced-' + name })
-		return reduced
 	}
 
 /*	static with(properties) {
@@ -1108,7 +1095,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	static saveValue(id, entry, version?) {
 		this.highestVersionToIndex = Math.max(this.highestVersionToIndex || 0, version)
-		let forValueResults = this.indices ? this.indices.map(store => store.forValue(id, entry)) : []
+		let forValueResults = (this.indices && !entry.noIndex) ? this.indices.map(store => store.forValue(id, entry)) : []
 		let promises = forValueResults.filter(promise => promise && promise.then)
 
 		const readyToCommit = (forValueResults) => {
@@ -1416,7 +1403,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static enqueue(id, event, previousEntry?) {
-		if (this.resumeFromKey && compareKey(this.resumeFromKey, id) < 0) // during initialization, we ignore updates because we are going rebuild
+		if (this.resumeFromKey && compareKeys(this.resumeFromKey, id) < 0) // during initialization, we ignore updates because we are going rebuild
 			return
 		const version = event.version
 		// queue up processing the event
@@ -1508,6 +1495,8 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 				}
 				db.cache.set(id, entry, -1) // enter in cache without LRFU tracking, keeping it in memory
 			}
+			if (event.noIndex)
+				entry.noIndex = true
 			if (!by || by.invalidate !== false) {
 				written = this.forQueueEntry(id).then(() => entry.committed)
 				let lastCompletion = this.whenIndexedAndCommitted = (this.whenIndexedAndCommitted ?
@@ -1703,7 +1692,6 @@ export function getCurrentStatus() {
 }
 
 secureAccess.checkPermissions = () => true
-import { Reduced } from './Reduced'
 
 let clearOnStart
 let sharedStructureDirectory
@@ -1768,4 +1756,4 @@ let deepFreeze = process.env.NODE_ENV == 'development'  ? (object, depth) => {
 	}
 	return object
 } : (object) => object
-import Index from './KeyIndex'
+import Index from './KeyIndex.js'

@@ -1,8 +1,8 @@
-import when from '../util/when'
-import { bufferStream } from '../util/bufferStream'
-import { jsonMediaType } from './JSONStream'
-import { textMediaType } from './text'
-import { htmlMediaType, sendResourceEditor } from './html'
+import when from '../util/when.js'
+import { bufferStream } from '../util/bufferStream.js'
+import { jsonMediaType } from './JSONStream.js'
+import { textMediaType } from './text.js'
+import { htmlMediaType, sendResourceEditor } from './html.js'
 
 export const mediaTypes = new Map()
 export function media(connection, next) {

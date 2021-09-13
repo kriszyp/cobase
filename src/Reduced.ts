@@ -1,5 +1,5 @@
-import { Cached } from './Persisted'
-import when from './util/when'
+import { Cached, Persisted } from './Persisted.js'
+import when from './util/when.js'
 const INVALIDATED_VALUE = Buffer.from([])
 const SEPARATOR_BYTE = Buffer.from([30]) // record separator control character
 const REDUCED_INDEX_PREFIX_BYTE = Buffer.from([3])
@@ -266,4 +266,18 @@ export class Reduced extends Cached {
 			//return result
 		})
 	}
+}
+
+Cached.reduce = Persisted.reduce = function(name: string, reduceFunction: (accumulator, nextValue) => any) {
+	let reduced = this['reduced-' + name]
+	if (reduced) {
+		return reduced
+	}
+	reduced = this['reduced-' + name] = class extends Reduced.from(this) {
+		static reduceBy(a, b) {
+			return reduceFunction.call(this, a, b)
+		}
+	}
+	Object.defineProperty(reduced, 'name', { value: this.name + '-reduced-' + name })
+	return reduced
 }

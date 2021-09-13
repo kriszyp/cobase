@@ -1,7 +1,7 @@
 import { Readable } from 'stream'
-import { Context } from 'alkali'
-import when from '../util/when'
-import { RequestContext } from '../RequestContext'
+import alkali from 'alkali'; const { Context } = alkali
+import when from '../util/when.js'
+import { RequestContext } from '../RequestContext.js'
 const BUFFER_SIZE = 10000
 const COMMA = Buffer.from(',')
 const OPEN_CURLY = Buffer.from('{')

@@ -9,11 +9,30 @@
     "url": "http://github.com/kriszyp/cobase"
   },
   "scripts": {
-    "test": "./node_modules/.bin/mocha tests/unit -u tdd",
-    "build": "./node_modules/.bin/tsc"
+    "test": "mocha tests/unit -u tdd",
+    "build": "tsc || rollup -c"
   },
+  "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js"
+    },
+    "./index.js": {
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js"
+    },
+    "./dist/util/WeakValueMap": {
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js"
+    },
+    "./dist/util/when": {
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js"
+    }
+  },
   "dependencies": {
     "msgpackr": "^1.4.0",
     "lmdb": "^1.6.6"
@@ -29,7 +48,7 @@
     "chai": "^4",
     "fs-extra": "^9.0.0",
     "mocha": "^5",
-    "typescript": "^2.9.2",
-    "webpack": "^4.16.3"
+    "typescript": "^4.4.3",
+    "rollup": "^1.20.3"
   }
 }

@@ -1,5 +1,5 @@
-import { PersistedBase, Persisted, Cached } from './Persisted'
-import when from './util/when'
+import { PersistedBase, Persisted, Cached } from './Persisted.js'
+import when from './util/when.js'
 const INITIALIZING_LAST_KEY = Buffer.from([1, 7])
 
 export class Aggregator extends PersistedBase {

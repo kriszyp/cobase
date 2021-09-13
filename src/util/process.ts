@@ -1,10 +1,9 @@
 import { fork } from 'child_process'
-import when from './when'
+import when from './when.js'
 import * as net from 'net'
 import * as path from 'path'
 import { PackrStream, UnpackrStream } from 'msgpackr'
-import { spawn, UpdateEvent, currentContext } from 'alkali'
-import { CurrentRequestContext } from '../RequestContext'
+import * as alkali from 'alkali'; const { spawn, UpdateEvent, currentContext } = alkali
 
 let pipeServerStarted
 const classMap = new Map<string, any>()

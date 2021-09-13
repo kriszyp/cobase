@@ -1,10 +1,8 @@
-import { VArray, ReplacedEvent, UpdateEvent, getNextVersion } from 'alkali'
-import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted'
-import { ShareChangeError } from './util/errors'
-import when from './util/when'
-import ExpirationStrategy from './ExpirationStrategy'
-import { OperationsArray, IterableOptions, Database } from './storage/Database'
-import { DEFAULT_CONTEXT } from './RequestContext'
+import * as alkali from 'alkali'; const { VArray, ReplacedEvent, UpdateEvent, getNextVersion } = alkali
+import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted.js'
+import when from './util/when.js'
+import ExpirationStrategy from './ExpirationStrategy.js'
+import { OperationsArray, IterableOptions, Database } from './storage/Database.js'
 //import { mergeProgress, registerProcessing, whenClassIsReady, DEFAULT_CONTEXT } from './UpdateProgress'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance

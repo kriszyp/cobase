@@ -2,7 +2,7 @@
     "compileOnSave": true,
     "compilerOptions": {
         "target": "ES2017",
-        "module": "commonjs",
+        "module": "esnext",
         "declaration": true,
         "moduleResolution": "node",
         "stripInternal": true,
