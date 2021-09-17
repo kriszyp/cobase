@@ -1,5 +1,5 @@
 let resourceEditor
-const fs = require('fs')
+import fs from 'fs'
 import { PackrStream } from 'msgpackr'
 export const htmlMediaType = {
 	q: 0.2,

@@ -1,4 +1,4 @@
-import * as alkali from 'alkali'; const { VArray, ReplacedEvent, UpdateEvent, getNextVersion } = alkali
+import * as alkali from 'alkali'; const { VArray, ReplacedEvent, UpdateEvent, getNextVersion } = alkali.VArray ? alkali : alkali.default
 import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persisted.js'
 import when from './util/when.js'
 import ExpirationStrategy from './ExpirationStrategy.js'

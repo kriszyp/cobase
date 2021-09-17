@@ -1,4 +1,4 @@
-import * as alkali from 'alkali'; const { Context } = alkali
+import * as alkali from 'alkali'; const { Context } = alkali.Context ? alkali : alkali.default
 export class RequestContext extends Context {
 	preferJSON: boolean // used by JSONStream to assist with direct JSON transfers
 	request: any
