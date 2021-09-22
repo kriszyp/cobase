@@ -3,7 +3,7 @@ import when from './when.js'
 import * as net from 'net'
 import * as path from 'path'
 import { PackrStream, UnpackrStream } from 'msgpackr'
-import * as alkali from 'alkali'; const { spawn, UpdateEvent, currentContext } = alkali
+import * as alkali from 'alkali'; const { spawn, UpdateEvent, currentContext } = alkali.Variable ? alkali : alkali.default
 
 let pipeServerStarted
 const classMap = new Map<string, any>()

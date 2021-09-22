@@ -1172,7 +1172,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 
 	static entries(range) {
 		let db = this.db
-		return when(when(this.resetProcess, () => this.whenWritten || Promise.resolve()), () => {
+		return when(this.ready, () => {
 			let results = db.getRange(Object.assign({
 				start: true,
 				versions: true,
@@ -1459,7 +1459,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			this.lastVersion = version++ // we give each entry its own version so that downstream childStores have unique versions to go off of
 			this.whenWritten = committed = this.db.put(id, 0, -version)
 			if (queued++ > 2000) {
+				console.log('writing block of ids')
 				await this.whenWritten
+				console.log('wrote block of ids')
 				queued = 0
 			}
 		}
