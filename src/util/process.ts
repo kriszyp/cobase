@@ -107,6 +107,8 @@ function attachClass(stream, Class, processId) {
 	if (!otherProcesses.includes(processId) && processId !== process.pid) {
 		otherProcesses.push(processId)
 	}
+	let queue = []
+	let timeoutToWrite
 	const updater = {
 		updated(event, by) {
 			// TODO: debounce
@@ -132,8 +134,15 @@ function attachClass(stream, Class, processId) {
 					delete eventToSerialize.target
 					delete eventToSerialize.oldValue
 					delete eventToSerialize.whenWritten
-					when(event.whenWritten, () =>
-						stream.write(eventToSerialize))
+					when(event.whenWritten, () => {
+						queue.push(eventToSerialize)
+						if (!timeoutToWrite)
+							timeoutToWrite = setTimeout(() => {
+								timeoutToWrite = null
+								stream.write(queue)
+								queue = []
+							}, 10)
+					})
 				} catch(error) {
 					// TODO: Not sure how we get in this state
 					console.warn(error)
@@ -182,6 +191,11 @@ function attachClass(stream, Class, processId) {
 
 function onMessage(message, stream) {
 	try {
+		if (message instanceof Array) {
+			for (let part of message)
+				onMessage(part, stream)
+			return
+		}
 		const { requestId, responseId, className, instanceId } = message
 
 		if (responseId) {

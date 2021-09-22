@@ -294,7 +294,7 @@ export class KeyIndex extends Persistable.as(VArray) {
 					let whenWritten = event.whenWritten
 					if (whenWritten) {
 						inProgress.push(event.whenWritten)
-						if (inProgress.length > 100) {
+						if (inProgress.length > 20) {
 							await Promise.all(inProgress)
 							inProgress = []
 						}
