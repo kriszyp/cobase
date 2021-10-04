@@ -1,7 +1,7 @@
 // this provides a weak-valued map to ensure we only have a single instance of an object per id, but can still be GC-ed
+import { WeakLRUCache } from 'weak-lru-cache'
 export let WeakValueMap
 try {
-	const { WeakLRUCache } = await import('weak-lru-cache')
 	let allInstances = []
 	WeakValueMap = function() {
 		let map = new WeakLRUCache({
