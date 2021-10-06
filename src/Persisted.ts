@@ -840,6 +840,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 
 	static queue: Map<any, IndexRequest>
 	static async processQueue(queue) {
+		this.state = 'waiting to process queue'
+		await this.ready
 		this.state = 'processing'
 		if (this.onStateChange) {
 			this.onStateChange({ processing: true, started: true })
@@ -1075,7 +1077,7 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 	static is(id, value, event) {
 		let entry = this.db.getEntry(id, NO_CACHE)
 		if (!event) {
-			event = entry ? new ReplacedEvent() : new AddedEvent()
+			event = entry ? new ReplacedEvent() : new DiscoveredEvent()
 		}
 		event.triggers = [ DISCOVERED_SOURCE ]
 		event.source = { constructor: this, id }
