@@ -549,6 +549,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		} else {
 			console.log('transform/database version mismatch, reseting db table', this.name, this.expectedDBVersion, this.dbVersion, this.version)
 			this.wasReset = true
+			this.resumeFromKey = true
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
 			this.clearAllData()
@@ -1461,9 +1462,9 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 			this.lastVersion = version++ // we give each entry its own version so that downstream childStores have unique versions to go off of
 			this.whenWritten = committed = this.db.put(id, 0, -version)
 			if (queued++ > 2000) {
-				console.log('writing block of ids')
+				//console.log('writing block of ids')
 				await this.whenWritten
-				console.log('wrote block of ids')
+				//console.log('wrote block of ids')
 				queued = 0
 			}
 		}
