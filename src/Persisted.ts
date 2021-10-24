@@ -414,6 +414,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 			cache: true,
 			noMemInit: true,
+			overlappingSync: true,
 			useWritemap: false,
 		}
 		if (this.maxSharedStructures)
