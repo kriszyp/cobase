@@ -11,6 +11,7 @@ import { Database, IterableOptions, OperationsArray } from './storage/Database.j
 //import { mergeProgress } from './UpdateProgress'
 import { registerClass, addProcess } from './util/process.js'
 import { DEFAULT_CONTEXT, RequestContext } from './RequestContext.js'
+import { platform } from 'os'
 
 let getCurrentContext = () => currentContext
 
@@ -414,7 +415,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 			cache: true,
 			noMemInit: true,
-			overlappingSync: true,
+			overlappingSync: platform() != 'win32',
 			useWritemap: false,
 		}
 		if (this.maxSharedStructures)
