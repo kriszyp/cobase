@@ -1,5 +1,5 @@
 export { Index, KeyIndex } from './KeyIndex.js'
-export { Persisted, Cached, Persistable, secureAccess, writeCommonStructures, getCurrentStatus } from './Persisted.js'
+export { Persisted, Cached, Persistable, secureAccess, writeCommonStructures, getCurrentStatus, allStores } from './Persisted.js'
 export { RequestContext } from './RequestContext.js'
 export { Reduced } from './Reduced.js'
 export { AccessError, UnauthenticatedError } from './util/errors.js'

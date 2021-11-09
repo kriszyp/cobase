@@ -35,7 +35,7 @@ const NO_CACHE = 2
 const AS_SOURCE = {}
 const EXTENSION = '.mdb'
 const DB_FORMAT_VERSION = 0
-const allStores = new Map()
+export const allStores = new Map()
 
 export const ENTRY = Symbol('entry')
 
@@ -326,10 +326,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static clearAllData() {
 		let db = this.db
 		let count = 0
-		db.transactionSync(() => {
-			db.clear()
-		})
-		console.debug('Cleared the database', this.name, ', rebuilding')
+		return db.clearAsync().then(() =>
+			console.debug('Cleared the database', this.name, ', rebuilding'))
 	}
 
 	static register(sourceCode?: { id?: string, version?: number }) {
@@ -363,23 +361,21 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		// TODO: Might be better use Buffer.allocUnsafeSlow(6)
 		const processKey = this.processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
 		let initializingProcess
-		db.transactionSync(() => {
-			initializingProcess = db.get(INITIALIZING_PROCESS_KEY)
-			initializingProcess = initializingProcess && +initializingProcess.toString()
-			this.otherProcesses = Array.from(db.getRange({
-				start: Buffer.from([1, 3]),
-				end: INITIALIZING_PROCESS_KEY,
-			}).map(({key, value}) => (key[2] << 24) + (key[3] << 16) + (key[4] << 8) + key[5])).filter(pid => !isNaN(pid))
-			db.putSync(processKey, '1') // register process, in ready state
-			if ((!initializingProcess || !this.otherProcesses.includes(initializingProcess)) && this.doesInitialization !== false) {
-				initializingProcess = null
-				db.putSync(INITIALIZING_PROCESS_KEY, process.pid.toString())
-			}
-			if (this.otherProcesses.includes(process.pid)) {
-				//console.warn('otherProcesses includes self')
-				this.otherProcesses.splice(this.otherProcesses.indexOf(process.pid))
-			}
-		})
+		initializingProcess = db.get(INITIALIZING_PROCESS_KEY)
+		initializingProcess = initializingProcess && +initializingProcess.toString()
+		this.otherProcesses = Array.from(db.getRange({
+			start: Buffer.from([1, 3]),
+			end: INITIALIZING_PROCESS_KEY,
+		}).map(({key, value}) => (key[2] << 24) + (key[3] << 16) + (key[4] << 8) + key[5])).filter(pid => !isNaN(pid))
+		db.putSync(processKey, '1') // register process, in ready state
+		if ((!initializingProcess || !this.otherProcesses.includes(initializingProcess)) && this.doesInitialization !== false) {
+			initializingProcess = null
+			db.putSync(INITIALIZING_PROCESS_KEY, process.pid.toString())
+		}
+		if (this.otherProcesses.includes(process.pid)) {
+			//console.warn('otherProcesses includes self')
+			this.otherProcesses.splice(this.otherProcesses.indexOf(process.pid))
+		}
 		this.initializingProcess = initializingProcess
 		this.whenUpgraded = Promise.resolve()
 		const waitForUpgraded = () => {
@@ -458,6 +454,9 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.instancesById.name = this.name
 		return when(this.getStructureVersion(), structureVersion => {
 			this.expectedDBVersion = (structureVersion || 0) ^ (DB_FORMAT_VERSION << 12)
+			this.rootDB.transactionSync(() => {
+				return new Promise(resolve => this.releaseStartTxn = resolve)
+			})
 			if (isRoot)
 				this.initializeRootDB()
 			let initializingProcess = this.rootStore.initializingProcess
@@ -473,10 +472,13 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			if (initializingProcess || this.doesInitialization === false) {
 				// there is another process handling initialization
 				return when(whenEachProcess.length > 0 && Promise.all(whenEachProcess), (results) => {
+					this.releaseStartTxn()
 					console.debug('Connected to each process complete and finished reset initialization')
 				})
 			}
-			return this.doDataInitialization()
+			return this.doDataInitialization().then(() => {
+				this.releaseStartTxn()
+			})
 		}, (error) => {
 			console.error('Error getting database version', error)
 		})
@@ -507,14 +509,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			let deadProcessKey = Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff])
 			let invalidationState = db.get(deadProcessKey)
 			if (this.doesInitialization !== false) {
-				db.transactionSync(async () => {
-					db.removeSync(deadProcessKey)
-				})
+				db.removeSync(deadProcessKey)
 			}
 		}
 		if (initializingProcess == pid && this.doesInitialization !== false) {
 			let doInit
-			db.transactionSync(() => {
+			//db.transactionSync(() => {
 				// make sure it is still the initializing process
 				initializingProcess = db.get(Buffer.from([1, 4]))
 				initializingProcess = initializingProcess && +initializingProcess.toString()
@@ -526,7 +526,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					doInit = true
 					
 				}
-			})
+			//})
 			if (initializingProcess == process.pid) {
 				return this.doDataInitialization()
 			}
@@ -537,7 +537,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static async reset() {
 		if (this.sources && this.sources[0])
 			this.sources[0].wasReset = false
-		this.clearAllData()
+		await this.clearAllData()
 		await this.resetAll()
 		this.updateDBVersion()
 		this.resumeQueue()
@@ -554,7 +554,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.resumeFromKey = true
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
-			this.clearAllData()
+			await this.clearAllData()
 			await this.resetAll()
 			this.updateDBVersion()
 		}
@@ -812,7 +812,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static tryForQueueEntry(id, action) {
 		this.lastIndexingId = id
 		const onQueueError = async (error) => {
-			let indexRequest = this.queue && this.queue.get(id) || {}
+			let indexRequest = this.db.cache.get(id) || {}
 			let version = indexRequest.version
 			if (error.isTemporary) {
 				let retries = indexRequest.retries = (indexRequest.retries || 0) + 1
@@ -879,8 +879,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 					indexed++
 					let desiredConcurrentRatio = actionsInProgress.size / Math.min(indexed, this.MAX_CONCURRENCY || DEFAULT_INDEXING_CONCURRENCY)
 					delayMs = Math.min(Math.max(delayMs, 1) * (desiredConcurrentRatio + Math.sqrt(indexed)) / (Math.sqrt(indexed) + 1), (actionsInProgress.size + 4) * 100)
-					if (this.isRetrying) {
-						await delay(1000)
+					while (this.isRetrying) {
+						await delay(1000 + delayMs)
 						delayMs = (delayMs + 10) * 2
 					}
 					this.delayMs = delayMs
