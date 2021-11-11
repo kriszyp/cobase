@@ -1,7 +1,11 @@
 {
   "name": "cobase",
   "author": "Kris Zyp",
+<<<<<<< HEAD
   "version": "0.10.8",
+=======
+  "version": "0.10.9",
+>>>>>>> Update version
   "description": "Compositional data stores of reactive JavaScript transform, index, reduce, and join functions, built on NodeJS, Alkali, and LMDB",
   "license": "MIT",
   "repository": {
