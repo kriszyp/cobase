@@ -411,6 +411,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 			cache: true,
 			noMemInit: true,
+			//encoding: 'cbor',
 			overlappingSync: platform() != 'win32',
 			useWritemap: false,
 		}
@@ -968,6 +969,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let db = store.db = this.rootDB.openDB(store.dbName || store.name, Object.assign({
 			compression: true,
 			useFloat32: 3, // DECIMAL_ROUND
+			//encoding: 'cbor',
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 		}, options))
 		store.rootDB = this.rootDB
@@ -1125,12 +1127,13 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 							return
 						}
 					} else {
-						this.whenWritten = committed = this.db.remove(id)
+						this.db.remove(id)
 					}
 				} else {
-					this.whenWritten = committed = this.db.put(id, value, version)
+					this.db.put(id, value, version)
 				}
 			})
+			this.whenWritten = committed.flushed || committed
 
 			return committed.then((successfulWrite) => {
 				//if (this.transitions.get(id) == transition && !transition.invalidating)
