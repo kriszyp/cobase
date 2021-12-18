@@ -3,6 +3,7 @@ import { Persistable, INVALIDATED_ENTRY, VERSION, Invalidated } from './Persiste
 import when from './util/when.js'
 import ExpirationStrategy from './ExpirationStrategy.js'
 import { OperationsArray, IterableOptions, Database } from './storage/Database.js'
+import { asBinary } from 'lmdb'
 //import { mergeProgress, registerProcessing, whenClassIsReady, DEFAULT_CONTEXT } from './UpdateProgress'
 
 const expirationStrategy = ExpirationStrategy.defaultInstance
@@ -209,18 +210,11 @@ export class KeyIndex extends Persistable.as(VArray) {
 		return {
 			commit: () => {
 				let batchFinished
-				let encoder = this.db.encoder
-				this.db.encoder = null
-				try {
-					for (let operation of operations) {
-						if (operation.value)
-							batchFinished = this.db.put(operation.key, operation.value)
-						else
-							batchFinished = this.db.remove(operation.key)
-					}
-				}
-				finally {
-					this.db.encoder = encoder
+				for (let operation of operations) {
+					if (operation.value)
+						batchFinished = this.db.put(operation.key, asBinary(operation.value))
+					else
+						batchFinished = this.db.remove(operation.key)
 				}
 				if (eventUpdateSources.length > 0) {
 					return (batchFinished || Promise.resolve()).then(() =>

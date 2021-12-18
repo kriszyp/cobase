@@ -1,6 +1,6 @@
 import * as alkali from 'alkali';
 const { Transform, VPromise, VArray, Variable, spawn, currentContext, NOT_MODIFIED, getNextVersion, ReplacedEvent, DeletedEvent, AddedEvent, UpdateEvent, Context } = alkali.Variable ? alkali : alkali.default
-import { open, compareKey } from 'lmdb'
+import { open, compareKeys } from 'lmdb'
 import when from './util/when.js'
 import { WeakValueMap } from './util/WeakValueMap.js'
 import ExpirationStrategy from './ExpirationStrategy.js'
@@ -1411,7 +1411,7 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 	}
 
 	static enqueue(id, event, previousEntry?) {
-		if (this.resumeFromKey && compareKey(this.resumeFromKey, id) < 0) // during initialization, we ignore updates because we are going rebuild
+		if (this.resumeFromKey && compareKeys(this.resumeFromKey, id) < 0) // during initialization, we ignore updates because we are going rebuild
 			return
 		const version = event.version
 		// queue up processing the event
