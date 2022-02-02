@@ -6,6 +6,7 @@ import { WeakValueMap } from './util/WeakValueMap.js'
 import ExpirationStrategy from './ExpirationStrategy.js'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
+import * as CBOR from 'cbor-x'
 import { AccessError, ConcurrentModificationError, ShareChangeError } from './util/errors.js'
 import { Database, IterableOptions, OperationsArray } from './storage/Database.js'
 //import { mergeProgress } from './UpdateProgress'
@@ -291,7 +292,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	}
 
 	transform(source) {
-		return source
+		return
 	}
 
 	static updatesRecorded(event) {
@@ -310,6 +311,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return this.start()
 	}
 	static start() {
+		if (this.name == '_a')
+			return
 		if (!this.hasOwnProperty('_ready')) {
 			let resolver
 			this._ready = Promise.resolve(this.initialize())
@@ -357,7 +360,6 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 	static initializeRootDB() {
 		const db = this.rootDB
 		this.rootStore = this
-
 		// TODO: Might be better use Buffer.allocUnsafeSlow(6)
 		const processKey = this.processKey = Buffer.from([1, 3, (process.pid >> 24) & 0xff, (process.pid >> 16) & 0xff, (process.pid >> 8) & 0xff, process.pid & 0xff])
 		let initializingProcess
@@ -367,10 +369,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			start: Buffer.from([1, 3]),
 			end: INITIALIZING_PROCESS_KEY,
 		}).map(({key, value}) => (key[2] << 24) + (key[3] << 16) + (key[4] << 8) + key[5])).filter(pid => !isNaN(pid))
-		db.putSync(processKey, '1') // register process, in ready state
-		if ((!initializingProcess || !this.otherProcesses.includes(initializingProcess)) && this.doesInitialization !== false) {
-			initializingProcess = null
-			db.putSync(INITIALIZING_PROCESS_KEY, process.pid.toString())
+		if (!db.readOnly) {
+			db.putSync(processKey, '1') // register process, in ready state
+			if ((!initializingProcess || !this.otherProcesses.includes(initializingProcess)) && this.doesInitialization !== false) {
+				initializingProcess = null
+				db.putSync(INITIALIZING_PROCESS_KEY, process.pid.toString())
+			}
 		}
 		if (this.otherProcesses.includes(process.pid)) {
 			//console.warn('otherProcesses includes self')
@@ -381,7 +385,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		const waitForUpgraded = () => {
 			let whenUpgraded = this.whenUpgraded
 			whenUpgraded.then(() => setTimeout(() => {
-				if (whenUpgraded == this.whenUpgraded)
+				if (whenUpgraded == this.whenUpgraded && !db.readOnly)
 					try {
 						this.db.removeSync(INITIALIZING_PROCESS_KEY)
 					} catch (error) {
@@ -409,11 +413,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			compression: true,
 			useFloat32: 3, // DECIMAL_ROUND
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
-			cache: true,
+			cache: { clearKeptInterval: 20 },
 			noMemInit: true,
-			//encoding: 'cbor',
+			//encoder: CBOR,
 			overlappingSync: platform() != 'win32',
 			useWritemap: false,
+			//readOnly: true,
 		}
 		if (this.maxSharedStructures)
 			options.maxSharedStructures = this.maxSharedStructures
@@ -432,7 +437,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		this.rootDB = open(this.dbFolder + '/' + this.name + EXTENSION, options)
 
 		Object.assign(this, this.rootDB.get(DB_VERSION_KEY))
-		this.prototype.db = this.db = this.openDB(this, { useVersions: true, cache: true })
+		this.prototype.db = this.db = this.openDB(this, { useVersions: true, cache: { clearKeptInterval: 20 } })
 		return true
 	}
 
@@ -509,7 +514,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.otherProcesses.splice(index, 1)
 			let deadProcessKey = Buffer.from([1, 3, (pid >> 24) & 0xff, (pid >> 16) & 0xff, (pid >> 8) & 0xff, pid & 0xff])
 			let invalidationState = db.get(deadProcessKey)
-			if (this.doesInitialization !== false) {
+			if (this.doesInitialization !== false && !db.readOnly) {
 				db.removeSync(deadProcessKey)
 			}
 		}
@@ -519,7 +524,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				// make sure it is still the initializing process
 				initializingProcess = db.get(Buffer.from([1, 4]))
 				initializingProcess = initializingProcess && +initializingProcess.toString()
-				if (initializingProcess == pid) {
+				if (initializingProcess == pid && !db.readOnly) {
 					// take over the initialization process
 //					console.log('Taking over initialization of', this.name, 'from process', initializingProcess)
 					initializingProcess = process.pid
@@ -969,7 +974,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		let db = store.db = this.rootDB.openDB(store.dbName || store.name, Object.assign({
 			compression: true,
 			useFloat32: 3, // DECIMAL_ROUND
-			//encoding: 'cbor',
+			//encoder: CBOR,
 			sharedStructuresKey: SHARED_STRUCTURE_KEY,
 		}, options))
 		store.rootDB = this.rootDB
@@ -1487,7 +1492,12 @@ export class Cached extends KeyValued(MakePersisted(Transform), {
 		}
 		let version = event.version
 		if (this.indices) {
-			let entry = db.getEntry(id)
+			let entry
+			try {
+				entry = db.getEntry(id)
+			} catch (error) {
+				console.error(error)
+			}
 			if (entry) {
 				db.cache.expirer.used(entry, -1) // key it pinned in memory
 				if (!entry.abortables) { // if this entry is in a transform and not committed, don't update fromVersion
