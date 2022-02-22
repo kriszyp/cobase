@@ -416,7 +416,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			cache: { clearKeptInterval: 20 },
 			noMemInit: true,
 			//encoder: CBOR,
-			overlappingSync: platform() != 'win32',
+			//overlappingSync: platform() != 'win32',
 			useWritemap: false,
 			//readOnly: true,
 		}
@@ -474,6 +474,8 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 				whenEachProcess.push(addProcess(pid, this).catch(() =>
 					this.cleanupDeadProcessReference(pid, initializingProcess)))
 			}
+			if (this.doesInitialization === false)
+				this.releaseStartTxn()
 			// make sure these are inherited
 			if (initializingProcess || this.doesInitialization === false) {
 				// there is another process handling initialization
@@ -554,6 +556,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		//console.log('comparing db versions', this.name, this.dbVersion, this.expectedDBVersion)
 		if (this.dbVersion == this.expectedDBVersion) {
 			// up to date, all done
+			this.releaseStartTxn()
 		} else {
 			console.log('transform/database version mismatch, reseting db table', this.name, this.expectedDBVersion, this.dbVersion, this.version)
 			this.wasReset = true
@@ -561,6 +564,7 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 			this.startVersion = getNextVersion()
 			const clearDb = !!this.dbVersion // if there was previous state, clear out all entries
 			await this.clearAllData()
+			this.releaseStartTxn()
 			await this.resetAll()
 			this.updateDBVersion()
 		}
