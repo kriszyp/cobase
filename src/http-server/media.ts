@@ -3,6 +3,7 @@ import { bufferStream } from '../util/bufferStream.js'
 import { jsonMediaType } from './JSONStream.js'
 import { textMediaType } from './text.js'
 import { htmlMediaType, sendResourceEditor } from './html.js'
+import { urlEncodedMediaType } from './url-encoded.js'
 
 export const mediaTypes = new Map()
 export function media(connection, next) {
@@ -93,6 +94,7 @@ function serializer(returnValue, connection) {
 mediaTypes.set('application/json', jsonMediaType)
 mediaTypes.set('text/plain', textMediaType)
 mediaTypes.set('text/html', htmlMediaType)
+mediaTypes.set('application/x-www-form-urlencoded', urlEncodedMediaType)
 const EMPTY_MEDIA_PARSER = {
 	parse() {
 	}
