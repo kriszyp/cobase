@@ -461,7 +461,12 @@ const MakePersisted = (Base) => secureAccess(class extends Base {
 		return when(this.getStructureVersion(), structureVersion => {
 			this.expectedDBVersion = (structureVersion || 0) ^ (DB_FORMAT_VERSION << 12)
 			this.rootDB.transactionSync(() => {
-				return new Promise(resolve => this.releaseStartTxn = resolve)
+				console.debug('start txn',this.name, process.pid)
+				return new Promise(resolve => this.releaseStartTxn = () => {
+					console.debug('done txn',this.name, process.pid)
+					resolve(null)
+				})
+
 			})
 			if (isRoot)
 				this.initializeRootDB()

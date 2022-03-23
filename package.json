@@ -35,7 +35,7 @@
   },
   "dependencies": {
     "msgpackr": "^1.5.4",
-    "lmdb": "^2.2.3"
+    "lmdb": "^2.3.0-beta"
   },
   "peerDependencies": {
     "alkali": "^1.1.2"
