@@ -1101,8 +1101,8 @@ const KeyValued = (Base, { versionProperty, valueProperty }) => class extends Ba
 		event.triggers = [ DISCOVERED_SOURCE ]
 		event.source = { constructor: this, id }
 		event.version = getNextVersion()
-
-		this.updated(event, { id, invalidate: false })
+		if (this.initialized)
+			this.updated(event, { id, invalidate: false })
 		if (entry) {
 			entry.value = value
 		} else {
